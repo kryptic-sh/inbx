@@ -11,6 +11,13 @@ authors.workspace = true
 
 [dependencies]
 inbx-core.workspace = true
+inbx-config.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 tokio.workspace = true
+futures-util.workspace = true
+async-imap.workspace = true
+tokio-rustls.workspace = true
+rustls.workspace = true
+webpki-roots.workspace = true
+mail-parser.workspace = true

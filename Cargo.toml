@@ -34,6 +34,23 @@ directories = "5"
 keyring = "3"
 clap = { version = "4", features = ["derive"] }
 tokio = { version = "1", features = ["full"] }
+futures-util = "0.3"
+
+# IMAP / TLS
+async-imap = { version = "0.10", default-features = false, features = ["runtime-tokio"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["tls12", "ring"] }
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+webpki-roots = "0.26"
+
+# Mail parsing
+mail-parser = "0.10"
+
+# Storage
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "sqlite", "macros", "migrate"] }
+
+# CLI helpers
+rpassword = "7"
+gethostname = "0.5"
 
 inbx-core = { path = "crates/inbx-core" }
 inbx-net = { path = "crates/inbx-net" }

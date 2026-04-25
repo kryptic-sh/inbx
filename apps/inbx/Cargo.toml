@@ -16,8 +16,11 @@ path = "src/main.rs"
 [dependencies]
 inbx-core.workspace = true
 inbx-config.workspace = true
+inbx-net.workspace = true
+inbx-store.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+rpassword.workspace = true

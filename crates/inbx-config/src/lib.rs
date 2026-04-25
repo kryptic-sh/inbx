@@ -34,7 +34,7 @@ pub enum TlsMode {
     Starttls,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Account {
     pub name: String,
     pub email: String,

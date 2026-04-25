@@ -11,5 +11,9 @@ authors.workspace = true
 
 [dependencies]
 inbx-core.workspace = true
+inbx-config.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+tokio.workspace = true
+sqlx.workspace = true
+gethostname.workspace = true
