@@ -1,10 +1,12 @@
-use inbx_config::{Account, TlsMode};
+use inbx_config::{Account, AuthMethod, TlsMode};
 use lettre::address::Address as LettreAddress;
 use lettre::address::Envelope;
 use lettre::transport::smtp::AsyncSmtpTransport;
-use lettre::transport::smtp::authentication::Credentials;
+use lettre::transport::smtp::authentication::{Credentials, Mechanism};
 use lettre::{AsyncTransport, Tokio1Executor};
 use mail_parser::MessageParser;
+
+use crate::oauth;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -20,22 +22,40 @@ pub enum Error {
     Parse,
     #[error("invalid address: {0}")]
     InvalidAddress(String),
+    #[error("config: {0}")]
+    Config(#[from] inbx_config::Error),
+    #[error("oauth: {0}")]
+    OAuth(#[from] oauth::Error),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// Send a raw RFC 5322 message via the account's SMTP server.
 /// Envelope is derived from From/To/Cc/Bcc headers in the message itself.
-pub async fn send_message(account: &Account, password: &str, raw: &[u8]) -> Result<()> {
+/// Honors `account.auth` (app password vs OAuth2 XOAUTH2).
+pub async fn send_message(account: &Account, raw: &[u8]) -> Result<()> {
     let envelope = envelope_from_raw(raw)?;
-    let creds = Credentials::new(account.username.clone(), password.to_string());
     let builder = match account.smtp_security {
         TlsMode::Tls => AsyncSmtpTransport::<Tokio1Executor>::relay(&account.smtp_host)?,
         TlsMode::Starttls => {
             AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&account.smtp_host)?
         }
     };
-    let transport = builder.port(account.smtp_port).credentials(creds).build();
+    let mut builder = builder.port(account.smtp_port);
+    builder = match &account.auth {
+        AuthMethod::AppPassword => {
+            let password = inbx_config::load_password(&account.name)?;
+            builder.credentials(Credentials::new(account.username.clone(), password))
+        }
+        AuthMethod::OAuth2 { provider, .. } => {
+            let refresh = inbx_config::load_refresh_token(&account.name)?;
+            let access = oauth::refresh(&account.auth, provider, &refresh).await?;
+            builder
+                .credentials(Credentials::new(account.email.clone(), access))
+                .authentication(vec![Mechanism::Xoauth2])
+        }
+    };
+    let transport = builder.build();
     transport.send_raw(&envelope, raw).await?;
     Ok(())
 }

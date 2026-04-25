@@ -60,6 +60,34 @@ enum Cmd {
         #[command(subcommand)]
         action: ContactsCmd,
     },
+    /// OAuth2 token management.
+    OAuth {
+        #[command(subcommand)]
+        action: OAuthCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum OAuthCmd {
+    /// Run the auth-code flow and save a refresh token to the keyring.
+    Login {
+        #[arg(long)]
+        account: Option<String>,
+    },
+    /// Persist OAuth client credentials onto an account.
+    SetClient {
+        #[arg(long)]
+        account: Option<String>,
+        #[arg(long)]
+        client_id: String,
+        #[arg(long)]
+        client_secret: Option<String>,
+    },
+    /// Forget the saved refresh token.
+    Logout {
+        #[arg(long)]
+        account: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -103,7 +131,11 @@ enum ContactsCmd {
 #[derive(Subcommand)]
 enum AccountCmd {
     /// Interactive add. Stores password in OS keyring.
-    Add,
+    Add {
+        /// Configure account for OAuth2 instead of an app password.
+        #[arg(long, value_parser = ["gmail", "microsoft"])]
+        oauth: Option<String>,
+    },
     List,
     /// Show folders cached locally for an account.
     Folders {
@@ -125,7 +157,7 @@ async fn main() -> Result<()> {
     match cli.command {
         Cmd::Config => cmd_config(),
         Cmd::Accounts { action } => match action {
-            AccountCmd::Add => cmd_accounts_add(),
+            AccountCmd::Add { oauth } => cmd_accounts_add(oauth),
             AccountCmd::List => cmd_accounts_list(),
             AccountCmd::Folders { account } => cmd_accounts_folders(account).await,
         },
@@ -142,7 +174,60 @@ async fn main() -> Result<()> {
         Cmd::Send { account, no_save } => cmd_send(account, no_save).await,
         Cmd::Tui { account } => cmd_tui(account).await,
         Cmd::Contacts { action } => cmd_contacts(action).await,
+        Cmd::OAuth { action } => cmd_oauth(action).await,
     }
+}
+
+async fn cmd_oauth(action: OAuthCmd) -> Result<()> {
+    let cfg = inbx_config::load()?;
+    match action {
+        OAuthCmd::Login { account } => {
+            let acct = pick_account(&cfg, account.as_deref())?.clone();
+            let provider = match &acct.auth {
+                inbx_config::AuthMethod::OAuth2 { provider, .. } => provider.clone(),
+                _ => bail!(
+                    "{} is not configured for OAuth2; set auth.kind = oauth2 in config.toml",
+                    acct.name
+                ),
+            };
+            let token = inbx_net::oauth_login(&acct.auth, &provider).await?;
+            inbx_config::store_refresh_token(&acct.name, &token.refresh)?;
+            println!(
+                "saved refresh token for {} (access token expires in {}s)",
+                acct.name, token.expires_in
+            );
+        }
+        OAuthCmd::SetClient {
+            account,
+            client_id,
+            client_secret,
+        } => {
+            let mut cfg = cfg;
+            let name = pick_account(&cfg, account.as_deref())?.name.clone();
+            let acct = cfg.accounts.iter_mut().find(|a| a.name == name).unwrap();
+            match &mut acct.auth {
+                inbx_config::AuthMethod::OAuth2 {
+                    client_id: c,
+                    client_secret: s,
+                    ..
+                } => {
+                    *c = Some(client_id);
+                    *s = client_secret;
+                }
+                other => {
+                    bail!("{} is not OAuth2 (auth = {other:?})", acct.name);
+                }
+            }
+            inbx_config::save(&cfg)?;
+            println!("updated OAuth client for {}", name);
+        }
+        OAuthCmd::Logout { account } => {
+            let acct = pick_account(&cfg, account.as_deref())?;
+            inbx_config::delete_refresh_token(&acct.name)?;
+            println!("removed refresh token for {}", acct.name);
+        }
+    }
+    Ok(())
 }
 
 async fn cmd_contacts(action: ContactsCmd) -> Result<()> {
@@ -263,7 +348,7 @@ fn cmd_accounts_list() -> Result<()> {
     Ok(())
 }
 
-fn cmd_accounts_add() -> Result<()> {
+fn cmd_accounts_add(oauth: Option<String>) -> Result<()> {
     let mut cfg = inbx_config::load()?;
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
@@ -274,7 +359,22 @@ fn cmd_accounts_add() -> Result<()> {
         bail!("account {name} already exists");
     }
     let email = prompt(&mut lock, &mut stdout, "email: ")?;
-    let imap_host = prompt(&mut lock, &mut stdout, "imap host: ")?;
+
+    // Provider-aware host defaults when OAuth is selected.
+    let (default_imap_host, default_smtp_host) = match oauth.as_deref() {
+        Some("gmail") => ("imap.gmail.com", "smtp.gmail.com"),
+        Some("microsoft") => ("outlook.office365.com", "smtp.office365.com"),
+        _ => ("", ""),
+    };
+    let imap_host_msg = if default_imap_host.is_empty() {
+        "imap host: ".to_string()
+    } else {
+        format!("imap host [{default_imap_host}]: ")
+    };
+    let mut imap_host = prompt(&mut lock, &mut stdout, &imap_host_msg)?;
+    if imap_host.is_empty() {
+        imap_host = default_imap_host.to_string();
+    }
     let imap_security = prompt_tls(&mut lock, &mut stdout, "imap security [tls/starttls]: ")?;
     let imap_port_default = match imap_security {
         TlsMode::Tls => 993,
@@ -286,7 +386,15 @@ fn cmd_accounts_add() -> Result<()> {
         &format!("imap port [{imap_port_default}]: "),
         imap_port_default,
     )?;
-    let smtp_host = prompt(&mut lock, &mut stdout, "smtp host: ")?;
+    let smtp_host_msg = if default_smtp_host.is_empty() {
+        "smtp host: ".to_string()
+    } else {
+        format!("smtp host [{default_smtp_host}]: ")
+    };
+    let mut smtp_host = prompt(&mut lock, &mut stdout, &smtp_host_msg)?;
+    if smtp_host.is_empty() {
+        smtp_host = default_smtp_host.to_string();
+    }
     let smtp_security = prompt_tls(&mut lock, &mut stdout, "smtp security [tls/starttls]: ")?;
     let smtp_port_default = match smtp_security {
         TlsMode::Tls => 465,
@@ -298,11 +406,53 @@ fn cmd_accounts_add() -> Result<()> {
         &format!("smtp port [{smtp_port_default}]: "),
         smtp_port_default,
     )?;
-    let username = prompt(&mut lock, &mut stdout, "username: ")?;
-    let password =
-        rpassword::prompt_password("password (app password): ").context("read password")?;
+    let username_default = email.clone();
+    let username_msg = format!("username [{username_default}]: ");
+    let mut username = prompt(&mut lock, &mut stdout, &username_msg)?;
+    if username.is_empty() {
+        username = username_default;
+    }
 
-    inbx_config::store_password(&name, &password)?;
+    let auth = match oauth.as_deref() {
+        Some("gmail") => {
+            let client_id = prompt(&mut lock, &mut stdout, "oauth client_id: ")?;
+            let client_secret = prompt(
+                &mut lock,
+                &mut stdout,
+                "oauth client_secret (blank for none): ",
+            )?;
+            inbx_config::AuthMethod::OAuth2 {
+                provider: inbx_config::OAuthProvider::Gmail,
+                client_id: (!client_id.is_empty()).then_some(client_id),
+                client_secret: (!client_secret.is_empty()).then_some(client_secret),
+            }
+        }
+        Some("microsoft") => {
+            let tenant = prompt(&mut lock, &mut stdout, "ms tenant [common]: ")?;
+            let tenant = if tenant.is_empty() {
+                "common".into()
+            } else {
+                tenant
+            };
+            let client_id = prompt(&mut lock, &mut stdout, "oauth client_id: ")?;
+            let client_secret = prompt(
+                &mut lock,
+                &mut stdout,
+                "oauth client_secret (blank for none): ",
+            )?;
+            inbx_config::AuthMethod::OAuth2 {
+                provider: inbx_config::OAuthProvider::Microsoft { tenant },
+                client_id: (!client_id.is_empty()).then_some(client_id),
+                client_secret: (!client_secret.is_empty()).then_some(client_secret),
+            }
+        }
+        _ => {
+            let password =
+                rpassword::prompt_password("password (app password): ").context("read password")?;
+            inbx_config::store_password(&name, &password)?;
+            inbx_config::AuthMethod::AppPassword
+        }
+    };
 
     cfg.accounts.push(Account {
         name: name.clone(),
@@ -314,9 +464,14 @@ fn cmd_accounts_add() -> Result<()> {
         smtp_port,
         smtp_security,
         username,
+        auth,
     });
     inbx_config::save(&cfg)?;
-    println!("added account {name}; password stored in keyring");
+    if oauth.is_some() {
+        println!("added OAuth account {name}; run `inbx oauth login --account {name}`");
+    } else {
+        println!("added account {name}; password stored in keyring");
+    }
     Ok(())
 }
 
@@ -346,11 +501,9 @@ async fn cmd_accounts_folders(account: Option<String>) -> Result<()> {
 async fn cmd_fetch(account: Option<String>, fetch_bodies: bool, body_limit: u32) -> Result<()> {
     let cfg = inbx_config::load()?;
     let acct = pick_account(&cfg, account.as_deref())?.clone();
-    let password = inbx_config::load_password(&acct.name)
-        .with_context(|| format!("no password in keyring for {}", acct.name))?;
 
     tracing::info!(account = %acct.name, "connecting");
-    let mut session = inbx_net::connect_imap(&acct, &password).await?;
+    let mut session = inbx_net::connect_imap(&acct).await?;
     let store = inbx_store::Store::open(&acct.name).await?;
 
     tracing::info!("listing folders");
@@ -460,8 +613,6 @@ async fn cmd_send(account: Option<String>, no_save: bool) -> Result<()> {
 
     let cfg = inbx_config::load()?;
     let acct = pick_account(&cfg, account.as_deref())?.clone();
-    let password = inbx_config::load_password(&acct.name)
-        .with_context(|| format!("no password in keyring for {}", acct.name))?;
 
     let mut raw = Vec::new();
     std::io::stdin()
@@ -474,7 +625,7 @@ async fn cmd_send(account: Option<String>, no_save: bool) -> Result<()> {
     let raw = normalize_crlf(raw);
 
     tracing::info!(account = %acct.name, bytes = raw.len(), "sending");
-    inbx_net::send_message(&acct, &password, &raw).await?;
+    inbx_net::send_message(&acct, &raw).await?;
     println!("sent");
 
     if let Ok(contacts) = inbx_contacts::ContactsStore::open(&acct.name).await {
@@ -486,7 +637,7 @@ async fn cmd_send(account: Option<String>, no_save: bool) -> Result<()> {
     }
 
     tracing::info!("appending to Sent folder");
-    let mut session = inbx_net::connect_imap(&acct, &password).await?;
+    let mut session = inbx_net::connect_imap(&acct).await?;
     let folders = inbx_net::list_folders(&mut session).await?;
     let sent = inbx_net::find_sent_folder(&folders);
     match sent {

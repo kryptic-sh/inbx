@@ -34,6 +34,38 @@ pub enum TlsMode {
     Starttls,
 }
 
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AuthMethod {
+    /// Plain LOGIN / AUTH PLAIN with a password from the keyring.
+    #[default]
+    AppPassword,
+    /// XOAUTH2 with a refresh token from the keyring.
+    OAuth2 {
+        provider: OAuthProvider,
+        /// OAuth client ID. Required when no built-in default exists.
+        #[serde(default)]
+        client_id: Option<String>,
+        /// OAuth client secret (treat as public for desktop apps + PKCE).
+        #[serde(default)]
+        client_secret: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OAuthProvider {
+    Gmail,
+    Microsoft {
+        #[serde(default = "default_ms_tenant")]
+        tenant: String,
+    },
+}
+
+fn default_ms_tenant() -> String {
+    "common".into()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Account {
     pub name: String,
@@ -49,6 +81,8 @@ pub struct Account {
     #[serde(default)]
     pub smtp_security: TlsMode,
     pub username: String,
+    #[serde(default)]
+    pub auth: AuthMethod,
 }
 
 fn default_imap_port() -> u16 {
@@ -91,6 +125,7 @@ pub fn save(cfg: &Config) -> Result<()> {
 }
 
 const KEYRING_SERVICE: &str = "inbx";
+const KEYRING_SERVICE_REFRESH: &str = "inbx-refresh";
 
 pub fn store_password(account: &str, password: &str) -> Result<()> {
     let entry = keyring::Entry::new(KEYRING_SERVICE, account)?;
@@ -105,6 +140,23 @@ pub fn load_password(account: &str) -> Result<String> {
 
 pub fn delete_password(account: &str) -> Result<()> {
     let entry = keyring::Entry::new(KEYRING_SERVICE, account)?;
+    entry.delete_credential()?;
+    Ok(())
+}
+
+pub fn store_refresh_token(account: &str, token: &str) -> Result<()> {
+    let entry = keyring::Entry::new(KEYRING_SERVICE_REFRESH, account)?;
+    entry.set_password(token)?;
+    Ok(())
+}
+
+pub fn load_refresh_token(account: &str) -> Result<String> {
+    let entry = keyring::Entry::new(KEYRING_SERVICE_REFRESH, account)?;
+    Ok(entry.get_password()?)
+}
+
+pub fn delete_refresh_token(account: &str) -> Result<()> {
+    let entry = keyring::Entry::new(KEYRING_SERVICE_REFRESH, account)?;
     entry.delete_credential()?;
     Ok(())
 }
@@ -126,6 +178,7 @@ mod tests {
                 smtp_port: 465,
                 smtp_security: TlsMode::Tls,
                 username: "me".into(),
+                auth: AuthMethod::AppPassword,
             }],
         };
         let raw = toml::to_string_pretty(&cfg).unwrap();

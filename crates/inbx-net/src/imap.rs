@@ -1,10 +1,13 @@
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use async_imap::Authenticator;
 use async_imap::Session;
 use async_imap::imap_proto::types::NameAttribute;
 use futures_util::StreamExt;
-use inbx_config::{Account, TlsMode};
+use inbx_config::{Account, AuthMethod, TlsMode};
+
+use crate::oauth;
 use rustls::pki_types::ServerName;
 use rustls::{ClientConfig, RootCertStore};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufStream};
@@ -28,6 +31,10 @@ pub enum Error {
     StarttlsUnsupported,
     #[error("login failed: {0}")]
     Login(String),
+    #[error("config: {0}")]
+    Config(#[from] inbx_config::Error),
+    #[error("oauth: {0}")]
+    OAuth(#[from] oauth::Error),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -79,11 +86,10 @@ async fn do_starttls(tcp: TcpStream) -> Result<TcpStream> {
     Ok(buf.into_inner())
 }
 
-/// Open an authenticated IMAP session honoring the account's TLS mode.
-///
-/// STARTTLS path is hard-fail: aborts on NO/BAD or on connection drop.
-/// Never falls back to plaintext.
-pub async fn connect_imap(account: &Account, password: &str) -> Result<ImapSession> {
+/// Open an authenticated IMAP session honoring the account's TLS mode and
+/// auth method. Resolves credentials from the OS keyring (app password) or
+/// performs an OAuth2 refresh and authenticates via XOAUTH2.
+pub async fn connect_imap(account: &Account) -> Result<ImapSession> {
     let addr = (account.imap_host.as_str(), account.imap_port);
 
     let tls_stream = match account.imap_security {
@@ -99,11 +105,51 @@ pub async fn connect_imap(account: &Account, password: &str) -> Result<ImapSessi
     };
 
     let client = async_imap::Client::new(tls_stream);
-    let session = client
-        .login(&account.username, password)
-        .await
-        .map_err(|(e, _)| Error::Login(e.to_string()))?;
+    let session = match &account.auth {
+        AuthMethod::AppPassword => {
+            let password = inbx_config::load_password(&account.name)?;
+            client
+                .login(&account.username, &password)
+                .await
+                .map_err(|(e, _)| Error::Login(e.to_string()))?
+        }
+        AuthMethod::OAuth2 { provider, .. } => {
+            let refresh = inbx_config::load_refresh_token(&account.name)?;
+            let access = oauth::refresh(&account.auth, provider, &refresh).await?;
+            let auth = Xoauth2Authenticator::new(&account.email, &access);
+            client
+                .authenticate("XOAUTH2", auth)
+                .await
+                .map_err(|(e, _)| Error::Login(e.to_string()))?
+        }
+    };
     Ok(session)
+}
+
+struct Xoauth2Authenticator {
+    sasl: String,
+    state: u8,
+}
+
+impl Xoauth2Authenticator {
+    fn new(email: &str, access_token: &str) -> Self {
+        let sasl = format!("user={email}\x01auth=Bearer {access_token}\x01\x01");
+        Self { sasl, state: 0 }
+    }
+}
+
+impl Authenticator for Xoauth2Authenticator {
+    type Response = Vec<u8>;
+    fn process(&mut self, _challenge: &[u8]) -> Self::Response {
+        let out = if self.state == 0 {
+            self.sasl.clone().into_bytes()
+        } else {
+            // Server returned an error JSON challenge; ack with empty.
+            Vec::new()
+        };
+        self.state += 1;
+        out
+    }
 }
 
 #[derive(Debug, Clone)]
