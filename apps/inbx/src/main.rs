@@ -150,6 +150,18 @@ enum Cmd {
         #[command(subcommand)]
         action: OutboxCmd,
     },
+    /// Sugar over `flag` for common verbs.
+    Mark {
+        #[arg(long)]
+        account: Option<String>,
+        #[arg(long, default_value = "INBOX")]
+        folder: String,
+        /// One of: read, unread, star, unstar, trash.
+        #[arg(value_parser = ["read", "unread", "star", "unstar", "trash"])]
+        verb: String,
+        #[arg(num_args = 1.., required = true)]
+        uid: Vec<u32>,
+    },
     /// EXPUNGE messages flagged \Deleted in a folder.
     Expunge {
         #[arg(long)]
@@ -555,6 +567,14 @@ enum AccountCmd {
         #[arg(long)]
         account: Option<String>,
     },
+    /// Remove the account from config.toml and clear its keyring entries.
+    Remove {
+        #[arg(long)]
+        account: Option<String>,
+        /// Also delete the account's data directory (Maildir + SQLite).
+        #[arg(long)]
+        purge: bool,
+    },
 }
 
 #[tokio::main]
@@ -574,6 +594,7 @@ async fn main() -> Result<()> {
             AccountCmd::List => cmd_accounts_list(),
             AccountCmd::Test { account } => cmd_accounts_test(account).await,
             AccountCmd::Folders { account } => cmd_accounts_folders(account).await,
+            AccountCmd::Remove { account, purge } => cmd_accounts_remove(account, purge),
         },
         Cmd::Fetch {
             account,
@@ -608,6 +629,12 @@ async fn main() -> Result<()> {
         Cmd::Template { action } => cmd_template(action).await,
         Cmd::Watch { account, bodies } => cmd_watch(account, bodies).await,
         Cmd::Outbox { action } => cmd_outbox(action).await,
+        Cmd::Mark {
+            account,
+            folder,
+            verb,
+            uid,
+        } => cmd_mark(account, folder, verb, uid).await,
         Cmd::Expunge { account, folder } => cmd_expunge(account, folder).await,
         Cmd::Mv {
             account,
@@ -823,6 +850,10 @@ async fn cmd_watch(account: Option<String>, bodies: bool) -> Result<()> {
     let cfg = inbx_config::load()?;
     let acct_name = pick_account(&cfg, account.as_deref())?.name.clone();
     loop {
+        // Drain outbox before each fetch so retries piggyback on the connect.
+        if let Err(e) = drain_outbox_silent(&acct_name).await {
+            tracing::warn!(%e, "outbox drain failed; will retry next cycle");
+        }
         if let Err(e) = cmd_fetch(Some(acct_name.clone()), "INBOX".into(), bodies, 200, true).await
         {
             tracing::warn!(%e, "fetch failed; backing off 30s");
@@ -845,6 +876,31 @@ async fn cmd_watch(account: Option<String>, bodies: bool) -> Result<()> {
             }
         }
     }
+}
+
+/// Best-effort drain — only attempts due rows; failures bubble back into the
+/// outbox row's exponential backoff. Caller logs at warn level if the whole
+/// drain itself errors (DB unreachable, account vanished, etc.).
+async fn drain_outbox_silent(acct_name: &str) -> Result<()> {
+    let cfg = inbx_config::load()?;
+    let Some(acct) = cfg.accounts.iter().find(|a| a.name == acct_name).cloned() else {
+        return Ok(());
+    };
+    let store = inbx_store::Store::open(&acct.name).await?;
+    let due = store.outbox_due().await?;
+    for r in due {
+        match inbx_net::send_message(&acct, &r.raw).await {
+            Ok(()) => {
+                store.outbox_delete(r.id).await?;
+                tracing::info!(id = r.id, "outbox: sent");
+            }
+            Err(e) => {
+                store.outbox_record_failure(r.id, &e.to_string()).await?;
+                tracing::warn!(id = r.id, %e, "outbox: still failing");
+            }
+        }
+    }
+    Ok(())
 }
 
 async fn cmd_outbox(action: OutboxCmd) -> Result<()> {
@@ -891,6 +947,29 @@ async fn cmd_outbox(action: OutboxCmd) -> Result<()> {
             println!("removed {id}");
         }
     }
+    Ok(())
+}
+
+async fn cmd_mark(
+    account: Option<String>,
+    folder: String,
+    verb: String,
+    uids: Vec<u32>,
+) -> Result<()> {
+    let cfg = inbx_config::load()?;
+    let acct = pick_account(&cfg, account.as_deref())?.clone();
+    let mut session = inbx_net::connect_imap(&acct).await?;
+    let (op, flags) = match verb.as_str() {
+        "read" => ("+FLAGS", "\\Seen"),
+        "unread" => ("-FLAGS", "\\Seen"),
+        "star" => ("+FLAGS", "\\Flagged"),
+        "unstar" => ("-FLAGS", "\\Flagged"),
+        "trash" => ("+FLAGS", "\\Deleted"),
+        _ => unreachable!(),
+    };
+    inbx_net::store_flags(&mut session, &folder, &uids, op, flags).await?;
+    let _ = session.logout().await;
+    println!("{verb}: {} message(s) in {folder}", uids.len());
     Ok(())
 }
 
@@ -2043,6 +2122,24 @@ fn cmd_accounts_add(oauth: Option<String>) -> Result<()> {
     } else {
         println!("added account {name}; password stored in keyring");
     }
+    Ok(())
+}
+
+fn cmd_accounts_remove(account: Option<String>, purge: bool) -> Result<()> {
+    let mut cfg = inbx_config::load()?;
+    let name = pick_account(&cfg, account.as_deref())?.name.clone();
+    cfg.accounts.retain(|a| a.name != name);
+    inbx_config::save(&cfg)?;
+    let _ = inbx_config::delete_password(&name);
+    let _ = inbx_config::delete_refresh_token(&name);
+    if purge
+        && let Ok(dir) = inbx_config::data_dir().map(|d| d.join(&name))
+        && dir.exists()
+    {
+        std::fs::remove_dir_all(&dir)?;
+        println!("purged {}", dir.display());
+    }
+    println!("removed {name}");
     Ok(())
 }
 
