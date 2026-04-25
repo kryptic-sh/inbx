@@ -1,6 +1,7 @@
 pub mod graph;
 pub mod idle;
 pub mod imap;
+pub mod jmap;
 pub mod oauth;
 pub mod sieve;
 pub mod smtp;

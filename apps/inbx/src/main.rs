@@ -73,6 +73,11 @@ enum Cmd {
         #[command(subcommand)]
         action: GraphCmd,
     },
+    /// JMAP (Fastmail / Stalwart) operations.
+    Jmap {
+        #[command(subcommand)]
+        action: JmapCmd,
+    },
     /// Full-text search across the local index.
     Search {
         #[arg(long)]
@@ -242,6 +247,34 @@ enum IcalCmd {
 }
 
 #[derive(Subcommand)]
+enum JmapCmd {
+    /// Show primary mailboxes from the JMAP session.
+    Folders {
+        #[arg(long)]
+        account: Option<String>,
+        /// Session URL (e.g. https://api.fastmail.com/jmap/session).
+        #[arg(long)]
+        session: String,
+    },
+    /// Pull recent Inbox headers via JMAP and merge into the local index.
+    Fetch {
+        #[arg(long)]
+        account: Option<String>,
+        #[arg(long)]
+        session: String,
+        #[arg(long, default_value_t = 100)]
+        limit: u32,
+    },
+    /// Send a raw RFC 5322 message via Email/import + EmailSubmission/set.
+    Send {
+        #[arg(long)]
+        account: Option<String>,
+        #[arg(long)]
+        session: String,
+    },
+}
+
+#[derive(Subcommand)]
 enum GraphCmd {
     /// List Graph mail folders.
     Folders {
@@ -388,6 +421,7 @@ async fn main() -> Result<()> {
         Cmd::Contacts { action } => cmd_contacts(action).await,
         Cmd::OAuth { action } => cmd_oauth(action).await,
         Cmd::Graph { action } => cmd_graph(action).await,
+        Cmd::Jmap { action } => cmd_jmap(action).await,
         Cmd::Search {
             account,
             query,
@@ -975,6 +1009,113 @@ async fn index_message(
         .index_for_search(folder, uid, uidvalidity, subject, &from, &to, &body)
         .await?;
     Ok(())
+}
+
+async fn cmd_jmap(action: JmapCmd) -> Result<()> {
+    use std::io::Read as _;
+    let cfg = inbx_config::load()?;
+    match action {
+        JmapCmd::Folders { account, session } => {
+            let acct = pick_account(&cfg, account.as_deref())?;
+            let client = inbx_net::jmap::JmapClient::connect(acct, &session).await?;
+            for m in client.list_mailboxes().await? {
+                println!(
+                    "{:>5}u/{:<5}t  {:<10}  {}",
+                    m.unread,
+                    m.total,
+                    m.role.unwrap_or_else(|| "-".into()),
+                    m.name
+                );
+            }
+        }
+        JmapCmd::Fetch {
+            account,
+            session,
+            limit,
+        } => {
+            let acct = pick_account(&cfg, account.as_deref())?;
+            let client = inbx_net::jmap::JmapClient::connect(acct, &session).await?;
+            let store = inbx_store::Store::open(&acct.name).await?;
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            store
+                .upsert_folder(&inbx_store::FolderRow {
+                    name: "Inbox".into(),
+                    delim: None,
+                    special_use: Some("\\Inbox".into()),
+                    attrs: None,
+                    uidvalidity: Some(0),
+                    uidnext: None,
+                })
+                .await?;
+            let emails = client.fetch_inbox_headers(limit).await?;
+            for (i, e) in emails.iter().enumerate() {
+                let from = e
+                    .from
+                    .as_ref()
+                    .and_then(|v| v.first())
+                    .map(|a| a.formatted());
+                let to = e.to.as_ref().map(|v| {
+                    v.iter()
+                        .map(|a| a.formatted())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                });
+                let date_unix = e.received_at.as_deref().and_then(parse_iso8601);
+                store
+                    .upsert_message(&inbx_store::MessageRow {
+                        folder: "Inbox".into(),
+                        uid: jmap_uid(&e.id, i),
+                        uidvalidity: 0,
+                        message_id: e.message_id.as_ref().and_then(|v| v.first()).cloned(),
+                        subject: e.subject.clone(),
+                        from_addr: from,
+                        to_addrs: to,
+                        date_unix,
+                        flags: if e.is_seen() {
+                            "\\Seen".into()
+                        } else {
+                            String::new()
+                        },
+                        maildir_path: None,
+                        headers_only: 1,
+                        fetched_at_unix: now,
+                        in_reply_to: None,
+                        refs: None,
+                        thread_id: None,
+                    })
+                    .await?;
+            }
+            println!("Inbox: {} JMAP emails indexed", emails.len());
+        }
+        JmapCmd::Send { account, session } => {
+            let acct = pick_account(&cfg, account.as_deref())?;
+            let client = inbx_net::jmap::JmapClient::connect(acct, &session).await?;
+            let mut raw = Vec::new();
+            std::io::stdin()
+                .read_to_end(&mut raw)
+                .context("read stdin")?;
+            if raw.is_empty() {
+                bail!("empty input on stdin");
+            }
+            let raw = normalize_crlf(raw);
+            client.send_mime(&raw).await?;
+            println!("sent via JMAP");
+        }
+    }
+    Ok(())
+}
+
+fn jmap_uid(id: &str, idx: usize) -> i64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in id.as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    let h = (h ^ (idx as u64)) & 0x7fff_ffff_ffff_ffff;
+    h as i64
 }
 
 async fn cmd_graph(action: GraphCmd) -> Result<()> {
