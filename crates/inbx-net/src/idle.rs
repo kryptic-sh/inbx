@@ -26,8 +26,13 @@ pub enum IdleEvent {
 }
 
 pub async fn wait_for_new(account: &Account) -> Result<IdleEvent, imap::Error> {
+    wait_for_new_in(account, "INBOX").await
+}
+
+/// Same as `wait_for_new` but watches an explicit folder.
+pub async fn wait_for_new_in(account: &Account, folder: &str) -> Result<IdleEvent, imap::Error> {
     let mut session = imap::connect_imap(account).await?;
-    session.select("INBOX").await?;
+    session.select(folder).await?;
     let mut handle = session.idle();
     handle.init().await?;
     let (fut, _stop) = handle.wait_with_timeout(IDLE_TIMEOUT);

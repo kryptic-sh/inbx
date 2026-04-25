@@ -141,9 +141,16 @@ enum Cmd {
     Watch {
         #[arg(long)]
         account: Option<String>,
+        #[arg(long, default_value = "INBOX")]
+        folder: String,
         /// Also download bodies for each new batch.
         #[arg(long)]
         bodies: bool,
+    },
+    /// Print shell completion script (bash | zsh | fish | elvish | powershell).
+    Completion {
+        #[arg(value_parser = clap::value_parser!(clap_complete::Shell))]
+        shell: clap_complete::Shell,
     },
     /// Outbound queue for offline / failed sends.
     Outbox {
@@ -627,7 +634,17 @@ async fn main() -> Result<()> {
         Cmd::Ical { action } => cmd_ical(action).await,
         Cmd::Draft { action } => cmd_draft(action).await,
         Cmd::Template { action } => cmd_template(action).await,
-        Cmd::Watch { account, bodies } => cmd_watch(account, bodies).await,
+        Cmd::Watch {
+            account,
+            folder,
+            bodies,
+        } => cmd_watch(account, folder, bodies).await,
+        Cmd::Completion { shell } => {
+            use clap::CommandFactory;
+            let mut cmd = Cli::command();
+            clap_complete::generate(shell, &mut cmd, "inbx", &mut std::io::stdout());
+            Ok(())
+        }
         Cmd::Outbox { action } => cmd_outbox(action).await,
         Cmd::Mark {
             account,
@@ -846,7 +863,7 @@ async fn cmd_draft_save(account: Option<String>) -> Result<()> {
     Ok(())
 }
 
-async fn cmd_watch(account: Option<String>, bodies: bool) -> Result<()> {
+async fn cmd_watch(account: Option<String>, folder: String, bodies: bool) -> Result<()> {
     let cfg = inbx_config::load()?;
     let acct_name = pick_account(&cfg, account.as_deref())?.name.clone();
     loop {
@@ -854,7 +871,7 @@ async fn cmd_watch(account: Option<String>, bodies: bool) -> Result<()> {
         if let Err(e) = drain_outbox_silent(&acct_name).await {
             tracing::warn!(%e, "outbox drain failed; will retry next cycle");
         }
-        if let Err(e) = cmd_fetch(Some(acct_name.clone()), "INBOX".into(), bodies, 200, true).await
+        if let Err(e) = cmd_fetch(Some(acct_name.clone()), folder.clone(), bodies, 200, true).await
         {
             tracing::warn!(%e, "fetch failed; backing off 30s");
             tokio::time::sleep(std::time::Duration::from_secs(30)).await;
@@ -863,7 +880,7 @@ async fn cmd_watch(account: Option<String>, bodies: bool) -> Result<()> {
         // Refresh acct from disk in case config changed.
         let cfg = inbx_config::load()?;
         let acct = pick_account(&cfg, Some(&acct_name))?.clone();
-        match inbx_net::idle::wait_for_new(&acct).await {
+        match inbx_net::idle::wait_for_new_in(&acct, &folder).await {
             Ok(inbx_net::idle::IdleEvent::NewData) => {
                 tracing::info!("new data signal");
             }

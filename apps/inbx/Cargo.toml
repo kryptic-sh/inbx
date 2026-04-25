@@ -27,6 +27,7 @@ mail-parser.workspace = true
 notify-rust.workspace = true
 anyhow.workspace = true
 clap.workspace = true
+clap_complete.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
