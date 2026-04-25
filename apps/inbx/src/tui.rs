@@ -39,6 +39,7 @@ struct App {
     body: String,
     status: String,
     composer: Option<Composer>,
+    show_help: bool,
 }
 
 impl App {
@@ -62,6 +63,7 @@ impl App {
             body: String::new(),
             status: String::new(),
             composer: None,
+            show_help: false,
         };
         app.reload_messages().await?;
         Ok(app)
@@ -366,6 +368,15 @@ async fn event_loop(term: &mut Term, app: &mut App) -> Result<()> {
 
 /// Returns true to quit the TUI.
 async fn handle_list_key(app: &mut App, key: KeyEvent) -> Result<bool> {
+    if app.show_help {
+        // Any key dismisses the help overlay.
+        app.show_help = false;
+        return Ok(false);
+    }
+    if key.code == KeyCode::Char('?') {
+        app.show_help = true;
+        return Ok(false);
+    }
     if key.code == KeyCode::Char('q')
         || (key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))
     {
@@ -541,7 +552,57 @@ fn draw(f: &mut ratatui::Frame, app: &App) {
     draw_folders(f, app, body[0]);
     draw_messages(f, app, body[1]);
     draw_preview(f, app, body[2]);
+    if app.show_help {
+        draw_help(f, outer[0]);
+    }
     draw_status(f, app, outer[1]);
+}
+
+fn draw_help(f: &mut ratatui::Frame, area: Rect) {
+    let lines = [
+        "  navigation",
+        "    j / k       — down / up",
+        "    h / l, Tab  — switch pane",
+        "    g g         — top of list",
+        "    G           — bottom of list",
+        "    Enter       — open folder / preview",
+        "",
+        "  message ops (messages pane)",
+        "    s           — toggle \\Seen",
+        "    *           — toggle \\Flagged",
+        "    d           — toggle \\Deleted",
+        "    e           — EXPUNGE folder",
+        "",
+        "  compose",
+        "    c           — new draft",
+        "    r / R       — reply / reply-all",
+        "    f           — forward",
+        "",
+        "  composer",
+        "    Tab / S-Tab — cycle field",
+        "    Ctrl-S      — send",
+        "    Ctrl-D      — save draft to server",
+        "    Ctrl-Q      — discard",
+        "",
+        "  global",
+        "    ?           — toggle this help",
+        "    q / Ctrl-C  — quit",
+    ];
+    let height = (lines.len() as u16 + 2).min(area.height);
+    let width = 56u16.min(area.width);
+    let x = area.x + area.width.saturating_sub(width) / 2;
+    let y = area.y + area.height.saturating_sub(height) / 2;
+    let popup = Rect {
+        x,
+        y,
+        width,
+        height,
+    };
+    f.render_widget(Clear, popup);
+    let para = Paragraph::new(lines.join("\n"))
+        .block(pane_block("help (any key dismisses)", true))
+        .wrap(Wrap { trim: false });
+    f.render_widget(para, popup);
 }
 
 /// Process-wide theme handle. The single `App::run` sets it before the
@@ -635,7 +696,7 @@ fn draw_status(f: &mut ratatui::Frame, app: &App, area: Rect) {
         Pane::Preview => "preview",
     };
     let text = format!(
-        " [{pane}]  q quit · h/l pane · j/k move · gg/G top/bottom · Enter open  {}",
+        " [{pane}]  ? help · q quit · h/l pane · j/k move · Enter open  {}",
         app.status
     );
     let t = theme();
