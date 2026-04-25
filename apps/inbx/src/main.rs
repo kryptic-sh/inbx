@@ -32,6 +32,9 @@ enum Cmd {
         /// Cap on bodies to download per fetch when `--bodies` is set.
         #[arg(long, default_value_t = 200)]
         body_limit: u32,
+        /// Fire a desktop notification for new mail.
+        #[arg(long)]
+        notify: bool,
     },
     /// List recent messages from local index.
     List {
@@ -276,7 +279,8 @@ async fn main() -> Result<()> {
             account,
             bodies,
             body_limit,
-        } => cmd_fetch(account, bodies, body_limit).await,
+            notify,
+        } => cmd_fetch(account, bodies, body_limit, notify).await,
         Cmd::List {
             account,
             folder,
@@ -1193,7 +1197,12 @@ async fn cmd_accounts_folders(account: Option<String>) -> Result<()> {
     Ok(())
 }
 
-async fn cmd_fetch(account: Option<String>, fetch_bodies: bool, body_limit: u32) -> Result<()> {
+async fn cmd_fetch(
+    account: Option<String>,
+    fetch_bodies: bool,
+    body_limit: u32,
+    notify: bool,
+) -> Result<()> {
     let cfg = inbx_config::load()?;
     let acct = pick_account(&cfg, account.as_deref())?.clone();
 
@@ -1230,6 +1239,10 @@ async fn cmd_fetch(account: Option<String>, fetch_bodies: bool, body_limit: u32)
         tracing::warn!(prev, new = uidvalidity, "UIDVALIDITY changed; wiping INBOX");
         store.wipe_folder_messages("INBOX").await?;
     }
+    let pre_max = store
+        .folder_max_uid("INBOX", uidvalidity as i64)
+        .await?
+        .unwrap_or(0);
     store
         .upsert_folder(&inbx_store::FolderRow {
             name: "INBOX".into(),
@@ -1262,6 +1275,32 @@ async fn cmd_fetch(account: Option<String>, fetch_bodies: bool, body_limit: u32)
             .await?;
     }
     println!("INBOX: {} messages indexed", rows.len());
+
+    let new_count = rows.iter().filter(|h| (h.uid as i64) > pre_max).count();
+    if notify && new_count > 0 {
+        let summary = format!("{} new in {}", new_count, acct.name);
+        let body = rows
+            .iter()
+            .filter(|h| (h.uid as i64) > pre_max)
+            .take(5)
+            .map(|h| {
+                format!(
+                    "{} — {}",
+                    h.from_addr.as_deref().unwrap_or(""),
+                    h.subject.as_deref().unwrap_or(""),
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        if let Err(e) = notify_rust::Notification::new()
+            .summary(&summary)
+            .body(&body)
+            .appname("inbx")
+            .show()
+        {
+            tracing::warn!(%e, "notify failed");
+        }
+    }
 
     if fetch_bodies {
         let pending = store.list_unfetched("INBOX", body_limit).await?;

@@ -67,6 +67,7 @@ sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-r
 # CLI helpers
 rpassword = "7"
 gethostname = "0.5"
+notify-rust = "4"
 
 inbx-core = { path = "crates/inbx-core" }
 inbx-net = { path = "crates/inbx-net" }

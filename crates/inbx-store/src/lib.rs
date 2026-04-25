@@ -110,6 +110,16 @@ impl Store {
         Ok(rows)
     }
 
+    pub async fn folder_max_uid(&self, folder: &str, uidvalidity: i64) -> Result<Option<i64>> {
+        let row: Option<(Option<i64>,)> =
+            sqlx::query_as("SELECT MAX(uid) FROM messages WHERE folder = ?1 AND uidvalidity = ?2")
+                .bind(folder)
+                .bind(uidvalidity)
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(row.and_then(|(v,)| v))
+    }
+
     pub async fn folder_uidvalidity(&self, name: &str) -> Result<Option<i64>> {
         let row: Option<(Option<i64>,)> =
             sqlx::query_as("SELECT uidvalidity FROM folders WHERE name = ?1")
