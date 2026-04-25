@@ -580,34 +580,26 @@ fn draw_composer(f: &mut ratatui::Frame, composer: &Composer, status: &str, area
         ])
         .split(area);
 
-    draw_field(
-        f,
-        "subject",
-        composer.subject_text(),
-        composer.focus == ComposerField::Subject,
-        layout[0],
-    );
-    draw_field(
-        f,
-        "to",
-        composer.to_text(),
-        composer.focus == ComposerField::To,
-        layout[1],
-    );
-    draw_field(
-        f,
-        "cc",
-        composer_field_text(composer, ComposerField::Cc),
-        composer.focus == ComposerField::Cc,
-        layout[2],
-    );
-    draw_field(
-        f,
-        "bcc",
-        composer_field_text(composer, ComposerField::Bcc),
-        composer.focus == ComposerField::Bcc,
-        layout[3],
-    );
+    let fields = [
+        (ComposerField::Subject, "subject", layout[0]),
+        (ComposerField::To, "to", layout[1]),
+        (ComposerField::Cc, "cc", layout[2]),
+        (ComposerField::Bcc, "bcc", layout[3]),
+    ];
+    for (field, label, area) in fields {
+        let focused = composer.focus == field;
+        draw_field(
+            f,
+            label,
+            composer_field_text(composer, field),
+            focused,
+            area,
+        );
+        if focused {
+            place_cursor(f, composer, field, area);
+        }
+    }
+
     let body_title =
         format!("body — Tab field · Ctrl-S send · Ctrl-D draft · Ctrl-Q discard · {status}");
     let body_para = Paragraph::new(composer.body_text())
@@ -617,6 +609,29 @@ fn draw_composer(f: &mut ratatui::Frame, composer: &Composer, status: &str, area
         ))
         .wrap(Wrap { trim: false });
     f.render_widget(body_para, layout[4]);
+    if composer.focus == ComposerField::Body {
+        place_cursor(f, composer, ComposerField::Body, layout[4]);
+    }
+}
+
+fn place_cursor(f: &mut ratatui::Frame, composer: &Composer, field: ComposerField, area: Rect) {
+    let editor = match field {
+        ComposerField::Subject => &composer.subject,
+        ComposerField::To => &composer.to,
+        ComposerField::Cc => &composer.cc,
+        ComposerField::Bcc => &composer.bcc,
+        ComposerField::Body => &composer.body,
+    };
+    let (row, col) = editor.cursor();
+    // Account for the surrounding border (1px) on every side.
+    let inner_w = area.width.saturating_sub(2);
+    let inner_h = area.height.saturating_sub(2);
+    if inner_w == 0 || inner_h == 0 {
+        return;
+    }
+    let row = row.min(inner_h as usize - 1);
+    let col = col.min(inner_w as usize - 1);
+    f.set_cursor_position((area.x + 1 + col as u16, area.y + 1 + row as u16));
 }
 
 fn composer_field_text(c: &Composer, f: ComposerField) -> String {
