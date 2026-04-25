@@ -116,6 +116,11 @@ enum Cmd {
         #[arg(long)]
         eml: bool,
     },
+    /// ManageSieve (RFC 5804) — server-side filter scripts.
+    Sieve {
+        #[command(subcommand)]
+        action: SieveCmd,
+    },
     /// One-click List-Unsubscribe (RFC 8058) for a stored message.
     Unsubscribe {
         #[arg(long)]
@@ -129,6 +134,54 @@ enum Cmd {
         /// Print targets and exit without sending.
         #[arg(long)]
         dry_run: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum SieveCmd {
+    /// List scripts on the server. Active script marked with *.
+    List {
+        #[arg(long)]
+        account: Option<String>,
+    },
+    /// Print one script's source.
+    Get {
+        #[arg(long)]
+        account: Option<String>,
+        name: String,
+    },
+    /// Upload a script from a file (or stdin with `-`).
+    Put {
+        #[arg(long)]
+        account: Option<String>,
+        name: String,
+        #[arg(long, default_value = "-")]
+        file: String,
+    },
+    /// Mark a script active.
+    Activate {
+        #[arg(long)]
+        account: Option<String>,
+        name: String,
+    },
+    /// Delete a script.
+    Delete {
+        #[arg(long)]
+        account: Option<String>,
+        name: String,
+    },
+    /// Generate, upload, and activate a vacation responder script.
+    Vacation {
+        #[arg(long)]
+        account: Option<String>,
+        #[arg(long, default_value = "vacation")]
+        name: String,
+        #[arg(long, default_value_t = 7)]
+        days: u32,
+        #[arg(long)]
+        subject: Option<String>,
+        /// Vacation message body. Use `-` to read from stdin.
+        message: String,
     },
 }
 
@@ -298,6 +351,7 @@ async fn main() -> Result<()> {
         } => cmd_search(account, query, limit).await,
         Cmd::Thread { account, thread_id } => cmd_thread(account, thread_id).await,
         Cmd::Ical { action } => cmd_ical(action).await,
+        Cmd::Sieve { action } => cmd_sieve(action).await,
         Cmd::Unsubscribe {
             account,
             folder,
@@ -317,6 +371,83 @@ async fn main() -> Result<()> {
             eml,
         } => cmd_import(account, folder, input, eml).await,
     }
+}
+
+async fn cmd_sieve(action: SieveCmd) -> Result<()> {
+    use std::io::Read as _;
+    let cfg = inbx_config::load()?;
+    match action {
+        SieveCmd::List { account } => {
+            let acct = pick_account(&cfg, account.as_deref())?;
+            let mut sv = inbx_net::sieve::SieveClient::connect(acct).await?;
+            let scripts = sv.list_scripts().await?;
+            for s in scripts {
+                println!("{} {}", if s.active { "*" } else { " " }, s.name);
+            }
+            sv.logout().await?;
+        }
+        SieveCmd::Get { account, name } => {
+            let acct = pick_account(&cfg, account.as_deref())?;
+            let mut sv = inbx_net::sieve::SieveClient::connect(acct).await?;
+            let body = sv.get_script(&name).await?;
+            println!("{body}");
+            sv.logout().await?;
+        }
+        SieveCmd::Put {
+            account,
+            name,
+            file,
+        } => {
+            let acct = pick_account(&cfg, account.as_deref())?;
+            let mut body = String::new();
+            if file == "-" {
+                std::io::stdin().read_to_string(&mut body)?;
+            } else {
+                body = std::fs::read_to_string(&file)?;
+            }
+            let mut sv = inbx_net::sieve::SieveClient::connect(acct).await?;
+            sv.put_script(&name, &body).await?;
+            sv.logout().await?;
+            println!("uploaded {name}");
+        }
+        SieveCmd::Activate { account, name } => {
+            let acct = pick_account(&cfg, account.as_deref())?;
+            let mut sv = inbx_net::sieve::SieveClient::connect(acct).await?;
+            sv.set_active(&name).await?;
+            sv.logout().await?;
+            println!("activated {name}");
+        }
+        SieveCmd::Delete { account, name } => {
+            let acct = pick_account(&cfg, account.as_deref())?;
+            let mut sv = inbx_net::sieve::SieveClient::connect(acct).await?;
+            sv.delete_script(&name).await?;
+            sv.logout().await?;
+            println!("deleted {name}");
+        }
+        SieveCmd::Vacation {
+            account,
+            name,
+            days,
+            subject,
+            message,
+        } => {
+            let acct = pick_account(&cfg, account.as_deref())?;
+            let body = if message == "-" {
+                let mut buf = String::new();
+                std::io::stdin().read_to_string(&mut buf)?;
+                buf
+            } else {
+                message
+            };
+            let script = inbx_net::sieve::vacation_script(body.trim(), days, subject.as_deref());
+            let mut sv = inbx_net::sieve::SieveClient::connect(acct).await?;
+            sv.put_script(&name, &script).await?;
+            sv.set_active(&name).await?;
+            sv.logout().await?;
+            println!("vacation script `{name}` activated for {days} days");
+        }
+    }
+    Ok(())
 }
 
 async fn cmd_export(account: Option<String>, folder: String, output: String) -> Result<()> {
