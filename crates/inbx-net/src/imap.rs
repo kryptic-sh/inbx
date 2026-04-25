@@ -345,6 +345,60 @@ pub fn find_sent_folder(folders: &[FolderInfo]) -> Option<String> {
     None
 }
 
+/// UID STORE flags on the selected folder. `op` is one of `+FLAGS`,
+/// `-FLAGS`, or `FLAGS` (set). Flags should include the leading `\` for
+/// system flags.
+pub async fn store_flags(
+    session: &mut ImapSession,
+    folder: &str,
+    uids: &[u32],
+    op: &str,
+    flags: &str,
+) -> Result<()> {
+    if uids.is_empty() {
+        return Ok(());
+    }
+    session.select(folder).await?;
+    let set = uids
+        .iter()
+        .map(|u| u.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    let arg = format!("({flags})");
+    let stream = session.uid_store(set, format!("{op} {arg}")).await?;
+    let _: Vec<async_imap::types::Fetch> =
+        stream.filter_map(|r| async move { r.ok() }).collect().await;
+    Ok(())
+}
+
+/// IMAP CREATE.
+pub async fn create_folder(session: &mut ImapSession, name: &str) -> Result<()> {
+    session.create(name).await?;
+    Ok(())
+}
+
+/// IMAP DELETE.
+pub async fn delete_folder(session: &mut ImapSession, name: &str) -> Result<()> {
+    session.delete(name).await?;
+    Ok(())
+}
+
+/// IMAP RENAME.
+pub async fn rename_folder(session: &mut ImapSession, from: &str, to: &str) -> Result<()> {
+    session.rename(from, to).await?;
+    Ok(())
+}
+
+/// IMAP SUBSCRIBE / UNSUBSCRIBE.
+pub async fn subscribe_folder(session: &mut ImapSession, name: &str, on: bool) -> Result<()> {
+    if on {
+        session.subscribe(name).await?;
+    } else {
+        session.unsubscribe(name).await?;
+    }
+    Ok(())
+}
+
 /// APPEND raw RFC 5322 message into the named folder, marking it `\Seen`.
 pub async fn append_message(session: &mut ImapSession, folder: &str, raw: &[u8]) -> Result<()> {
     session.append(folder, Some("(\\Seen)"), None, raw).await?;

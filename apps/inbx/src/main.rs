@@ -147,6 +147,26 @@ enum Cmd {
         #[command(subcommand)]
         action: OutboxCmd,
     },
+    /// Add or remove flags on stored messages (UID STORE).
+    Flag {
+        #[arg(long)]
+        account: Option<String>,
+        #[arg(long, default_value = "INBOX")]
+        folder: String,
+        #[arg(long, num_args = 1.., required = true)]
+        uid: Vec<u32>,
+        /// Flags to add (repeatable, e.g. `--add "\\Seen"`).
+        #[arg(long = "add")]
+        add: Vec<String>,
+        /// Flags to remove (repeatable).
+        #[arg(long = "del")]
+        del: Vec<String>,
+    },
+    /// Mailbox CRUD on the server.
+    Folder {
+        #[command(subcommand)]
+        action: FolderCmd,
+    },
     /// ManageSieve (RFC 5804) — server-side filter scripts.
     Sieve {
         #[command(subcommand)]
@@ -232,6 +252,38 @@ enum DraftCmd {
     Save {
         #[arg(long)]
         account: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum FolderCmd {
+    /// CREATE name on the server.
+    Create {
+        #[arg(long)]
+        account: Option<String>,
+        name: String,
+    },
+    /// DELETE name from the server.
+    Delete {
+        #[arg(long)]
+        account: Option<String>,
+        name: String,
+    },
+    /// RENAME from → to.
+    Rename {
+        #[arg(long)]
+        account: Option<String>,
+        from: String,
+        to: String,
+    },
+    /// SUBSCRIBE / UNSUBSCRIBE.
+    Subscribe {
+        #[arg(long)]
+        account: Option<String>,
+        name: String,
+        /// Set to false to UNSUBSCRIBE.
+        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+        on: bool,
     },
 }
 
@@ -517,6 +569,14 @@ async fn main() -> Result<()> {
         Cmd::Template { action } => cmd_template(action).await,
         Cmd::Watch { account, bodies } => cmd_watch(account, bodies).await,
         Cmd::Outbox { action } => cmd_outbox(action).await,
+        Cmd::Flag {
+            account,
+            folder,
+            uid,
+            add,
+            del,
+        } => cmd_flag(account, folder, uid, add, del).await,
+        Cmd::Folder { action } => cmd_folder(action).await,
         Cmd::Sieve { action } => cmd_sieve(action).await,
         Cmd::Unsubscribe {
             account,
@@ -776,6 +836,65 @@ async fn cmd_outbox(action: OutboxCmd) -> Result<()> {
             let store = inbx_store::Store::open(&acct.name).await?;
             store.outbox_delete(id).await?;
             println!("removed {id}");
+        }
+    }
+    Ok(())
+}
+
+async fn cmd_flag(
+    account: Option<String>,
+    folder: String,
+    uids: Vec<u32>,
+    add: Vec<String>,
+    del: Vec<String>,
+) -> Result<()> {
+    if add.is_empty() && del.is_empty() {
+        bail!("at least one --add or --del flag required");
+    }
+    let cfg = inbx_config::load()?;
+    let acct = pick_account(&cfg, account.as_deref())?.clone();
+    let mut session = inbx_net::connect_imap(&acct).await?;
+    if !add.is_empty() {
+        inbx_net::store_flags(&mut session, &folder, &uids, "+FLAGS", &add.join(" ")).await?;
+    }
+    if !del.is_empty() {
+        inbx_net::store_flags(&mut session, &folder, &uids, "-FLAGS", &del.join(" ")).await?;
+    }
+    let _ = session.logout().await;
+    println!("flags updated on {} message(s) in {folder}", uids.len());
+    Ok(())
+}
+
+async fn cmd_folder(action: FolderCmd) -> Result<()> {
+    let cfg = inbx_config::load()?;
+    match action {
+        FolderCmd::Create { account, name } => {
+            let acct = pick_account(&cfg, account.as_deref())?.clone();
+            let mut session = inbx_net::connect_imap(&acct).await?;
+            inbx_net::create_folder(&mut session, &name).await?;
+            let _ = session.logout().await;
+            println!("created {name}");
+        }
+        FolderCmd::Delete { account, name } => {
+            let acct = pick_account(&cfg, account.as_deref())?.clone();
+            let mut session = inbx_net::connect_imap(&acct).await?;
+            inbx_net::delete_folder(&mut session, &name).await?;
+            let _ = session.logout().await;
+            println!("deleted {name}");
+        }
+        FolderCmd::Rename { account, from, to } => {
+            let acct = pick_account(&cfg, account.as_deref())?.clone();
+            let mut session = inbx_net::connect_imap(&acct).await?;
+            inbx_net::rename_folder(&mut session, &from, &to).await?;
+            let _ = session.logout().await;
+            println!("renamed {from} → {to}");
+        }
+        FolderCmd::Subscribe { account, name, on } => {
+            let acct = pick_account(&cfg, account.as_deref())?.clone();
+            let mut session = inbx_net::connect_imap(&acct).await?;
+            inbx_net::subscribe_folder(&mut session, &name, on).await?;
+            let _ = session.logout().await;
+            println!("{} {name}", if on { "subscribed" } else { "unsubscribed" });
         }
     }
     Ok(())
