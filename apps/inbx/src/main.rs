@@ -89,6 +89,20 @@ enum Cmd {
         #[command(subcommand)]
         action: IcalCmd,
     },
+    /// One-click List-Unsubscribe (RFC 8058) for a stored message.
+    Unsubscribe {
+        #[arg(long)]
+        account: Option<String>,
+        #[arg(long, default_value = "INBOX")]
+        folder: String,
+        uid: i64,
+        /// Skip HTTPS one-click and use the mailto: target.
+        #[arg(long)]
+        mailto: bool,
+        /// Print targets and exit without sending.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -256,7 +270,52 @@ async fn main() -> Result<()> {
         } => cmd_search(account, query, limit).await,
         Cmd::Thread { account, thread_id } => cmd_thread(account, thread_id).await,
         Cmd::Ical { action } => cmd_ical(action).await,
+        Cmd::Unsubscribe {
+            account,
+            folder,
+            uid,
+            mailto,
+            dry_run,
+        } => cmd_unsubscribe(account, folder, uid, mailto, dry_run).await,
     }
+}
+
+async fn cmd_unsubscribe(
+    account: Option<String>,
+    folder: String,
+    uid: i64,
+    use_mailto: bool,
+    dry_run: bool,
+) -> Result<()> {
+    let cfg = inbx_config::load()?;
+    let acct = pick_account(&cfg, account.as_deref())?.clone();
+    let raw = read_message_raw(&acct.name, &folder, uid).await?;
+    let targets = inbx_net::unsubscribe::extract_targets(&raw)?;
+
+    println!(
+        "https:     {}\nmailto:    {}\none-click: {}",
+        targets.https.as_deref().unwrap_or("—"),
+        targets.mailto.as_deref().unwrap_or("—"),
+        targets.one_click,
+    );
+    if dry_run {
+        return Ok(());
+    }
+
+    if !use_mailto
+        && targets.one_click
+        && let Some(url) = targets.https.as_deref()
+    {
+        inbx_net::unsubscribe::one_click(url).await?;
+        println!("one-click POST OK");
+        return Ok(());
+    }
+    if let Some(m) = targets.mailto.as_deref() {
+        inbx_net::unsubscribe::via_mailto(&acct, m).await?;
+        println!("unsubscribe email sent to {m}");
+        return Ok(());
+    }
+    bail!("no usable List-Unsubscribe target");
 }
 
 async fn cmd_ical(action: IcalCmd) -> Result<()> {

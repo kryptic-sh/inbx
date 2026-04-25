@@ -2,6 +2,7 @@ pub mod graph;
 pub mod imap;
 pub mod oauth;
 pub mod smtp;
+pub mod unsubscribe;
 
 pub use imap::{
     Error as ImapError, FolderInfo, HeaderRow, ImapSession, append_message, connect_imap,
