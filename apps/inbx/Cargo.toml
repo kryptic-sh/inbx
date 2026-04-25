@@ -24,3 +24,6 @@ tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 rpassword.workspace = true
+ratatui.workspace = true
+crossterm.workspace = true
+futures-util.workspace = true

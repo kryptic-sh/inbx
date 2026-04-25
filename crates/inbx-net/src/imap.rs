@@ -221,6 +221,38 @@ pub async fn fetch_inbox_headers(session: &mut ImapSession) -> Result<(u32, Vec<
     Ok((uidvalidity, out))
 }
 
+/// Fetch raw RFC 5322 bodies (`BODY.PEEK[]`) for the listed UIDs from the
+/// currently-selected mailbox. Returns (uid, raw_bytes) pairs.
+pub async fn fetch_bodies(
+    session: &mut ImapSession,
+    folder: &str,
+    uids: &[u32],
+) -> Result<Vec<(u32, Vec<u8>)>> {
+    if uids.is_empty() {
+        return Ok(Vec::new());
+    }
+    session.select(folder).await?;
+    let set = uid_set(uids);
+    let stream = session.uid_fetch(set, "(UID BODY.PEEK[])").await?;
+    let fetches: Vec<async_imap::types::Fetch> =
+        stream.filter_map(|r| async move { r.ok() }).collect().await;
+    let mut out = Vec::with_capacity(fetches.len());
+    for f in fetches {
+        let Some(uid) = f.uid else { continue };
+        if let Some(body) = f.body() {
+            out.push((uid, body.to_vec()));
+        }
+    }
+    Ok(out)
+}
+
+fn uid_set(uids: &[u32]) -> String {
+    uids.iter()
+        .map(|u| u.to_string())
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 /// Locate the Sent folder by SPECIAL-USE flag, falling back to common names.
 pub fn find_sent_folder(folders: &[FolderInfo]) -> Option<String> {
     if let Some(f) = folders

@@ -156,6 +156,41 @@ impl Store {
         Ok(())
     }
 
+    pub async fn list_unfetched(&self, folder: &str, limit: u32) -> Result<Vec<i64>> {
+        let rows: Vec<(i64,)> = sqlx::query_as(
+            "SELECT uid FROM messages
+             WHERE folder = ?1 AND maildir_path IS NULL
+             ORDER BY date_unix DESC NULLS LAST
+             LIMIT ?2",
+        )
+        .bind(folder)
+        .bind(limit as i64)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(|(u,)| u).collect())
+    }
+
+    pub async fn set_maildir_path(
+        &self,
+        folder: &str,
+        uid: i64,
+        uidvalidity: i64,
+        path: &str,
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE messages
+             SET maildir_path = ?4, headers_only = 0
+             WHERE folder = ?1 AND uid = ?2 AND uidvalidity = ?3",
+        )
+        .bind(folder)
+        .bind(uid)
+        .bind(uidvalidity)
+        .bind(path)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     pub async fn list_messages(&self, folder: &str, limit: u32) -> Result<Vec<MessageRow>> {
         let rows: Vec<MessageRow> = sqlx::query_as(
             "SELECT folder, uid, uidvalidity, message_id, subject, from_addr, to_addrs,

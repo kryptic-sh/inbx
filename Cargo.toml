@@ -36,6 +36,10 @@ clap = { version = "4", features = ["derive"] }
 tokio = { version = "1", features = ["full"] }
 futures-util = "0.3"
 
+# TUI
+ratatui = "0.29"
+crossterm = { version = "0.28", features = ["event-stream"] }
+
 # IMAP / TLS
 async-imap = { version = "0.10", default-features = false, features = ["runtime-tokio"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["tls12", "ring"] }

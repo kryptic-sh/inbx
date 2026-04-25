@@ -1,3 +1,5 @@
+mod tui;
+
 use std::io::{BufRead, Write};
 
 use anyhow::{Context, Result, bail};
@@ -24,6 +26,12 @@ enum Cmd {
     Fetch {
         #[arg(long)]
         account: Option<String>,
+        /// Also download message bodies for the most recent messages.
+        #[arg(long)]
+        bodies: bool,
+        /// Cap on bodies to download per fetch when `--bodies` is set.
+        #[arg(long, default_value_t = 200)]
+        body_limit: u32,
     },
     /// List recent messages from local index.
     List {
@@ -41,6 +49,11 @@ enum Cmd {
         /// Skip APPEND to Sent folder.
         #[arg(long)]
         no_save: bool,
+    },
+    /// Launch the read-only TUI.
+    Tui {
+        #[arg(long)]
+        account: Option<String>,
     },
 }
 
@@ -73,14 +86,25 @@ async fn main() -> Result<()> {
             AccountCmd::List => cmd_accounts_list(),
             AccountCmd::Folders { account } => cmd_accounts_folders(account).await,
         },
-        Cmd::Fetch { account } => cmd_fetch(account).await,
+        Cmd::Fetch {
+            account,
+            bodies,
+            body_limit,
+        } => cmd_fetch(account, bodies, body_limit).await,
         Cmd::List {
             account,
             folder,
             limit,
         } => cmd_list(account, folder, limit).await,
         Cmd::Send { account, no_save } => cmd_send(account, no_save).await,
+        Cmd::Tui { account } => cmd_tui(account).await,
     }
+}
+
+async fn cmd_tui(account: Option<String>) -> Result<()> {
+    let cfg = inbx_config::load()?;
+    let acct = pick_account(&cfg, account.as_deref())?;
+    tui::run(acct.name.clone()).await
 }
 
 fn cmd_config() -> Result<()> {
@@ -193,7 +217,7 @@ async fn cmd_accounts_folders(account: Option<String>) -> Result<()> {
     Ok(())
 }
 
-async fn cmd_fetch(account: Option<String>) -> Result<()> {
+async fn cmd_fetch(account: Option<String>, fetch_bodies: bool, body_limit: u32) -> Result<()> {
     let cfg = inbx_config::load()?;
     let acct = pick_account(&cfg, account.as_deref())?.clone();
     let password = inbx_config::load_password(&acct.name)
@@ -261,6 +285,28 @@ async fn cmd_fetch(account: Option<String>) -> Result<()> {
             .await?;
     }
     println!("INBOX: {} messages indexed", rows.len());
+
+    if fetch_bodies {
+        let pending = store.list_unfetched("INBOX", body_limit).await?;
+        if !pending.is_empty() {
+            tracing::info!(count = pending.len(), "fetching bodies");
+            let uids: Vec<u32> = pending.iter().map(|u| *u as u32).collect();
+            let bodies = inbx_net::fetch_bodies(&mut session, "INBOX", &uids).await?;
+            for (uid, raw) in bodies {
+                let path = store.write_maildir("INBOX", &raw, "\\Seen")?;
+                store
+                    .set_maildir_path(
+                        "INBOX",
+                        uid as i64,
+                        uidvalidity as i64,
+                        &path.to_string_lossy(),
+                    )
+                    .await?;
+            }
+            println!("INBOX: bodies downloaded");
+        }
+    }
+
     let _ = session.logout().await;
     Ok(())
 }

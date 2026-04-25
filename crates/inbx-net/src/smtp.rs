@@ -53,7 +53,10 @@ fn envelope_from_raw(raw: &[u8]) -> Result<Envelope> {
         .map_err(|_| Error::InvalidAddress(from.to_string()))?;
 
     let mut recipients: Vec<LettreAddress> = Vec::new();
-    for group in [parsed.to(), parsed.cc(), parsed.bcc()].into_iter().flatten() {
+    for group in [parsed.to(), parsed.cc(), parsed.bcc()]
+        .into_iter()
+        .flatten()
+    {
         for addr in group.iter() {
             if let Some(s) = addr.address() {
                 let parsed: LettreAddress = s
