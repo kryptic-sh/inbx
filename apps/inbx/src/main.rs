@@ -22,10 +22,13 @@ enum Cmd {
         #[command(subcommand)]
         action: AccountCmd,
     },
-    /// Fetch INBOX headers + discover folders for an account.
+    /// Fetch headers + discover folders for an account.
     Fetch {
         #[arg(long)]
         account: Option<String>,
+        /// Folder to sync. Defaults to INBOX.
+        #[arg(long, default_value = "INBOX")]
+        folder: String,
         /// Also download message bodies for the most recent messages.
         #[arg(long)]
         bodies: bool,
@@ -146,6 +149,35 @@ enum Cmd {
     Outbox {
         #[command(subcommand)]
         action: OutboxCmd,
+    },
+    /// EXPUNGE messages flagged \Deleted in a folder.
+    Expunge {
+        #[arg(long)]
+        account: Option<String>,
+        #[arg(long, default_value = "INBOX")]
+        folder: String,
+    },
+    /// UID MOVE messages between folders (RFC 6851).
+    Mv {
+        #[arg(long)]
+        account: Option<String>,
+        #[arg(long, default_value = "INBOX")]
+        from: String,
+        #[arg(long)]
+        to: String,
+        #[arg(long, num_args = 1.., required = true)]
+        uid: Vec<u32>,
+    },
+    /// UID COPY messages between folders.
+    Cp {
+        #[arg(long)]
+        account: Option<String>,
+        #[arg(long, default_value = "INBOX")]
+        from: String,
+        #[arg(long)]
+        to: String,
+        #[arg(long, num_args = 1.., required = true)]
+        uid: Vec<u32>,
     },
     /// Add or remove flags on stored messages (UID STORE).
     Flag {
@@ -513,6 +545,11 @@ enum AccountCmd {
         oauth: Option<String>,
     },
     List,
+    /// Connect to IMAP, list folders, logout. Reports OK or the error.
+    Test {
+        #[arg(long)]
+        account: Option<String>,
+    },
     /// Show folders cached locally for an account.
     Folders {
         #[arg(long)]
@@ -535,14 +572,16 @@ async fn main() -> Result<()> {
         Cmd::Accounts { action } => match action {
             AccountCmd::Add { oauth } => cmd_accounts_add(oauth),
             AccountCmd::List => cmd_accounts_list(),
+            AccountCmd::Test { account } => cmd_accounts_test(account).await,
             AccountCmd::Folders { account } => cmd_accounts_folders(account).await,
         },
         Cmd::Fetch {
             account,
+            folder,
             bodies,
             body_limit,
             notify,
-        } => cmd_fetch(account, bodies, body_limit, notify).await,
+        } => cmd_fetch(account, folder, bodies, body_limit, notify).await,
         Cmd::List {
             account,
             folder,
@@ -569,6 +608,19 @@ async fn main() -> Result<()> {
         Cmd::Template { action } => cmd_template(action).await,
         Cmd::Watch { account, bodies } => cmd_watch(account, bodies).await,
         Cmd::Outbox { action } => cmd_outbox(action).await,
+        Cmd::Expunge { account, folder } => cmd_expunge(account, folder).await,
+        Cmd::Mv {
+            account,
+            from,
+            to,
+            uid,
+        } => cmd_move_or_copy(account, from, to, uid, false).await,
+        Cmd::Cp {
+            account,
+            from,
+            to,
+            uid,
+        } => cmd_move_or_copy(account, from, to, uid, true).await,
         Cmd::Flag {
             account,
             folder,
@@ -771,7 +823,8 @@ async fn cmd_watch(account: Option<String>, bodies: bool) -> Result<()> {
     let cfg = inbx_config::load()?;
     let acct_name = pick_account(&cfg, account.as_deref())?.name.clone();
     loop {
-        if let Err(e) = cmd_fetch(Some(acct_name.clone()), bodies, 200, true).await {
+        if let Err(e) = cmd_fetch(Some(acct_name.clone()), "INBOX".into(), bodies, 200, true).await
+        {
             tracing::warn!(%e, "fetch failed; backing off 30s");
             tokio::time::sleep(std::time::Duration::from_secs(30)).await;
             continue;
@@ -838,6 +891,37 @@ async fn cmd_outbox(action: OutboxCmd) -> Result<()> {
             println!("removed {id}");
         }
     }
+    Ok(())
+}
+
+async fn cmd_expunge(account: Option<String>, folder: String) -> Result<()> {
+    let cfg = inbx_config::load()?;
+    let acct = pick_account(&cfg, account.as_deref())?.clone();
+    let mut session = inbx_net::connect_imap(&acct).await?;
+    let n = inbx_net::expunge_folder(&mut session, &folder).await?;
+    let _ = session.logout().await;
+    println!("expunged {n} message(s) from {folder}");
+    Ok(())
+}
+
+async fn cmd_move_or_copy(
+    account: Option<String>,
+    from: String,
+    to: String,
+    uids: Vec<u32>,
+    copy: bool,
+) -> Result<()> {
+    let cfg = inbx_config::load()?;
+    let acct = pick_account(&cfg, account.as_deref())?.clone();
+    let mut session = inbx_net::connect_imap(&acct).await?;
+    if copy {
+        inbx_net::uid_copy(&mut session, &from, &uids, &to).await?;
+        println!("copied {} message(s) {from} → {to}", uids.len());
+    } else {
+        inbx_net::uid_move(&mut session, &from, &uids, &to).await?;
+        println!("moved {} message(s) {from} → {to}", uids.len());
+    }
+    let _ = session.logout().await;
     Ok(())
 }
 
@@ -1962,6 +2046,32 @@ fn cmd_accounts_add(oauth: Option<String>) -> Result<()> {
     Ok(())
 }
 
+async fn cmd_accounts_test(account: Option<String>) -> Result<()> {
+    let cfg = inbx_config::load()?;
+    let acct = pick_account(&cfg, account.as_deref())?.clone();
+    let started = std::time::Instant::now();
+    match inbx_net::connect_imap(&acct).await {
+        Ok(mut session) => {
+            let folders = inbx_net::list_folders(&mut session).await?;
+            let _ = session.logout().await;
+            println!(
+                "OK  {}  imap={}:{} ({:?})  {} folders  in {}ms",
+                acct.name,
+                acct.imap_host,
+                acct.imap_port,
+                acct.imap_security,
+                folders.len(),
+                started.elapsed().as_millis()
+            );
+        }
+        Err(e) => {
+            println!("FAIL  {}  {}", acct.name, e);
+            return Err(e.into());
+        }
+    }
+    Ok(())
+}
+
 async fn cmd_accounts_folders(account: Option<String>) -> Result<()> {
     let cfg = inbx_config::load()?;
     let acct = pick_account(&cfg, account.as_deref())?;
@@ -1987,6 +2097,7 @@ async fn cmd_accounts_folders(account: Option<String>) -> Result<()> {
 
 async fn cmd_fetch(
     account: Option<String>,
+    folder: String,
     fetch_bodies: bool,
     body_limit: u32,
     notify: bool,
@@ -2019,22 +2130,22 @@ async fn cmd_fetch(
     }
     println!("folders: {}", folders.len());
 
-    tracing::info!("fetching INBOX headers");
-    let (uidvalidity, rows) = inbx_net::fetch_inbox_headers(&mut session).await?;
-    let prev = store.folder_uidvalidity("INBOX").await?;
+    tracing::info!(folder = %folder, "fetching headers");
+    let (uidvalidity, rows) = inbx_net::fetch_headers(&mut session, &folder).await?;
+    let prev = store.folder_uidvalidity(&folder).await?;
     if let Some(prev) = prev
         && prev as u32 != uidvalidity
     {
-        tracing::warn!(prev, new = uidvalidity, "UIDVALIDITY changed; wiping INBOX");
-        store.wipe_folder_messages("INBOX").await?;
+        tracing::warn!(prev, new = uidvalidity, %folder, "UIDVALIDITY changed; wiping");
+        store.wipe_folder_messages(&folder).await?;
     }
     let pre_max = store
-        .folder_max_uid("INBOX", uidvalidity as i64)
+        .folder_max_uid(&folder, uidvalidity as i64)
         .await?
         .unwrap_or(0);
     store
         .upsert_folder(&inbx_store::FolderRow {
-            name: "INBOX".into(),
+            name: folder.clone(),
             delim: None,
             special_use: None,
             attrs: None,
@@ -2046,7 +2157,7 @@ async fn cmd_fetch(
     for h in &rows {
         store
             .upsert_message(&inbx_store::MessageRow {
-                folder: "INBOX".into(),
+                folder: folder.clone(),
                 uid: h.uid as i64,
                 uidvalidity: h.uidvalidity as i64,
                 message_id: h.message_id.clone(),
@@ -2064,7 +2175,7 @@ async fn cmd_fetch(
             })
             .await?;
     }
-    println!("INBOX: {} messages indexed", rows.len());
+    println!("{folder}: {} messages indexed", rows.len());
 
     let new_count = rows.iter().filter(|h| (h.uid as i64) > pre_max).count();
     if notify && new_count > 0 {
@@ -2093,24 +2204,24 @@ async fn cmd_fetch(
     }
 
     if fetch_bodies {
-        let pending = store.list_unfetched("INBOX", body_limit).await?;
+        let pending = store.list_unfetched(&folder, body_limit).await?;
         if !pending.is_empty() {
             tracing::info!(count = pending.len(), "fetching bodies");
             let uids: Vec<u32> = pending.iter().map(|u| *u as u32).collect();
-            let bodies = inbx_net::fetch_bodies(&mut session, "INBOX", &uids).await?;
+            let bodies = inbx_net::fetch_bodies(&mut session, &folder, &uids).await?;
             for (uid, raw) in bodies {
-                let path = store.write_maildir("INBOX", &raw, "\\Seen")?;
+                let path = store.write_maildir(&folder, &raw, "\\Seen")?;
                 store
                     .set_maildir_path(
-                        "INBOX",
+                        &folder,
                         uid as i64,
                         uidvalidity as i64,
                         &path.to_string_lossy(),
                     )
                     .await?;
-                index_message(&store, "INBOX", uid as i64, uidvalidity as i64, &raw).await?;
+                index_message(&store, &folder, uid as i64, uidvalidity as i64, &raw).await?;
             }
-            println!("INBOX: bodies downloaded");
+            println!("{folder}: bodies downloaded");
         }
     }
 

@@ -215,10 +215,13 @@ pub struct HeaderRow {
     pub fetched_at_unix: i64,
 }
 
-/// Select INBOX and fetch envelope + flags for all messages, UID-keyed.
-/// Returns (uidvalidity, rows). M2 fetches headers only — body lazy.
-pub async fn fetch_inbox_headers(session: &mut ImapSession) -> Result<(u32, Vec<HeaderRow>)> {
-    let mailbox = session.select("INBOX").await?;
+/// Select a folder and fetch envelope + flags for all messages, UID-keyed.
+/// Returns (uidvalidity, rows). Body fetched lazily by `fetch_bodies`.
+pub async fn fetch_headers(
+    session: &mut ImapSession,
+    folder: &str,
+) -> Result<(u32, Vec<HeaderRow>)> {
+    let mailbox = session.select(folder).await?;
     let uidvalidity = mailbox.uid_validity.unwrap_or(0);
     if mailbox.exists == 0 {
         return Ok((uidvalidity, Vec::new()));
@@ -265,6 +268,11 @@ pub async fn fetch_inbox_headers(session: &mut ImapSession) -> Result<(u32, Vec<
         });
     }
     Ok((uidvalidity, out))
+}
+
+/// Backwards-compat alias kept for existing CLI sites.
+pub async fn fetch_inbox_headers(session: &mut ImapSession) -> Result<(u32, Vec<HeaderRow>)> {
+    fetch_headers(session, "INBOX").await
 }
 
 /// Fetch raw RFC 5322 bodies (`BODY.PEEK[]`) for the listed UIDs from the
@@ -368,6 +376,55 @@ pub async fn store_flags(
     let stream = session.uid_store(set, format!("{op} {arg}")).await?;
     let _: Vec<async_imap::types::Fetch> =
         stream.filter_map(|r| async move { r.ok() }).collect().await;
+    Ok(())
+}
+
+/// Select a folder and EXPUNGE all `\Deleted` messages.
+pub async fn expunge_folder(session: &mut ImapSession, folder: &str) -> Result<u32> {
+    session.select(folder).await?;
+    let stream = session.expunge().await?;
+    let removed: Vec<u32> = stream.filter_map(|r| async move { r.ok() }).collect().await;
+    Ok(removed.len() as u32)
+}
+
+/// UID COPY messages from current mailbox to `target`. Caller must have
+/// SELECTed the source folder first.
+pub async fn uid_copy(
+    session: &mut ImapSession,
+    source: &str,
+    uids: &[u32],
+    target: &str,
+) -> Result<()> {
+    if uids.is_empty() {
+        return Ok(());
+    }
+    session.select(source).await?;
+    let set = uids
+        .iter()
+        .map(|u| u.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    session.uid_copy(set, target).await?;
+    Ok(())
+}
+
+/// UID MOVE (RFC 6851).
+pub async fn uid_move(
+    session: &mut ImapSession,
+    source: &str,
+    uids: &[u32],
+    target: &str,
+) -> Result<()> {
+    if uids.is_empty() {
+        return Ok(());
+    }
+    session.select(source).await?;
+    let set = uids
+        .iter()
+        .map(|u| u.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    session.uid_mv(set, target).await?;
     Ok(())
 }
 
