@@ -405,6 +405,87 @@ impl Store {
         Ok(rows)
     }
 
+    /// Add or remove flag tokens from the local cached flags column.
+    /// `add` and `remove` are sets of system flags (`\\Seen`, `\\Flagged`,
+    /// etc.). Idempotent: adding an existing flag is a no-op.
+    pub async fn mutate_flags(
+        &self,
+        folder: &str,
+        uids: &[i64],
+        add: &[&str],
+        remove: &[&str],
+    ) -> Result<()> {
+        if uids.is_empty() {
+            return Ok(());
+        }
+        let placeholders = (1..=uids.len())
+            .map(|i| format!("?{}", i + 1))
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT folder, uid, uidvalidity, flags FROM messages
+             WHERE folder = ?1 AND uid IN ({placeholders})"
+        );
+        let mut q = sqlx::query_as::<_, (String, i64, i64, String)>(&sql).bind(folder);
+        for u in uids {
+            q = q.bind(u);
+        }
+        let rows = q.fetch_all(&self.pool).await?;
+        for (_, uid, uidvalidity, flags) in rows {
+            let mut tokens: Vec<String> = flags.split_whitespace().map(|s| s.to_string()).collect();
+            for r in remove {
+                tokens.retain(|t| !t.eq_ignore_ascii_case(r));
+            }
+            for a in add {
+                if !tokens.iter().any(|t| t.eq_ignore_ascii_case(a)) {
+                    tokens.push((*a).to_string());
+                }
+            }
+            let new_flags = tokens.join(" ");
+            sqlx::query(
+                "UPDATE messages SET flags = ?4
+                 WHERE folder = ?1 AND uid = ?2 AND uidvalidity = ?3",
+            )
+            .bind(folder)
+            .bind(uid)
+            .bind(uidvalidity)
+            .bind(&new_flags)
+            .execute(&self.pool)
+            .await?;
+        }
+        Ok(())
+    }
+
+    /// Drop messages from the local index (e.g. after EXPUNGE or UID MOVE).
+    pub async fn delete_messages(&self, folder: &str, uids: &[i64]) -> Result<()> {
+        if uids.is_empty() {
+            return Ok(());
+        }
+        let placeholders = (1..=uids.len())
+            .map(|i| format!("?{}", i + 1))
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!("DELETE FROM messages WHERE folder = ?1 AND uid IN ({placeholders})");
+        let mut q = sqlx::query(&sql).bind(folder);
+        for u in uids {
+            q = q.bind(u);
+        }
+        q.execute(&self.pool).await?;
+        Ok(())
+    }
+
+    /// Drop all messages with `\Deleted` set (mirrors server EXPUNGE locally).
+    pub async fn purge_deleted(&self, folder: &str) -> Result<u64> {
+        let res = sqlx::query(
+            "DELETE FROM messages
+             WHERE folder = ?1 AND flags LIKE '%\\Deleted%' ESCAPE '\\\\'",
+        )
+        .bind(folder)
+        .execute(&self.pool)
+        .await?;
+        Ok(res.rows_affected())
+    }
+
     pub async fn list_unfetched(&self, folder: &str, limit: u32) -> Result<Vec<i64>> {
         let rows: Vec<(i64,)> = sqlx::query_as(
             "SELECT uid FROM messages

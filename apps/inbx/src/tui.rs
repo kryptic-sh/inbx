@@ -164,6 +164,56 @@ impl App {
         self.status = "draft discarded".into();
     }
 
+    async fn toggle_seen(&mut self) -> Result<()> {
+        self.toggle_flag("\\Seen").await
+    }
+
+    async fn toggle_starred(&mut self) -> Result<()> {
+        self.toggle_flag("\\Flagged").await
+    }
+
+    async fn toggle_deleted(&mut self) -> Result<()> {
+        self.toggle_flag("\\Deleted").await
+    }
+
+    async fn toggle_flag(&mut self, flag: &str) -> Result<()> {
+        let Some(folder_name) = self.current_folder().map(|f| f.name.clone()) else {
+            return Ok(());
+        };
+        let Some(msg) = self.current_message().cloned() else {
+            return Ok(());
+        };
+        let has = msg.flags.contains(flag);
+        let mut session = inbx_net::connect_imap(&self.account).await?;
+        let op = if has { "-FLAGS" } else { "+FLAGS" };
+        inbx_net::store_flags(&mut session, &folder_name, &[msg.uid as u32], op, flag).await?;
+        let _ = session.logout().await;
+        let (add, remove): (Vec<&str>, Vec<&str>) = if has {
+            (vec![], vec![flag])
+        } else {
+            (vec![flag], vec![])
+        };
+        self.store
+            .mutate_flags(&folder_name, &[msg.uid], &add, &remove)
+            .await?;
+        self.reload_messages().await?;
+        self.status = format!("{}{flag}", if has { "removed " } else { "added " });
+        Ok(())
+    }
+
+    async fn expunge(&mut self) -> Result<()> {
+        let Some(folder_name) = self.current_folder().map(|f| f.name.clone()) else {
+            return Ok(());
+        };
+        let mut session = inbx_net::connect_imap(&self.account).await?;
+        let n = inbx_net::expunge_folder(&mut session, &folder_name).await?;
+        let _ = session.logout().await;
+        let purged = self.store.purge_deleted(&folder_name).await?;
+        self.reload_messages().await?;
+        self.status = format!("expunged {n} (server) / {purged} (local) in {folder_name}");
+        Ok(())
+    }
+
     fn current_folder(&self) -> Option<&FolderRow> {
         self.folder_state
             .selected()
@@ -176,6 +226,7 @@ impl App {
 
     async fn reload_messages(&mut self) -> Result<()> {
         let folder = self.current_folder().map(|f| f.name.clone());
+        let prior = self.msg_state.selected();
         self.messages = match folder {
             Some(name) => self.store.list_messages(&name, 200).await?,
             None => Vec::new(),
@@ -183,7 +234,10 @@ impl App {
         if self.messages.is_empty() {
             self.msg_state.select(None);
         } else {
-            self.msg_state.select(Some(0));
+            // Preserve the previous index when possible so toggling a flag
+            // doesn't fling the cursor back to the top.
+            let next = prior.map(|i| i.min(self.messages.len() - 1)).unwrap_or(0);
+            self.msg_state.select(Some(next));
         }
         self.refresh_body();
         Ok(())
@@ -337,6 +391,29 @@ async fn handle_list_key(app: &mut App, key: KeyEvent) -> Result<bool> {
             return Ok(false);
         }
         _ => {}
+    }
+
+    // Mutation shortcuts on the messages pane.
+    if app.pane == Pane::Messages {
+        match key.code {
+            KeyCode::Char('s') => {
+                app.toggle_seen().await?;
+                return Ok(false);
+            }
+            KeyCode::Char('*') => {
+                app.toggle_starred().await?;
+                return Ok(false);
+            }
+            KeyCode::Char('d') => {
+                app.toggle_deleted().await?;
+                return Ok(false);
+            }
+            KeyCode::Char('e') => {
+                app.expunge().await?;
+                return Ok(false);
+            }
+            _ => {}
+        }
     }
 
     // Pane movement (always available)

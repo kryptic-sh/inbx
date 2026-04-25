@@ -1077,6 +1077,16 @@ async fn cmd_mark(
     };
     inbx_net::store_flags(&mut session, &folder, &uids, op, flags).await?;
     let _ = session.logout().await;
+    let store = inbx_store::Store::open(&acct.name).await?;
+    let local_uids: Vec<i64> = uids.iter().map(|u| *u as i64).collect();
+    let (add, remove): (Vec<&str>, Vec<&str>) = if op == "+FLAGS" {
+        (vec![flags], vec![])
+    } else {
+        (vec![], vec![flags])
+    };
+    store
+        .mutate_flags(&folder, &local_uids, &add, &remove)
+        .await?;
     println!("{verb}: {} message(s) in {folder}", uids.len());
     Ok(())
 }
@@ -1087,7 +1097,9 @@ async fn cmd_expunge(account: Option<String>, folder: String) -> Result<()> {
     let mut session = inbx_net::connect_imap(&acct).await?;
     let n = inbx_net::expunge_folder(&mut session, &folder).await?;
     let _ = session.logout().await;
-    println!("expunged {n} message(s) from {folder}");
+    let store = inbx_store::Store::open(&acct.name).await?;
+    let purged = store.purge_deleted(&folder).await?;
+    println!("expunged {n} server / {purged} local rows in {folder}");
     Ok(())
 }
 
@@ -1106,6 +1118,9 @@ async fn cmd_move_or_copy(
         println!("copied {} message(s) {from} → {to}", uids.len());
     } else {
         inbx_net::uid_move(&mut session, &from, &uids, &to).await?;
+        let store = inbx_store::Store::open(&acct.name).await?;
+        let local: Vec<i64> = uids.iter().map(|u| *u as i64).collect();
+        store.delete_messages(&from, &local).await?;
         println!("moved {} message(s) {from} → {to}", uids.len());
     }
     let _ = session.logout().await;
@@ -1132,6 +1147,13 @@ async fn cmd_flag(
         inbx_net::store_flags(&mut session, &folder, &uids, "-FLAGS", &del.join(" ")).await?;
     }
     let _ = session.logout().await;
+    let store = inbx_store::Store::open(&acct.name).await?;
+    let local: Vec<i64> = uids.iter().map(|u| *u as i64).collect();
+    let add_refs: Vec<&str> = add.iter().map(|s| s.as_str()).collect();
+    let del_refs: Vec<&str> = del.iter().map(|s| s.as_str()).collect();
+    store
+        .mutate_flags(&folder, &local, &add_refs, &del_refs)
+        .await?;
     println!("flags updated on {} message(s) in {folder}", uids.len());
     Ok(())
 }
