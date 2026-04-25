@@ -43,6 +43,12 @@ pub struct MessageRow {
     pub maildir_path: Option<String>,
     pub headers_only: i64,
     pub fetched_at_unix: i64,
+    #[sqlx(default)]
+    pub in_reply_to: Option<String>,
+    #[sqlx(default)]
+    pub refs: Option<String>,
+    #[sqlx(default)]
+    pub thread_id: Option<String>,
 }
 
 pub struct Store {
@@ -126,8 +132,9 @@ impl Store {
         sqlx::query(
             "INSERT INTO messages
                 (folder, uid, uidvalidity, message_id, subject, from_addr, to_addrs,
-                 date_unix, flags, maildir_path, headers_only, fetched_at_unix)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                 date_unix, flags, maildir_path, headers_only, fetched_at_unix,
+                 in_reply_to, refs, thread_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
              ON CONFLICT(folder, uid, uidvalidity) DO UPDATE SET
                 message_id = excluded.message_id,
                 subject = excluded.subject,
@@ -137,7 +144,10 @@ impl Store {
                 flags = excluded.flags,
                 maildir_path = COALESCE(excluded.maildir_path, messages.maildir_path),
                 headers_only = excluded.headers_only,
-                fetched_at_unix = excluded.fetched_at_unix",
+                fetched_at_unix = excluded.fetched_at_unix,
+                in_reply_to = COALESCE(excluded.in_reply_to, messages.in_reply_to),
+                refs = COALESCE(excluded.refs, messages.refs),
+                thread_id = COALESCE(excluded.thread_id, messages.thread_id)",
         )
         .bind(&m.folder)
         .bind(m.uid)
@@ -151,9 +161,139 @@ impl Store {
         .bind(&m.maildir_path)
         .bind(m.headers_only)
         .bind(m.fetched_at_unix)
+        .bind(&m.in_reply_to)
+        .bind(&m.refs)
+        .bind(&m.thread_id)
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    /// Update threading columns and resolve thread_id by walking In-Reply-To
+    /// up through known parents. If no parent is in the store, the message's
+    /// own message_id (or self-uid placeholder) becomes the thread root.
+    pub async fn set_threading(
+        &self,
+        folder: &str,
+        uid: i64,
+        uidvalidity: i64,
+        message_id: Option<&str>,
+        in_reply_to: Option<&str>,
+        refs: &[String],
+    ) -> Result<()> {
+        let parent_ids: Vec<&str> = refs.iter().map(|s| s.as_str()).chain(in_reply_to).collect();
+
+        // Look up the parent's thread_id, walking from most-recent ref backward.
+        let mut thread_id: Option<String> = None;
+        for parent in parent_ids.iter().rev() {
+            let row: Option<(Option<String>,)> =
+                sqlx::query_as("SELECT thread_id FROM messages WHERE message_id = ?1 LIMIT 1")
+                    .bind(parent)
+                    .fetch_optional(&self.pool)
+                    .await?;
+            if let Some((Some(t),)) = row {
+                thread_id = Some(t);
+                break;
+            }
+        }
+        let resolved = thread_id
+            .or_else(|| message_id.map(|s| s.to_string()))
+            .unwrap_or_else(|| format!("{folder}/{uid}/{uidvalidity}"));
+        let refs_joined = if refs.is_empty() {
+            None
+        } else {
+            Some(refs.join("\n"))
+        };
+        sqlx::query(
+            "UPDATE messages
+             SET in_reply_to = ?4, refs = ?5, thread_id = ?6
+             WHERE folder = ?1 AND uid = ?2 AND uidvalidity = ?3",
+        )
+        .bind(folder)
+        .bind(uid)
+        .bind(uidvalidity)
+        .bind(in_reply_to)
+        .bind(refs_joined)
+        .bind(&resolved)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn list_thread(&self, thread_id: &str) -> Result<Vec<MessageRow>> {
+        let rows: Vec<MessageRow> = sqlx::query_as(
+            "SELECT folder, uid, uidvalidity, message_id, subject, from_addr, to_addrs,
+                    date_unix, flags, maildir_path, headers_only, fetched_at_unix,
+                    in_reply_to, refs, thread_id
+             FROM messages
+             WHERE thread_id = ?1
+             ORDER BY date_unix ASC NULLS LAST",
+        )
+        .bind(thread_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    /// Insert/replace a message in the FTS index. `body` may be empty.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn index_for_search(
+        &self,
+        folder: &str,
+        uid: i64,
+        uidvalidity: i64,
+        subject: &str,
+        from_addr: &str,
+        to_addrs: &str,
+        body: &str,
+    ) -> Result<()> {
+        // Find the rowid via the messages PK, since FTS5 keys by rowid.
+        let row: Option<(i64,)> = sqlx::query_as(
+            "SELECT id FROM messages WHERE folder = ?1 AND uid = ?2 AND uidvalidity = ?3",
+        )
+        .bind(folder)
+        .bind(uid)
+        .bind(uidvalidity)
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some((id,)) = row else {
+            return Ok(());
+        };
+        // Replace prior entry to avoid duplicates.
+        sqlx::query("DELETE FROM messages_fts WHERE rowid = ?1")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        sqlx::query(
+            "INSERT INTO messages_fts(rowid, subject, from_addr, to_addrs, body)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+        )
+        .bind(id)
+        .bind(subject)
+        .bind(from_addr)
+        .bind(to_addrs)
+        .bind(body)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn search(&self, query: &str, limit: u32) -> Result<Vec<MessageRow>> {
+        let rows: Vec<MessageRow> = sqlx::query_as(
+            "SELECT m.folder, m.uid, m.uidvalidity, m.message_id, m.subject, m.from_addr,
+                    m.to_addrs, m.date_unix, m.flags, m.maildir_path, m.headers_only,
+                    m.fetched_at_unix, m.in_reply_to, m.refs, m.thread_id
+             FROM messages_fts f
+             JOIN messages m ON m.id = f.rowid
+             WHERE f.messages_fts MATCH ?1
+             ORDER BY rank
+             LIMIT ?2",
+        )
+        .bind(query)
+        .bind(limit as i64)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
     }
 
     pub async fn list_unfetched(&self, folder: &str, limit: u32) -> Result<Vec<i64>> {
@@ -194,7 +334,8 @@ impl Store {
     pub async fn list_messages(&self, folder: &str, limit: u32) -> Result<Vec<MessageRow>> {
         let rows: Vec<MessageRow> = sqlx::query_as(
             "SELECT folder, uid, uidvalidity, message_id, subject, from_addr, to_addrs,
-                    date_unix, flags, maildir_path, headers_only, fetched_at_unix
+                    date_unix, flags, maildir_path, headers_only, fetched_at_unix,
+                    in_reply_to, refs, thread_id
              FROM messages
              WHERE folder = ?1
              ORDER BY date_unix DESC NULLS LAST

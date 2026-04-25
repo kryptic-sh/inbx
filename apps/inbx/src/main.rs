@@ -70,6 +70,20 @@ enum Cmd {
         #[command(subcommand)]
         action: GraphCmd,
     },
+    /// Full-text search across the local index.
+    Search {
+        #[arg(long)]
+        account: Option<String>,
+        query: String,
+        #[arg(long, default_value_t = 50)]
+        limit: u32,
+    },
+    /// Print all messages in a thread, oldest first.
+    Thread {
+        #[arg(long)]
+        account: Option<String>,
+        thread_id: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -207,7 +221,110 @@ async fn main() -> Result<()> {
         Cmd::Contacts { action } => cmd_contacts(action).await,
         Cmd::OAuth { action } => cmd_oauth(action).await,
         Cmd::Graph { action } => cmd_graph(action).await,
+        Cmd::Search {
+            account,
+            query,
+            limit,
+        } => cmd_search(account, query, limit).await,
+        Cmd::Thread { account, thread_id } => cmd_thread(account, thread_id).await,
     }
+}
+
+async fn cmd_search(account: Option<String>, query: String, limit: u32) -> Result<()> {
+    let cfg = inbx_config::load()?;
+    let acct = pick_account(&cfg, account.as_deref())?;
+    let store = inbx_store::Store::open(&acct.name).await?;
+    for m in store.search(&query, limit).await? {
+        let date = m.date_unix.map(format_unix).unwrap_or_else(|| "—".into());
+        println!(
+            "{:>10}  {:<30}  [{}]  {}",
+            date,
+            truncate(m.from_addr.as_deref().unwrap_or(""), 30),
+            m.folder,
+            m.subject.unwrap_or_default()
+        );
+    }
+    Ok(())
+}
+
+async fn cmd_thread(account: Option<String>, thread_id: String) -> Result<()> {
+    let cfg = inbx_config::load()?;
+    let acct = pick_account(&cfg, account.as_deref())?;
+    let store = inbx_store::Store::open(&acct.name).await?;
+    let rows = store.list_thread(&thread_id).await?;
+    if rows.is_empty() {
+        println!("(empty thread)");
+        return Ok(());
+    }
+    for m in rows {
+        let date = m.date_unix.map(format_unix).unwrap_or_else(|| "—".into());
+        println!(
+            "{:>10}  {}  {}",
+            date,
+            truncate(m.from_addr.as_deref().unwrap_or(""), 30),
+            m.subject.unwrap_or_default()
+        );
+    }
+    Ok(())
+}
+
+/// Parse the message, extract threading + indexable text, then update the
+/// store's threading columns and FTS index for one row.
+async fn index_message(
+    store: &inbx_store::Store,
+    folder: &str,
+    uid: i64,
+    uidvalidity: i64,
+    raw: &[u8],
+) -> Result<()> {
+    let Some(parsed) = mail_parser::MessageParser::default().parse(raw) else {
+        return Ok(());
+    };
+    let message_id = parsed.message_id().map(|s| s.to_string());
+    let in_reply_to_first = parsed
+        .in_reply_to()
+        .as_text_list()
+        .and_then(|v| v.first().map(|s| s.to_string()));
+    let refs: Vec<String> = parsed
+        .references()
+        .as_text_list()
+        .map(|v| v.iter().map(|s| s.to_string()).collect())
+        .unwrap_or_default();
+    store
+        .set_threading(
+            folder,
+            uid,
+            uidvalidity,
+            message_id.as_deref(),
+            in_reply_to_first.as_deref(),
+            &refs,
+        )
+        .await?;
+
+    let subject = parsed.subject().unwrap_or_default();
+    let from = parsed
+        .from()
+        .and_then(|a| a.first())
+        .and_then(|a| a.address())
+        .unwrap_or("")
+        .to_string();
+    let to = parsed
+        .to()
+        .map(|g| {
+            g.iter()
+                .filter_map(|a| a.address().map(|s| s.to_string()))
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .unwrap_or_default();
+    let body = parsed
+        .body_text(0)
+        .map(|s| s.to_string())
+        .unwrap_or_default();
+    store
+        .index_for_search(folder, uid, uidvalidity, subject, &from, &to, &body)
+        .await?;
+    Ok(())
 }
 
 async fn cmd_graph(action: GraphCmd) -> Result<()> {
@@ -281,6 +398,9 @@ async fn cmd_graph(action: GraphCmd) -> Result<()> {
                     maildir_path: None,
                     headers_only: 1,
                     fetched_at_unix: now,
+                    in_reply_to: None,
+                    refs: None,
+                    thread_id: None,
                 };
                 store.upsert_message(&row).await?;
                 if bodies {
@@ -293,6 +413,7 @@ async fn cmd_graph(action: GraphCmd) -> Result<()> {
                     store
                         .set_maildir_path("Inbox", row.uid, 0, &path.to_string_lossy())
                         .await?;
+                    index_message(&store, "Inbox", row.uid, 0, &raw).await?;
                 }
             }
             println!("Inbox: {} messages indexed", messages.len());
@@ -739,6 +860,9 @@ async fn cmd_fetch(account: Option<String>, fetch_bodies: bool, body_limit: u32)
                 maildir_path: None,
                 headers_only: 1,
                 fetched_at_unix: h.fetched_at_unix,
+                in_reply_to: None,
+                refs: None,
+                thread_id: None,
             })
             .await?;
     }
@@ -760,6 +884,7 @@ async fn cmd_fetch(account: Option<String>, fetch_bodies: bool, body_limit: u32)
                         &path.to_string_lossy(),
                     )
                     .await?;
+                index_message(&store, "INBOX", uid as i64, uidvalidity as i64, &raw).await?;
             }
             println!("INBOX: bodies downloaded");
         }

@@ -1270,6 +1270,7 @@ dependencies = [
  "inbx-net",
  "inbx-render",
  "inbx-store",
+ "mail-parser",
  "ratatui",
  "rpassword",
  "tokio",
