@@ -29,6 +29,9 @@ enum Cmd {
         /// Folder to sync. Defaults to INBOX.
         #[arg(long, default_value = "INBOX")]
         folder: String,
+        /// Sync every selectable folder instead of just one.
+        #[arg(long)]
+        all: bool,
         /// Also download message bodies for the most recent messages.
         #[arg(long)]
         bodies: bool,
@@ -606,6 +609,27 @@ enum AccountCmd {
         #[arg(long)]
         purge: bool,
     },
+    /// Edit one or more fields on an existing account.
+    Edit {
+        #[arg(long)]
+        account: Option<String>,
+        #[arg(long)]
+        email: Option<String>,
+        #[arg(long)]
+        imap_host: Option<String>,
+        #[arg(long)]
+        imap_port: Option<u16>,
+        #[arg(long, value_parser = ["tls", "starttls"])]
+        imap_security: Option<String>,
+        #[arg(long)]
+        smtp_host: Option<String>,
+        #[arg(long)]
+        smtp_port: Option<u16>,
+        #[arg(long, value_parser = ["tls", "starttls"])]
+        smtp_security: Option<String>,
+        #[arg(long)]
+        username: Option<String>,
+    },
 }
 
 #[tokio::main]
@@ -626,14 +650,42 @@ async fn main() -> Result<()> {
             AccountCmd::Test { account } => cmd_accounts_test(account).await,
             AccountCmd::Folders { account } => cmd_accounts_folders(account).await,
             AccountCmd::Remove { account, purge } => cmd_accounts_remove(account, purge),
+            AccountCmd::Edit {
+                account,
+                email,
+                imap_host,
+                imap_port,
+                imap_security,
+                smtp_host,
+                smtp_port,
+                smtp_security,
+                username,
+            } => cmd_accounts_edit(
+                account,
+                email,
+                imap_host,
+                imap_port,
+                imap_security,
+                smtp_host,
+                smtp_port,
+                smtp_security,
+                username,
+            ),
         },
         Cmd::Fetch {
             account,
             folder,
+            all,
             bodies,
             body_limit,
             notify,
-        } => cmd_fetch(account, folder, bodies, body_limit, notify).await,
+        } => {
+            if all {
+                cmd_fetch_all(account, bodies, body_limit, notify).await
+            } else {
+                cmd_fetch(account, folder, bodies, body_limit, notify).await
+            }
+        }
         Cmd::List {
             account,
             folder,
@@ -2181,6 +2233,58 @@ fn cmd_accounts_add(oauth: Option<String>) -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
+fn cmd_accounts_edit(
+    account: Option<String>,
+    email: Option<String>,
+    imap_host: Option<String>,
+    imap_port: Option<u16>,
+    imap_security: Option<String>,
+    smtp_host: Option<String>,
+    smtp_port: Option<u16>,
+    smtp_security: Option<String>,
+    username: Option<String>,
+) -> Result<()> {
+    let mut cfg = inbx_config::load()?;
+    let name = pick_account(&cfg, account.as_deref())?.name.clone();
+    let acct = cfg.accounts.iter_mut().find(|a| a.name == name).unwrap();
+    if let Some(v) = email {
+        acct.email = v;
+    }
+    if let Some(v) = imap_host {
+        acct.imap_host = v;
+    }
+    if let Some(v) = imap_port {
+        acct.imap_port = v;
+    }
+    if let Some(v) = imap_security {
+        acct.imap_security = match v.as_str() {
+            "tls" => TlsMode::Tls,
+            "starttls" => TlsMode::Starttls,
+            _ => unreachable!(),
+        };
+    }
+    if let Some(v) = smtp_host {
+        acct.smtp_host = v;
+    }
+    if let Some(v) = smtp_port {
+        acct.smtp_port = v;
+    }
+    if let Some(v) = smtp_security {
+        acct.smtp_security = match v.as_str() {
+            "tls" => TlsMode::Tls,
+            "starttls" => TlsMode::Starttls,
+            _ => unreachable!(),
+        };
+    }
+    if let Some(v) = username {
+        acct.username = v;
+    }
+    inbx_config::save(&cfg)?;
+    println!("updated {name}");
+    Ok(())
+}
+
 fn cmd_accounts_remove(account: Option<String>, purge: bool) -> Result<()> {
     let mut cfg = inbx_config::load()?;
     let name = pick_account(&cfg, account.as_deref())?.name.clone();
@@ -2245,6 +2349,42 @@ async fn cmd_accounts_folders(account: Option<String>) -> Result<()> {
                 .unwrap_or_else(|| "-".into()),
         );
     }
+    Ok(())
+}
+
+async fn cmd_fetch_all(
+    account: Option<String>,
+    bodies: bool,
+    body_limit: u32,
+    notify: bool,
+) -> Result<()> {
+    let cfg = inbx_config::load()?;
+    let acct_name = pick_account(&cfg, account.as_deref())?.name.clone();
+    let mut session =
+        inbx_net::connect_imap(cfg.accounts.iter().find(|a| a.name == acct_name).unwrap()).await?;
+    let folders = inbx_net::list_folders(&mut session).await?;
+    let _ = session.logout().await;
+    let mut total = 0usize;
+    for f in folders {
+        if !f.selectable {
+            continue;
+        }
+        match cmd_fetch(
+            Some(acct_name.clone()),
+            f.name.clone(),
+            bodies,
+            body_limit,
+            notify,
+        )
+        .await
+        {
+            Ok(()) => total += 1,
+            Err(e) => {
+                tracing::warn!(folder = %f.name, %e, "fetch failed; continuing");
+            }
+        }
+    }
+    println!("synced {total} folder(s)");
     Ok(())
 }
 
