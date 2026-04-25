@@ -1089,6 +1089,7 @@ dependencies = [
  "crossterm",
  "futures-util",
  "inbx-config",
+ "inbx-contacts",
  "inbx-core",
  "inbx-net",
  "inbx-render",
@@ -1125,8 +1126,13 @@ dependencies = [
 name = "inbx-contacts"
 version = "0.0.1"
 dependencies = [
+ "inbx-config",
  "inbx-core",
+ "mail-parser",
+ "sqlx",
  "thiserror 2.0.18",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

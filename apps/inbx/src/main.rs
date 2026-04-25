@@ -55,6 +55,49 @@ enum Cmd {
         #[arg(long)]
         account: Option<String>,
     },
+    /// Address book operations.
+    Contacts {
+        #[command(subcommand)]
+        action: ContactsCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum ContactsCmd {
+    /// Add or update a contact.
+    Add {
+        #[arg(long)]
+        account: Option<String>,
+        email: String,
+        #[arg(long)]
+        name: Option<String>,
+    },
+    /// List contacts, frecency-ranked.
+    List {
+        #[arg(long)]
+        account: Option<String>,
+        #[arg(long, default_value_t = 50)]
+        limit: u32,
+    },
+    /// Substring match on email or name.
+    Search {
+        #[arg(long)]
+        account: Option<String>,
+        query: String,
+        #[arg(long, default_value_t = 20)]
+        limit: u32,
+    },
+    /// Harvest contacts from all locally-stored messages.
+    Harvest {
+        #[arg(long)]
+        account: Option<String>,
+    },
+    /// Remove a contact.
+    Remove {
+        #[arg(long)]
+        account: Option<String>,
+        email: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -98,7 +141,90 @@ async fn main() -> Result<()> {
         } => cmd_list(account, folder, limit).await,
         Cmd::Send { account, no_save } => cmd_send(account, no_save).await,
         Cmd::Tui { account } => cmd_tui(account).await,
+        Cmd::Contacts { action } => cmd_contacts(action).await,
     }
+}
+
+async fn cmd_contacts(action: ContactsCmd) -> Result<()> {
+    let cfg = inbx_config::load()?;
+    match action {
+        ContactsCmd::Add {
+            account,
+            email,
+            name,
+        } => {
+            let acct = pick_account(&cfg, account.as_deref())?;
+            let store = inbx_contacts::ContactsStore::open(&acct.name).await?;
+            store.upsert(&email, name.as_deref()).await?;
+            println!("upserted {email}");
+        }
+        ContactsCmd::List { account, limit } => {
+            let acct = pick_account(&cfg, account.as_deref())?;
+            let store = inbx_contacts::ContactsStore::open(&acct.name).await?;
+            let rows = store.list(limit).await?;
+            for c in rows {
+                let n = c.name.unwrap_or_default();
+                println!(
+                    "{:>4}  {}  <{}>",
+                    c.frecency_count,
+                    if n.is_empty() { "—" } else { &n },
+                    c.email
+                );
+            }
+        }
+        ContactsCmd::Search {
+            account,
+            query,
+            limit,
+        } => {
+            let acct = pick_account(&cfg, account.as_deref())?;
+            let store = inbx_contacts::ContactsStore::open(&acct.name).await?;
+            for c in store.search(&query, limit).await? {
+                let n = c.name.unwrap_or_default();
+                println!(
+                    "{:>4}  {}  <{}>",
+                    c.frecency_count,
+                    if n.is_empty() { "—" } else { &n },
+                    c.email
+                );
+            }
+        }
+        ContactsCmd::Harvest { account } => {
+            let acct = pick_account(&cfg, account.as_deref())?;
+            let mail_store = inbx_store::Store::open(&acct.name).await?;
+            let contacts = inbx_contacts::ContactsStore::open(&acct.name).await?;
+            let folders = mail_store.list_folders().await?;
+            let mut total = 0usize;
+            for f in folders {
+                for m in mail_store.list_messages(&f.name, u32::MAX).await? {
+                    let Some(path) = m.maildir_path else { continue };
+                    let raw = match std::fs::read(&path) {
+                        Ok(b) => b,
+                        Err(e) => {
+                            tracing::warn!(%path, %e, "skip unreadable");
+                            continue;
+                        }
+                    };
+                    total += contacts.harvest(&raw).await?;
+                }
+            }
+            println!("harvested {total} address occurrences");
+        }
+        ContactsCmd::Remove { account, email } => {
+            let acct = pick_account(&cfg, account.as_deref())?;
+            let store = inbx_contacts::ContactsStore::open(&acct.name).await?;
+            let removed = store.delete(&email).await?;
+            println!(
+                "{}",
+                if removed {
+                    format!("removed {email}")
+                } else {
+                    format!("(no such contact: {email})")
+                }
+            );
+        }
+    }
+    Ok(())
 }
 
 async fn cmd_tui(account: Option<String>) -> Result<()> {
@@ -350,6 +476,10 @@ async fn cmd_send(account: Option<String>, no_save: bool) -> Result<()> {
     tracing::info!(account = %acct.name, bytes = raw.len(), "sending");
     inbx_net::send_message(&acct, &password, &raw).await?;
     println!("sent");
+
+    if let Ok(contacts) = inbx_contacts::ContactsStore::open(&acct.name).await {
+        let _ = contacts.harvest(&raw).await;
+    }
 
     if no_save {
         return Ok(());

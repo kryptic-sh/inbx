@@ -19,6 +19,7 @@ inbx-config.workspace = true
 inbx-net.workspace = true
 inbx-store.workspace = true
 inbx-render.workspace = true
+inbx-contacts.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 tokio.workspace = true
