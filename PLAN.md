@@ -84,6 +84,13 @@ inbx/
 - Rate limit + backoff (Gmail quota, Graph 429 + Retry-After).
 - Connection pool: one IMAP per acct, IDLE socket separate.
 - TLS: `rustls` w/ webpki roots. Reject invalid certs.
+- Two connection modes per protocol, account-configurable:
+  - **Implicit TLS** (default): IMAP 993, SMTP 465. Encrypted from byte 0.
+  - **STARTTLS**: IMAP 143, SMTP 587. Plaintext greeting → CAPABILITY
+    must advertise `STARTTLS` → upgrade. **Hard-fail on STRIPTLS**: if
+    config requests starttls and capability missing OR upgrade fails,
+    abort connection — never fall through to plaintext.
+- No plaintext-only mode. Ever.
 - Per-account proxy / SOCKS via `tokio-socks`.
 - DKIM/SPF/DMARC verify on inbound for display badge.
 - IMAP UIDPLUS for Drafts/Sent append. Folder ops (create/rename/

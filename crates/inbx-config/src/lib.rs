@@ -24,6 +24,16 @@ pub struct Config {
     pub accounts: Vec<Account>,
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TlsMode {
+    /// Implicit TLS — encrypted from byte 0. IMAP 993, SMTP 465.
+    #[default]
+    Tls,
+    /// Opportunistic upgrade. IMAP 143, SMTP 587. Hard-fails if upgrade fails.
+    Starttls,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Account {
     pub name: String,
@@ -31,9 +41,13 @@ pub struct Account {
     pub imap_host: String,
     #[serde(default = "default_imap_port")]
     pub imap_port: u16,
+    #[serde(default)]
+    pub imap_security: TlsMode,
     pub smtp_host: String,
     #[serde(default = "default_smtp_port")]
     pub smtp_port: u16,
+    #[serde(default)]
+    pub smtp_security: TlsMode,
     pub username: String,
 }
 
@@ -42,7 +56,7 @@ fn default_imap_port() -> u16 {
 }
 
 fn default_smtp_port() -> u16 {
-    587
+    465
 }
 
 pub fn project_dirs() -> Result<directories::ProjectDirs> {
@@ -107,8 +121,10 @@ mod tests {
                 email: "me@example.com".into(),
                 imap_host: "imap.example.com".into(),
                 imap_port: 993,
+                imap_security: TlsMode::Tls,
                 smtp_host: "smtp.example.com".into(),
-                smtp_port: 587,
+                smtp_port: 465,
+                smtp_security: TlsMode::Tls,
                 username: "me".into(),
             }],
         };
@@ -116,5 +132,41 @@ mod tests {
         let parsed: Config = toml::from_str(&raw).unwrap();
         assert_eq!(parsed.accounts.len(), 1);
         assert_eq!(parsed.accounts[0].name, "personal");
+        assert_eq!(parsed.accounts[0].imap_security, TlsMode::Tls);
+    }
+
+    #[test]
+    fn starttls_round_trip() {
+        let raw = r#"
+[[accounts]]
+name = "corp"
+email = "me@corp.com"
+imap_host = "mail.corp.com"
+imap_port = 143
+imap_security = "starttls"
+smtp_host = "mail.corp.com"
+smtp_port = 587
+smtp_security = "starttls"
+username = "me"
+"#;
+        let cfg: Config = toml::from_str(raw).unwrap();
+        assert_eq!(cfg.accounts[0].imap_security, TlsMode::Starttls);
+        assert_eq!(cfg.accounts[0].smtp_security, TlsMode::Starttls);
+    }
+
+    #[test]
+    fn defaults_to_tls() {
+        let raw = r#"
+[[accounts]]
+name = "x"
+email = "x@x.com"
+imap_host = "imap.x.com"
+smtp_host = "smtp.x.com"
+username = "x"
+"#;
+        let cfg: Config = toml::from_str(raw).unwrap();
+        assert_eq!(cfg.accounts[0].imap_security, TlsMode::Tls);
+        assert_eq!(cfg.accounts[0].imap_port, 993);
+        assert_eq!(cfg.accounts[0].smtp_port, 465);
     }
 }
