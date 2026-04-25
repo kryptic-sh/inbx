@@ -20,6 +20,7 @@ inbx-net.workspace = true
 inbx-store.workspace = true
 inbx-render.workspace = true
 inbx-contacts.workspace = true
+inbx-ical.workspace = true
 mail-parser.workspace = true
 anyhow.workspace = true
 clap.workspace = true

@@ -84,6 +84,34 @@ enum Cmd {
         account: Option<String>,
         thread_id: String,
     },
+    /// Calendar invite operations (.ics).
+    Ical {
+        #[command(subcommand)]
+        action: IcalCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum IcalCmd {
+    /// Display the parsed invite for a stored message.
+    Show {
+        #[arg(long)]
+        account: Option<String>,
+        #[arg(long, default_value = "INBOX")]
+        folder: String,
+        uid: i64,
+    },
+    /// Generate a METHOD:REPLY .ics for the given UID and print it.
+    Reply {
+        #[arg(long)]
+        account: Option<String>,
+        #[arg(long, default_value = "INBOX")]
+        folder: String,
+        uid: i64,
+        /// accept | decline | tentative
+        #[arg(long, value_parser = ["accept", "decline", "tentative"])]
+        response: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -227,6 +255,87 @@ async fn main() -> Result<()> {
             limit,
         } => cmd_search(account, query, limit).await,
         Cmd::Thread { account, thread_id } => cmd_thread(account, thread_id).await,
+        Cmd::Ical { action } => cmd_ical(action).await,
+    }
+}
+
+async fn cmd_ical(action: IcalCmd) -> Result<()> {
+    let cfg = inbx_config::load()?;
+    match action {
+        IcalCmd::Show {
+            account,
+            folder,
+            uid,
+        } => {
+            let acct = pick_account(&cfg, account.as_deref())?;
+            let raw = read_message_raw(&acct.name, &folder, uid).await?;
+            let invite = inbx_ical::parse_message(&raw)?;
+            print_invite(&invite);
+        }
+        IcalCmd::Reply {
+            account,
+            folder,
+            uid,
+            response,
+        } => {
+            let acct = pick_account(&cfg, account.as_deref())?;
+            let raw = read_message_raw(&acct.name, &folder, uid).await?;
+            let invite = inbx_ical::parse_message(&raw)?;
+            let r = match response.as_str() {
+                "accept" => inbx_ical::RsvpResponse::Accept,
+                "decline" => inbx_ical::RsvpResponse::Decline,
+                "tentative" => inbx_ical::RsvpResponse::Tentative,
+                _ => unreachable!(),
+            };
+            let attendee = format!("mailto:{}", acct.email);
+            let ics = inbx_ical::build_reply(&invite, r, &attendee)?;
+            println!("{ics}");
+        }
+    }
+    Ok(())
+}
+
+async fn read_message_raw(account: &str, folder: &str, uid: i64) -> Result<Vec<u8>> {
+    let store = inbx_store::Store::open(account).await?;
+    let rows = store.list_messages(folder, u32::MAX).await?;
+    let row = rows
+        .into_iter()
+        .find(|m| m.uid == uid)
+        .with_context(|| format!("uid {uid} not in folder {folder}"))?;
+    let path = row
+        .maildir_path
+        .with_context(|| "message body not yet fetched")?;
+    Ok(std::fs::read(&path)?)
+}
+
+fn print_invite(inv: &inbx_ical::Invite) {
+    println!("UID:      {}", inv.uid);
+    if let Some(s) = &inv.summary {
+        println!("Summary:  {s}");
+    }
+    if let Some(s) = &inv.organizer {
+        println!("Organizer:{s}");
+    }
+    if let Some(s) = &inv.start {
+        println!("Start:    {s}");
+    }
+    if let Some(s) = &inv.end {
+        println!("End:      {s}");
+    }
+    if let Some(s) = &inv.location {
+        println!("Location: {s}");
+    }
+    if !inv.attendees.is_empty() {
+        println!("Attendees:");
+        for a in &inv.attendees {
+            println!("  {a}");
+        }
+    }
+    if let Some(m) = &inv.method {
+        println!("Method:   {m}");
+    }
+    if let Some(d) = &inv.description {
+        println!("\nDescription:\n{d}");
     }
 }
 
