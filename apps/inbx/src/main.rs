@@ -34,6 +34,14 @@ enum Cmd {
         #[arg(long, default_value_t = 50)]
         limit: u32,
     },
+    /// Read RFC 5322 from stdin, send via SMTP, append to Sent.
+    Send {
+        #[arg(long)]
+        account: Option<String>,
+        /// Skip APPEND to Sent folder.
+        #[arg(long)]
+        no_save: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -71,6 +79,7 @@ async fn main() -> Result<()> {
             folder,
             limit,
         } => cmd_list(account, folder, limit).await,
+        Cmd::Send { account, no_save } => cmd_send(account, no_save).await,
     }
 }
 
@@ -272,6 +281,62 @@ async fn cmd_list(account: Option<String>, folder: String, limit: u32) -> Result
         println!("{:>10}  {:<30}  {}", date, truncate(&from, 30), subj);
     }
     Ok(())
+}
+
+async fn cmd_send(account: Option<String>, no_save: bool) -> Result<()> {
+    use std::io::Read as _;
+
+    let cfg = inbx_config::load()?;
+    let acct = pick_account(&cfg, account.as_deref())?.clone();
+    let password = inbx_config::load_password(&acct.name)
+        .with_context(|| format!("no password in keyring for {}", acct.name))?;
+
+    let mut raw = Vec::new();
+    std::io::stdin()
+        .read_to_end(&mut raw)
+        .context("read stdin")?;
+    if raw.is_empty() {
+        bail!("empty input on stdin");
+    }
+    // Normalize bare-LF to CRLF for SMTP wire format.
+    let raw = normalize_crlf(raw);
+
+    tracing::info!(account = %acct.name, bytes = raw.len(), "sending");
+    inbx_net::send_message(&acct, &password, &raw).await?;
+    println!("sent");
+
+    if no_save {
+        return Ok(());
+    }
+
+    tracing::info!("appending to Sent folder");
+    let mut session = inbx_net::connect_imap(&acct, &password).await?;
+    let folders = inbx_net::list_folders(&mut session).await?;
+    let sent = inbx_net::find_sent_folder(&folders);
+    match sent {
+        Some(name) => {
+            inbx_net::append_message(&mut session, &name, &raw).await?;
+            println!("appended to {name}");
+        }
+        None => {
+            tracing::warn!("no Sent folder discovered; skipping APPEND");
+        }
+    }
+    let _ = session.logout().await;
+    Ok(())
+}
+
+fn normalize_crlf(input: Vec<u8>) -> Vec<u8> {
+    let mut out = Vec::with_capacity(input.len() + 32);
+    let mut prev_cr = false;
+    for b in input {
+        if b == b'\n' && !prev_cr {
+            out.push(b'\r');
+        }
+        prev_cr = b == b'\r';
+        out.push(b);
+    }
+    out
 }
 
 fn pick_account<'a>(cfg: &'a Config, name: Option<&str>) -> Result<&'a Account> {
