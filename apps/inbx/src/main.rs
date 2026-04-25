@@ -89,6 +89,30 @@ enum Cmd {
         #[command(subcommand)]
         action: IcalCmd,
     },
+    /// Export messages from local index to mbox.
+    Export {
+        #[arg(long)]
+        account: Option<String>,
+        #[arg(long, default_value = "INBOX")]
+        folder: String,
+        /// Output path; `-` for stdout.
+        #[arg(long, default_value = "-")]
+        output: String,
+    },
+    /// Import an mbox or .eml file into a folder. The folder is created
+    /// in the local index but not on the server.
+    Import {
+        #[arg(long)]
+        account: Option<String>,
+        #[arg(long, default_value = "Imported")]
+        folder: String,
+        /// Input path; `-` for stdin.
+        #[arg(long, default_value = "-")]
+        input: String,
+        /// Treat input as a single .eml message instead of an mbox.
+        #[arg(long)]
+        eml: bool,
+    },
     /// One-click List-Unsubscribe (RFC 8058) for a stored message.
     Unsubscribe {
         #[arg(long)]
@@ -277,7 +301,210 @@ async fn main() -> Result<()> {
             mailto,
             dry_run,
         } => cmd_unsubscribe(account, folder, uid, mailto, dry_run).await,
+        Cmd::Export {
+            account,
+            folder,
+            output,
+        } => cmd_export(account, folder, output).await,
+        Cmd::Import {
+            account,
+            folder,
+            input,
+            eml,
+        } => cmd_import(account, folder, input, eml).await,
     }
+}
+
+async fn cmd_export(account: Option<String>, folder: String, output: String) -> Result<()> {
+    use std::io::Write as _;
+    let cfg = inbx_config::load()?;
+    let acct = pick_account(&cfg, account.as_deref())?;
+    let store = inbx_store::Store::open(&acct.name).await?;
+    let rows = store.list_messages(&folder, u32::MAX).await?;
+
+    let mut out: Box<dyn Write> = if output == "-" {
+        Box::new(std::io::stdout().lock())
+    } else {
+        Box::new(std::fs::File::create(&output)?)
+    };
+
+    let mut count = 0usize;
+    for m in rows {
+        let Some(path) = m.maildir_path else { continue };
+        let raw = match std::fs::read(&path) {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::warn!(%path, %e, "skip unreadable");
+                continue;
+            }
+        };
+        let from = m.from_addr.as_deref().unwrap_or("MAILER-DAEMON");
+        let date = m
+            .date_unix
+            .map(format_unix_rfc822)
+            .unwrap_or_else(|| "Thu Jan  1 00:00:00 1970".into());
+        writeln!(out, "From {from} {date}")?;
+        // mbox From-quoting: lines starting with "From " get a > prepended.
+        for line in raw.split(|b| *b == b'\n') {
+            if line.starts_with(b"From ") {
+                out.write_all(b">")?;
+            }
+            out.write_all(line)?;
+            out.write_all(b"\n")?;
+        }
+        out.write_all(b"\n")?;
+        count += 1;
+    }
+    eprintln!("exported {count} messages from {folder}");
+    Ok(())
+}
+
+async fn cmd_import(
+    account: Option<String>,
+    folder: String,
+    input: String,
+    eml: bool,
+) -> Result<()> {
+    use std::io::Read as _;
+    let cfg = inbx_config::load()?;
+    let acct = pick_account(&cfg, account.as_deref())?;
+    let store = inbx_store::Store::open(&acct.name).await?;
+
+    let mut buf = Vec::new();
+    if input == "-" {
+        std::io::stdin().read_to_end(&mut buf)?;
+    } else {
+        buf = std::fs::read(&input)?;
+    }
+
+    store
+        .upsert_folder(&inbx_store::FolderRow {
+            name: folder.clone(),
+            delim: None,
+            special_use: None,
+            attrs: None,
+            uidvalidity: Some(0),
+            uidnext: None,
+        })
+        .await?;
+
+    let messages: Vec<Vec<u8>> = if eml { vec![buf] } else { split_mbox(&buf) };
+
+    let mut next_uid = 1i64;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let mut imported = 0usize;
+    for raw in messages {
+        if raw.is_empty() {
+            continue;
+        }
+        let parsed = mail_parser::MessageParser::default().parse(&raw);
+        let subject = parsed
+            .as_ref()
+            .and_then(|p| p.subject().map(|s| s.to_string()));
+        let from = parsed
+            .as_ref()
+            .and_then(|p| p.from())
+            .and_then(|a| a.first())
+            .and_then(|a| a.address())
+            .map(|s| s.to_string());
+        let to = parsed.as_ref().and_then(|p| {
+            p.to().map(|g| {
+                g.iter()
+                    .filter_map(|a| a.address().map(|s| s.to_string()))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+        });
+        let date_unix = parsed
+            .as_ref()
+            .and_then(|p| p.date())
+            .map(|d| d.to_timestamp());
+        let path = store.write_maildir(&folder, &raw, "\\Seen")?;
+        let row = inbx_store::MessageRow {
+            folder: folder.clone(),
+            uid: next_uid,
+            uidvalidity: 0,
+            message_id: parsed
+                .as_ref()
+                .and_then(|p| p.message_id().map(|s| s.to_string())),
+            subject,
+            from_addr: from,
+            to_addrs: to,
+            date_unix,
+            flags: "\\Seen".into(),
+            maildir_path: Some(path.to_string_lossy().into_owned()),
+            headers_only: 0,
+            fetched_at_unix: now,
+            in_reply_to: None,
+            refs: None,
+            thread_id: None,
+        };
+        store.upsert_message(&row).await?;
+        index_message(&store, &folder, next_uid, 0, &raw).await?;
+        next_uid += 1;
+        imported += 1;
+    }
+    println!("imported {imported} messages into {folder}");
+    Ok(())
+}
+
+fn split_mbox(buf: &[u8]) -> Vec<Vec<u8>> {
+    // Split at lines starting with "From " (the envelope separator).
+    let mut out: Vec<Vec<u8>> = Vec::new();
+    let mut current: Vec<u8> = Vec::new();
+    let mut at_line_start = true;
+    let mut i = 0;
+    while i < buf.len() {
+        if at_line_start && buf[i..].starts_with(b"From ") {
+            // Flush previous
+            if !current.is_empty() {
+                out.push(strip_from_quoting(std::mem::take(&mut current)));
+            }
+            // Skip the "From " line.
+            while i < buf.len() && buf[i] != b'\n' {
+                i += 1;
+            }
+            if i < buf.len() {
+                i += 1;
+            }
+            continue;
+        }
+        let b = buf[i];
+        current.push(b);
+        at_line_start = b == b'\n';
+        i += 1;
+    }
+    if !current.is_empty() {
+        out.push(strip_from_quoting(current));
+    }
+    out
+}
+
+fn strip_from_quoting(buf: Vec<u8>) -> Vec<u8> {
+    // Reverse mbox quoting: ">From " → "From ".
+    let mut out = Vec::with_capacity(buf.len());
+    let mut at_line_start = true;
+    let mut i = 0;
+    while i < buf.len() {
+        if at_line_start && buf[i] == b'>' && buf[i + 1..].starts_with(b"From ") {
+            i += 1;
+        }
+        out.push(buf[i]);
+        at_line_start = buf[i] == b'\n';
+        i += 1;
+    }
+    out
+}
+
+fn format_unix_rfc822(ts: i64) -> String {
+    // Rough day-of-week + ASCII timestamp; precision not critical for mbox.
+    let secs = ts.max(0);
+    let days = secs / 86400;
+    let dow = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"][(days % 7) as usize];
+    format!("{dow} Jan  1 00:00:{:02} 1970", secs % 60)
 }
 
 async fn cmd_unsubscribe(
