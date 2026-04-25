@@ -6,9 +6,9 @@ name: hjkl release watcher
 
 on:
   schedule:
-    # Every 30 minutes. Worst-case latency from a hjkl release to PR
-    # landing here is ~30m + queue time.
-    - cron: "*/30 * * * *"
+    # Hourly on the hour. Worst-case latency from a hjkl release to PR
+    # landing here is ~1h + queue time.
+    - cron: "0 * * * *"
   workflow_dispatch:
 
 permissions:
