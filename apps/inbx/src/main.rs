@@ -52,6 +52,9 @@ enum Cmd {
         /// Skip APPEND to Sent folder.
         #[arg(long)]
         no_save: bool,
+        /// Attach a file. Repeatable.
+        #[arg(long = "attach")]
+        attachments: Vec<std::path::PathBuf>,
     },
     /// Launch the read-only TUI.
     Tui {
@@ -493,7 +496,11 @@ async fn main() -> Result<()> {
             folder,
             limit,
         } => cmd_list(account, folder, limit).await,
-        Cmd::Send { account, no_save } => cmd_send(account, no_save).await,
+        Cmd::Send {
+            account,
+            no_save,
+            attachments,
+        } => cmd_send(account, no_save, attachments).await,
         Cmd::Tui { account } => cmd_tui(account).await,
         Cmd::Contacts { action } => cmd_contacts(action).await,
         Cmd::OAuth { action } => cmd_oauth(action).await,
@@ -621,6 +628,61 @@ async fn cmd_template(action: TemplateCmd) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Parse an existing RFC 5322 draft, hand it to a fresh Composer, attach the
+/// requested files, and re-emit. Lets `inbx send --attach` work without the
+/// caller knowing how to assemble multipart/mixed by hand.
+fn rebuild_with_attachments(
+    account: &Account,
+    raw: &[u8],
+    paths: &[std::path::PathBuf],
+) -> Result<Vec<u8>> {
+    let parsed = mail_parser::MessageParser::default()
+        .parse(raw)
+        .with_context(|| "parse draft for re-attach")?;
+    let mut composer =
+        inbx_composer::Composer::new_blank(inbx_composer::Identity::from_account(account));
+    if let Some(s) = parsed.subject() {
+        composer.subject.set_content(s);
+    }
+    if let Some(g) = parsed.to() {
+        let s = g
+            .iter()
+            .filter_map(|a| a.address().map(|s| s.to_string()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        if !s.is_empty() {
+            composer.to.set_content(&s);
+        }
+    }
+    if let Some(g) = parsed.cc() {
+        let s = g
+            .iter()
+            .filter_map(|a| a.address().map(|s| s.to_string()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        if !s.is_empty() {
+            composer.cc.set_content(&s);
+        }
+    }
+    if let Some(g) = parsed.bcc() {
+        let s = g
+            .iter()
+            .filter_map(|a| a.address().map(|s| s.to_string()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        if !s.is_empty() {
+            composer.bcc.set_content(&s);
+        }
+    }
+    if let Some(b) = parsed.body_text(0) {
+        composer.body.set_content(&b);
+    }
+    for p in paths {
+        composer.attach_path(p)?;
+    }
+    Ok(composer.to_mime()?)
 }
 
 async fn cmd_draft_save(account: Option<String>) -> Result<()> {
@@ -866,6 +928,7 @@ async fn cmd_import(
             attrs: None,
             uidvalidity: Some(0),
             uidnext: None,
+            delta_link: None,
         })
         .await?;
 
@@ -1240,6 +1303,7 @@ async fn cmd_jmap(action: JmapCmd) -> Result<()> {
                     attrs: None,
                     uidvalidity: Some(0),
                     uidnext: None,
+                    delta_link: None,
                 })
                 .await?;
             let emails = client.fetch_inbox_headers(limit).await?;
@@ -1338,8 +1402,6 @@ async fn cmd_graph(action: GraphCmd) -> Result<()> {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs() as i64)
                 .unwrap_or(0);
-            // Graph "inbox" well-known folder ID.
-            let messages = client.list_messages("inbox", limit).await?;
             store
                 .upsert_folder(&inbx_store::FolderRow {
                     name: "Inbox".into(),
@@ -1348,8 +1410,19 @@ async fn cmd_graph(action: GraphCmd) -> Result<()> {
                     attrs: None,
                     uidvalidity: Some(0),
                     uidnext: None,
+                    delta_link: None,
                 })
                 .await?;
+            // Use the persisted deltaLink when present so we only pull
+            // changes; first run still returns full state plus the new link.
+            let prev_delta = store.get_delta_link("Inbox").await?;
+            let _ = limit; // Graph delta is exhaustive — limit ignored here.
+            let (messages, new_delta) = client
+                .delta_messages("inbox", prev_delta.as_deref())
+                .await?;
+            if let Some(link) = new_delta.as_deref() {
+                store.set_delta_link("Inbox", Some(link)).await?;
+            }
             for (i, m) in messages.iter().enumerate() {
                 let date_unix = m.received.as_deref().and_then(parse_iso8601);
                 let from = m.from.as_ref().map(|r| r.formatted());
@@ -1821,6 +1894,7 @@ async fn cmd_fetch(
                 },
                 uidvalidity: None,
                 uidnext: None,
+                delta_link: None,
             })
             .await?;
     }
@@ -1847,6 +1921,7 @@ async fn cmd_fetch(
             attrs: None,
             uidvalidity: Some(uidvalidity as i64),
             uidnext: None,
+            delta_link: None,
         })
         .await?;
     for h in &rows {
@@ -1942,7 +2017,11 @@ async fn cmd_list(account: Option<String>, folder: String, limit: u32) -> Result
     Ok(())
 }
 
-async fn cmd_send(account: Option<String>, no_save: bool) -> Result<()> {
+async fn cmd_send(
+    account: Option<String>,
+    no_save: bool,
+    attachments: Vec<std::path::PathBuf>,
+) -> Result<()> {
     use std::io::Read as _;
 
     let cfg = inbx_config::load()?;
@@ -1957,6 +2036,14 @@ async fn cmd_send(account: Option<String>, no_save: bool) -> Result<()> {
     }
     // Normalize bare-LF to CRLF for SMTP wire format.
     let raw = normalize_crlf(raw);
+
+    // Re-emit through the composer when attachments are requested so the
+    // outgoing MIME is multipart/mixed with the parts attached.
+    let raw = if attachments.is_empty() {
+        raw
+    } else {
+        rebuild_with_attachments(&acct, &raw, &attachments)?
+    };
 
     tracing::info!(account = %acct.name, bytes = raw.len(), "sending");
     if let Err(e) = inbx_net::send_message(&acct, &raw).await {

@@ -27,6 +27,8 @@ pub struct FolderRow {
     pub attrs: Option<String>,
     pub uidvalidity: Option<i64>,
     pub uidnext: Option<i64>,
+    #[sqlx(default)]
+    pub delta_link: Option<String>,
 }
 
 #[derive(Debug, Clone, FromRow)]
@@ -118,6 +120,24 @@ impl Store {
         .fetch_all(&self.pool)
         .await?;
         Ok(rows)
+    }
+
+    pub async fn get_delta_link(&self, folder: &str) -> Result<Option<String>> {
+        let row: Option<(Option<String>,)> =
+            sqlx::query_as("SELECT delta_link FROM folders WHERE name = ?1")
+                .bind(folder)
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(row.and_then(|(v,)| v))
+    }
+
+    pub async fn set_delta_link(&self, folder: &str, link: Option<&str>) -> Result<()> {
+        sqlx::query("UPDATE folders SET delta_link = ?2 WHERE name = ?1")
+            .bind(folder)
+            .bind(link)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
     }
 
     pub async fn folder_max_uid(&self, folder: &str, uidvalidity: i64) -> Result<Option<i64>> {

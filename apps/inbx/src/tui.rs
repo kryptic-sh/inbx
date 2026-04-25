@@ -11,6 +11,7 @@ use crossterm::terminal::{
 use futures_util::StreamExt;
 use inbx_composer::{Composer, Field as ComposerField, Identity};
 use inbx_config::Account;
+use inbx_config::theme::{Rgb, Theme};
 use inbx_store::{FolderRow, MessageRow, Store};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
@@ -47,6 +48,8 @@ impl App {
         if !folders.is_empty() {
             folder_state.select(Some(0));
         }
+        let theme = inbx_config::theme::load_theme().unwrap_or_default();
+        let _ = ACTIVE_THEME.set(theme);
         let mut app = Self {
             account,
             store,
@@ -464,16 +467,31 @@ fn draw(f: &mut ratatui::Frame, app: &App) {
     draw_status(f, app, outer[1]);
 }
 
+/// Process-wide theme handle. The single `App::run` sets it before the
+/// event loop starts; the standalone `pane_block` helper reads it. We
+/// keep a OnceLock instead of threading `&Theme` through every draw
+/// function — there's only ever one theme per process.
+static ACTIVE_THEME: std::sync::OnceLock<Theme> = std::sync::OnceLock::new();
+
+fn theme() -> &'static Theme {
+    ACTIVE_THEME.get_or_init(Theme::default)
+}
+
 fn pane_block(title: &str, focused: bool) -> Block<'_> {
-    let style = if focused {
-        Style::default().fg(Color::Yellow)
+    let t = theme();
+    let color = if focused {
+        rgb(&t.focused)
     } else {
-        Style::default().fg(Color::DarkGray)
+        rgb(&t.unfocused)
     };
     Block::default()
         .borders(Borders::ALL)
         .title(title)
-        .border_style(style)
+        .border_style(Style::default().fg(color))
+}
+
+fn rgb(c: &Rgb) -> Color {
+    Color::Rgb(c.0, c.1, c.2)
 }
 
 fn draw_folders(f: &mut ratatui::Frame, app: &App, area: Rect) {
@@ -506,7 +524,9 @@ fn draw_messages(f: &mut ratatui::Frame, app: &App, area: Rect) {
             let subj = m.subject.clone().unwrap_or_default();
             let line = format!("{}  {}", truncate(&from, 18), truncate(&subj, 60));
             let style = if unread {
-                Style::default().add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(rgb(&theme().unread))
+                    .add_modifier(Modifier::BOLD)
             } else {
                 Style::default()
             };
@@ -541,7 +561,9 @@ fn draw_status(f: &mut ratatui::Frame, app: &App, area: Rect) {
         " [{pane}]  q quit · h/l pane · j/k move · gg/G top/bottom · Enter open  {}",
         app.status
     );
-    let para = Paragraph::new(text).style(Style::default().bg(Color::DarkGray).fg(Color::White));
+    let t = theme();
+    let para =
+        Paragraph::new(text).style(Style::default().bg(rgb(&t.status_bg)).fg(rgb(&t.status_fg)));
     f.render_widget(para, area);
 }
 

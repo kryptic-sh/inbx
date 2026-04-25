@@ -1,3 +1,5 @@
+pub mod theme;
+
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};

@@ -107,6 +107,39 @@ impl GraphClient {
         Ok(page.value)
     }
 
+    /// Walk Graph's delta endpoint for a folder. Pass `None` for the first
+    /// run; pass the previously-stored deltaLink on subsequent runs to fetch
+    /// only changes. Returns `(messages, new_delta_link)`.
+    pub async fn delta_messages(
+        &self,
+        folder_id: &str,
+        delta_link: Option<&str>,
+    ) -> Result<(Vec<GraphMessage>, Option<String>)> {
+        let mut url = match delta_link {
+            Some(link) => link.to_string(),
+            None => format!(
+                "https://graph.microsoft.com/v1.0/me/mailFolders/{folder_id}/messages/delta\
+                 ?$select=id,subject,from,toRecipients,receivedDateTime,internetMessageId,isRead"
+            ),
+        };
+        let mut messages = Vec::new();
+        let mut next_delta: Option<String> = None;
+        loop {
+            let res = self.get(&url).await?;
+            let page: DeltaPage<GraphMessage> = res.json().await?;
+            messages.extend(page.value);
+            if let Some(d) = page.delta_link {
+                next_delta = Some(d);
+                break;
+            }
+            match page.next_link {
+                Some(n) => url = n,
+                None => break,
+            }
+        }
+        Ok((messages, next_delta))
+    }
+
     /// Download the raw RFC 822 body for one message.
     pub async fn fetch_mime(&self, message_id: &str) -> Result<Vec<u8>> {
         let url = format!("https://graph.microsoft.com/v1.0/me/messages/{message_id}/$value");
@@ -144,6 +177,15 @@ struct Page<T> {
     value: Vec<T>,
     #[serde(rename = "@odata.nextLink")]
     next_link: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DeltaPage<T> {
+    value: Vec<T>,
+    #[serde(rename = "@odata.nextLink", default)]
+    next_link: Option<String>,
+    #[serde(rename = "@odata.deltaLink", default)]
+    delta_link: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]

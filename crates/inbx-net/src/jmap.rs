@@ -13,6 +13,8 @@ use inbx_config::{Account, AuthMethod};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use crate::oauth;
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("io: {0}")]
@@ -29,6 +31,15 @@ pub enum Error {
     NoAccountId,
     #[error("only AppPassword auth supported by this JMAP client")]
     UnsupportedAuth,
+    #[error("oauth: {0}")]
+    OAuth(#[from] oauth::Error),
+}
+
+/// Either basic auth (app password) or Bearer (OAuth2 access token).
+#[derive(Debug, Clone)]
+enum JmapAuth {
+    Basic { user: String, password: String },
+    Bearer(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -58,8 +69,7 @@ impl Session {
 
 pub struct JmapClient {
     http: reqwest::Client,
-    user: String,
-    password: String,
+    auth: JmapAuth,
     pub session: Session,
     pub account_id: String,
 }
@@ -68,18 +78,21 @@ impl JmapClient {
     /// `session_url` is typically the JMAP host's `/.well-known/jmap`
     /// (Fastmail: `https://api.fastmail.com/jmap/session`).
     pub async fn connect(account: &Account, session_url: &str) -> Result<Self> {
-        let password = match &account.auth {
-            AuthMethod::AppPassword => inbx_config::load_password(&account.name)?,
-            AuthMethod::OAuth2 { .. } => return Err(Error::UnsupportedAuth),
+        let auth = match &account.auth {
+            AuthMethod::AppPassword => JmapAuth::Basic {
+                user: account.username.clone(),
+                password: inbx_config::load_password(&account.name)?,
+            },
+            AuthMethod::OAuth2 { provider, .. } => {
+                let refresh = inbx_config::load_refresh_token(&account.name)?;
+                let access = oauth::refresh(&account.auth, provider, &refresh).await?;
+                JmapAuth::Bearer(access)
+            }
         };
         let http = reqwest::ClientBuilder::new()
             .timeout(Duration::from_secs(30))
             .build()?;
-        let res = http
-            .get(session_url)
-            .basic_auth(&account.username, Some(&password))
-            .send()
-            .await?;
+        let res = apply_auth(http.get(session_url), &auth).send().await?;
         if !res.status().is_success() {
             let status = res.status().as_u16();
             let body = res.text().await.unwrap_or_default();
@@ -92,8 +105,7 @@ impl JmapClient {
             .to_string();
         Ok(Self {
             http,
-            user: account.username.clone(),
-            password,
+            auth,
             session,
             account_id,
         })
@@ -101,13 +113,8 @@ impl JmapClient {
 
     async fn invoke(&self, methods: Vec<Value>, using: Vec<&str>) -> Result<Value> {
         let body = json!({ "using": using, "methodCalls": methods });
-        let res = self
-            .http
-            .post(&self.session.api_url)
-            .basic_auth(&self.user, Some(&self.password))
-            .json(&body)
-            .send()
-            .await?;
+        let req = apply_auth(self.http.post(&self.session.api_url), &self.auth).json(&body);
+        let res = req.send().await?;
         if !res.status().is_success() {
             let status = res.status().as_u16();
             let body = res.text().await.unwrap_or_default();
@@ -195,10 +202,7 @@ impl JmapClient {
                 body: "session has no uploadUrl".into(),
             })?
             .replace("{accountId}", &self.account_id);
-        let upload: Value = self
-            .http
-            .post(&upload_url)
-            .basic_auth(&self.user, Some(&self.password))
+        let upload: Value = apply_auth(self.http.post(&upload_url), &self.auth)
             .header("Content-Type", "message/rfc822")
             .body(raw.to_vec())
             .send()
@@ -305,6 +309,13 @@ pub struct EmailAddress {
     #[serde(default)]
     pub name: Option<String>,
     pub email: String,
+}
+
+fn apply_auth(builder: reqwest::RequestBuilder, auth: &JmapAuth) -> reqwest::RequestBuilder {
+    match auth {
+        JmapAuth::Basic { user, password } => builder.basic_auth(user, Some(password)),
+        JmapAuth::Bearer(token) => builder.bearer_auth(token),
+    }
 }
 
 impl EmailAddress {

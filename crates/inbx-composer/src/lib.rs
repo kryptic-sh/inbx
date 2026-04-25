@@ -81,6 +81,14 @@ pub struct Composer {
     pub focus: Field,
     pub in_reply_to: Option<String>,
     pub references: Vec<String>,
+    pub attachments: Vec<Attachment>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Attachment {
+    pub filename: String,
+    pub content_type: String,
+    pub bytes: Vec<u8>,
 }
 
 impl Composer {
@@ -99,6 +107,7 @@ impl Composer {
             focus: Field::To,
             in_reply_to: None,
             references: Vec::new(),
+            attachments: Vec::new(),
         }
     }
 
@@ -244,6 +253,23 @@ impl Composer {
         editor_text(&self.to)
     }
 
+    /// Attach a file from disk. Content-type sniffed from extension.
+    pub fn attach_path(&mut self, path: &std::path::Path) -> Result<()> {
+        let bytes = std::fs::read(path).map_err(|_| Error::Missing("read attachment"))?;
+        let filename = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("attachment")
+            .to_string();
+        let content_type = guess_content_type(&filename);
+        self.attachments.push(Attachment {
+            filename,
+            content_type,
+            bytes,
+        });
+        Ok(())
+    }
+
     /// Emit a lenient draft scaffold suitable for user editing.
     /// Unlike [`Composer::to_mime`], empty To is allowed and the output is
     /// plain RFC 5322-shaped text rather than fully canonical MIME.
@@ -319,11 +345,44 @@ impl Composer {
                     .collect::<Vec<_>>(),
             );
         }
+        for a in &self.attachments {
+            builder =
+                builder.attachment(a.content_type.clone(), a.filename.clone(), a.bytes.clone());
+        }
         let bytes = builder
             .write_to_vec()
             .map_err(|_| Error::Missing("write"))?;
         Ok(bytes)
     }
+}
+
+fn guess_content_type(filename: &str) -> String {
+    let ext = std::path::Path::new(filename)
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    match ext.as_str() {
+        "pdf" => "application/pdf",
+        "txt" | "log" | "md" => "text/plain",
+        "html" | "htm" => "text/html",
+        "json" => "application/json",
+        "xml" => "application/xml",
+        "csv" => "text/csv",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "svg" => "image/svg+xml",
+        "zip" => "application/zip",
+        "gz" | "tgz" => "application/gzip",
+        "tar" => "application/x-tar",
+        "mp3" => "audio/mpeg",
+        "mp4" => "video/mp4",
+        "ics" => "text/calendar",
+        _ => "application/octet-stream",
+    }
+    .to_string()
 }
 
 fn editor_text(ed: &Editor<'static>) -> String {
