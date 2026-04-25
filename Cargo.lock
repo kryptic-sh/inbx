@@ -1532,6 +1532,7 @@ dependencies = [
  "clap",
  "crossterm",
  "futures-util",
+ "hjkl-editor",
  "inbx-composer",
  "inbx-config",
  "inbx-contacts",

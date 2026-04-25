@@ -22,6 +22,7 @@ inbx-render.workspace = true
 inbx-contacts.workspace = true
 inbx-ical.workspace = true
 inbx-composer.workspace = true
+hjkl-editor.workspace = true
 mail-parser.workspace = true
 notify-rust.workspace = true
 anyhow.workspace = true

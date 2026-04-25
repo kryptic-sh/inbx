@@ -1487,8 +1487,8 @@ async fn cmd_contacts(action: ContactsCmd) -> Result<()> {
 
 async fn cmd_tui(account: Option<String>) -> Result<()> {
     let cfg = inbx_config::load()?;
-    let acct = pick_account(&cfg, account.as_deref())?;
-    tui::run(acct.name.clone()).await
+    let acct = pick_account(&cfg, account.as_deref())?.clone();
+    tui::run(acct).await
 }
 
 fn cmd_config() -> Result<()> {
