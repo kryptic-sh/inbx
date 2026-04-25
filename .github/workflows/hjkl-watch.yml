@@ -6,8 +6,9 @@ name: hjkl release watcher
 
 on:
   schedule:
-    # 14:00 UTC every day — picks up overnight hjkl releases.
-    - cron: "0 14 * * *"
+    # Every 30 minutes. Worst-case latency from a hjkl release to PR
+    # landing here is ~30m + queue time.
+    - cron: "*/30 * * * *"
   workflow_dispatch:
 
 permissions:
