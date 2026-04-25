@@ -126,6 +126,11 @@ enum Cmd {
         #[command(subcommand)]
         action: DraftCmd,
     },
+    /// Per-account canned templates.
+    Template {
+        #[command(subcommand)]
+        action: TemplateCmd,
+    },
     /// Loop forever: fetch + notify, then IDLE for new mail.
     Watch {
         #[arg(long)]
@@ -157,6 +162,41 @@ enum Cmd {
         /// Print targets and exit without sending.
         #[arg(long)]
         dry_run: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum TemplateCmd {
+    /// Show saved template names.
+    List {
+        #[arg(long)]
+        account: Option<String>,
+    },
+    /// Save stdin (or `--file PATH`) as a template under NAME.
+    Save {
+        #[arg(long)]
+        account: Option<String>,
+        name: String,
+        #[arg(long, default_value = "-")]
+        file: String,
+    },
+    /// Print a template's RFC 5322 source.
+    Show {
+        #[arg(long)]
+        account: Option<String>,
+        name: String,
+    },
+    /// Emit a draft scaffolded from NAME (use the template, fill in fields).
+    Use {
+        #[arg(long)]
+        account: Option<String>,
+        name: String,
+    },
+    /// Remove the template by name.
+    Remove {
+        #[arg(long)]
+        account: Option<String>,
+        name: String,
     },
 }
 
@@ -467,6 +507,7 @@ async fn main() -> Result<()> {
         Cmd::Thread { account, thread_id } => cmd_thread(account, thread_id).await,
         Cmd::Ical { action } => cmd_ical(action).await,
         Cmd::Draft { action } => cmd_draft(action).await,
+        Cmd::Template { action } => cmd_template(action).await,
         Cmd::Watch { account, bodies } => cmd_watch(account, bodies).await,
         Cmd::Outbox { action } => cmd_outbox(action).await,
         Cmd::Sieve { action } => cmd_sieve(action).await,
@@ -528,6 +569,57 @@ async fn cmd_draft(action: DraftCmd) -> Result<()> {
     let draft = composer.to_draft();
     use std::io::Write as _;
     std::io::stdout().write_all(draft.as_bytes())?;
+    Ok(())
+}
+
+async fn cmd_template(action: TemplateCmd) -> Result<()> {
+    use std::io::Read as _;
+    let cfg = inbx_config::load()?;
+    match action {
+        TemplateCmd::List { account } => {
+            let acct = pick_account(&cfg, account.as_deref())?;
+            for name in inbx_composer::templates::list(&acct.name)? {
+                println!("{name}");
+            }
+        }
+        TemplateCmd::Save {
+            account,
+            name,
+            file,
+        } => {
+            let acct = pick_account(&cfg, account.as_deref())?;
+            let raw = if file == "-" {
+                let mut buf = Vec::new();
+                std::io::stdin().read_to_end(&mut buf)?;
+                buf
+            } else {
+                std::fs::read(&file)?
+            };
+            let path = inbx_composer::templates::save(&acct.name, &name, &raw)?;
+            println!("saved {}", path.display());
+        }
+        TemplateCmd::Show { account, name } => {
+            let acct = pick_account(&cfg, account.as_deref())?;
+            let raw = inbx_composer::templates::load_raw(&acct.name, &name)?;
+            use std::io::Write as _;
+            std::io::stdout().write_all(&raw)?;
+        }
+        TemplateCmd::Use { account, name } => {
+            let acct = pick_account(&cfg, account.as_deref())?;
+            let composer = inbx_composer::templates::from_template(
+                inbx_composer::Identity::from_account(acct),
+                &acct.name,
+                &name,
+            )?;
+            use std::io::Write as _;
+            std::io::stdout().write_all(composer.to_draft().as_bytes())?;
+        }
+        TemplateCmd::Remove { account, name } => {
+            let acct = pick_account(&cfg, account.as_deref())?;
+            inbx_composer::templates::delete(&acct.name, &name)?;
+            println!("removed {name}");
+        }
+    }
     Ok(())
 }
 

@@ -7,6 +7,7 @@
 //! from the original message and emitted on the outgoing headers.
 
 pub mod identity;
+pub mod templates;
 
 use hjkl_editor::runtime::{Editor, KeybindingMode};
 use mail_builder::MessageBuilder;
