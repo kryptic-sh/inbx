@@ -84,16 +84,14 @@ pub fn list(account: &str) -> Result<Vec<String>> {
     let mut names = Vec::new();
     for entry in std::fs::read_dir(&dir)? {
         let entry = entry?;
-        if let Some(stem) = entry.path().file_stem().and_then(|s| s.to_str()) {
-            if entry
+        if let Some(stem) = entry.path().file_stem().and_then(|s| s.to_str())
+            && entry
                 .path()
                 .extension()
                 .and_then(|s| s.to_str())
-                .map(|s| s.eq_ignore_ascii_case("eml"))
-                .unwrap_or(false)
-            {
-                names.push(stem.to_string());
-            }
+                .is_some_and(|s| s.eq_ignore_ascii_case("eml"))
+        {
+            names.push(stem.to_string());
         }
     }
     names.sort();
@@ -141,11 +139,11 @@ pub fn from_template(identity: Identity, account: &str, name: &str) -> Result<Co
     }
     if let Some(body) = parsed.body_text(0) {
         let mut text = body.to_string();
-        if let Some(sig) = composer.identity.signature_block() {
-            if !text.contains("-- ") {
-                text.push('\n');
-                text.push_str(&sig);
-            }
+        if let Some(sig) = composer.identity.signature_block()
+            && !text.contains("-- ")
+        {
+            text.push('\n');
+            text.push_str(&sig);
         }
         composer.body.set_content(&text);
     }

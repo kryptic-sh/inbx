@@ -1,0 +1,27 @@
+[package]
+name = "inbx-gui"
+description = "inbx-gui — egui front-end for the inbx email client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "inbx-gui"
+path = "src/main.rs"
+
+[dependencies]
+inbx-core.workspace = true
+inbx-config.workspace = true
+inbx-store.workspace = true
+inbx-render.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+eframe.workspace = true
+egui.workspace = true

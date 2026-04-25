@@ -10,6 +10,7 @@ members = [
     "crates/inbx-ical",
     "crates/inbx-composer",
     "apps/inbx",
+    "apps/inbx-gui",
     "xtask",
 ]
 
@@ -39,6 +40,10 @@ futures-util = "0.3"
 # TUI
 ratatui = "0.29"
 crossterm = { version = "0.28", features = ["event-stream"] }
+
+# GUI
+eframe = { version = "0.31", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
+egui = "0.31"
 
 # IMAP / TLS
 async-imap = { version = "0.10", default-features = false, features = ["runtime-tokio"] }
