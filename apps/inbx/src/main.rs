@@ -116,6 +116,19 @@ enum Cmd {
         #[arg(long)]
         eml: bool,
     },
+    /// Loop forever: fetch + notify, then IDLE for new mail.
+    Watch {
+        #[arg(long)]
+        account: Option<String>,
+        /// Also download bodies for each new batch.
+        #[arg(long)]
+        bodies: bool,
+    },
+    /// Outbound queue for offline / failed sends.
+    Outbox {
+        #[command(subcommand)]
+        action: OutboxCmd,
+    },
     /// ManageSieve (RFC 5804) — server-side filter scripts.
     Sieve {
         #[command(subcommand)]
@@ -134,6 +147,26 @@ enum Cmd {
         /// Print targets and exit without sending.
         #[arg(long)]
         dry_run: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum OutboxCmd {
+    /// Show queued messages.
+    List {
+        #[arg(long)]
+        account: Option<String>,
+    },
+    /// Try to send everything that's due now.
+    Drain {
+        #[arg(long)]
+        account: Option<String>,
+    },
+    /// Drop a queued message by id.
+    Remove {
+        #[arg(long)]
+        account: Option<String>,
+        id: i64,
     },
 }
 
@@ -351,6 +384,8 @@ async fn main() -> Result<()> {
         } => cmd_search(account, query, limit).await,
         Cmd::Thread { account, thread_id } => cmd_thread(account, thread_id).await,
         Cmd::Ical { action } => cmd_ical(action).await,
+        Cmd::Watch { account, bodies } => cmd_watch(account, bodies).await,
+        Cmd::Outbox { action } => cmd_outbox(action).await,
         Cmd::Sieve { action } => cmd_sieve(action).await,
         Cmd::Unsubscribe {
             account,
@@ -371,6 +406,80 @@ async fn main() -> Result<()> {
             eml,
         } => cmd_import(account, folder, input, eml).await,
     }
+}
+
+async fn cmd_watch(account: Option<String>, bodies: bool) -> Result<()> {
+    let cfg = inbx_config::load()?;
+    let acct_name = pick_account(&cfg, account.as_deref())?.name.clone();
+    loop {
+        if let Err(e) = cmd_fetch(Some(acct_name.clone()), bodies, 200, true).await {
+            tracing::warn!(%e, "fetch failed; backing off 30s");
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            continue;
+        }
+        // Refresh acct from disk in case config changed.
+        let cfg = inbx_config::load()?;
+        let acct = pick_account(&cfg, Some(&acct_name))?.clone();
+        match inbx_net::idle::wait_for_new(&acct).await {
+            Ok(inbx_net::idle::IdleEvent::NewData) => {
+                tracing::info!("new data signal");
+            }
+            Ok(inbx_net::idle::IdleEvent::Timeout) => {
+                tracing::info!("idle keepalive cycle");
+            }
+            Err(e) => {
+                tracing::warn!(%e, "idle error; backing off 30s");
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            }
+        }
+    }
+}
+
+async fn cmd_outbox(action: OutboxCmd) -> Result<()> {
+    let cfg = inbx_config::load()?;
+    match action {
+        OutboxCmd::List { account } => {
+            let acct = pick_account(&cfg, account.as_deref())?;
+            let store = inbx_store::Store::open(&acct.name).await?;
+            for r in store.outbox_list().await? {
+                println!(
+                    "{:>4}  attempts={}  next_retry={}  bytes={}  err={}",
+                    r.id,
+                    r.attempts,
+                    format_unix(r.next_retry_unix),
+                    r.raw.len(),
+                    r.last_error.unwrap_or_default(),
+                );
+            }
+        }
+        OutboxCmd::Drain { account } => {
+            let acct = pick_account(&cfg, account.as_deref())?.clone();
+            let store = inbx_store::Store::open(&acct.name).await?;
+            let due = store.outbox_due().await?;
+            let mut sent = 0usize;
+            let mut failed = 0usize;
+            for r in due {
+                match inbx_net::send_message(&acct, &r.raw).await {
+                    Ok(()) => {
+                        store.outbox_delete(r.id).await?;
+                        sent += 1;
+                    }
+                    Err(e) => {
+                        store.outbox_record_failure(r.id, &e.to_string()).await?;
+                        failed += 1;
+                    }
+                }
+            }
+            println!("drained: {sent} sent, {failed} failed");
+        }
+        OutboxCmd::Remove { account, id } => {
+            let acct = pick_account(&cfg, account.as_deref())?;
+            let store = inbx_store::Store::open(&acct.name).await?;
+            store.outbox_delete(id).await?;
+            println!("removed {id}");
+        }
+    }
+    Ok(())
 }
 
 async fn cmd_sieve(action: SieveCmd) -> Result<()> {
@@ -1494,7 +1603,14 @@ async fn cmd_send(account: Option<String>, no_save: bool) -> Result<()> {
     let raw = normalize_crlf(raw);
 
     tracing::info!(account = %acct.name, bytes = raw.len(), "sending");
-    inbx_net::send_message(&acct, &raw).await?;
+    if let Err(e) = inbx_net::send_message(&acct, &raw).await {
+        tracing::warn!(%e, "send failed; queueing in outbox");
+        let store = inbx_store::Store::open(&acct.name).await?;
+        let id = store.outbox_enqueue(&raw).await?;
+        store.outbox_record_failure(id, &e.to_string()).await?;
+        println!("queued in outbox (id={id}); run `inbx outbox drain` to retry");
+        return Ok(());
+    }
     println!("sent");
 
     if let Ok(contacts) = inbx_contacts::ContactsStore::open(&acct.name).await {

@@ -30,6 +30,16 @@ pub struct FolderRow {
 }
 
 #[derive(Debug, Clone, FromRow)]
+pub struct OutboxRow {
+    pub id: i64,
+    pub enqueued_unix: i64,
+    pub raw: Vec<u8>,
+    pub attempts: i64,
+    pub next_retry_unix: i64,
+    pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, FromRow)]
 pub struct MessageRow {
     pub folder: String,
     pub uid: i64,
@@ -288,6 +298,75 @@ impl Store {
         Ok(())
     }
 
+    // -- outbox --
+
+    pub async fn outbox_enqueue(&self, raw: &[u8]) -> Result<i64> {
+        let now = unix_now();
+        let row: (i64,) = sqlx::query_as(
+            "INSERT INTO outbox (enqueued_unix, raw, attempts, next_retry_unix)
+             VALUES (?1, ?2, 0, ?1)
+             RETURNING id",
+        )
+        .bind(now)
+        .bind(raw)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row.0)
+    }
+
+    pub async fn outbox_list(&self) -> Result<Vec<OutboxRow>> {
+        let rows: Vec<OutboxRow> = sqlx::query_as(
+            "SELECT id, enqueued_unix, raw, attempts, next_retry_unix, last_error
+             FROM outbox ORDER BY enqueued_unix ASC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    pub async fn outbox_due(&self) -> Result<Vec<OutboxRow>> {
+        let now = unix_now();
+        let rows: Vec<OutboxRow> = sqlx::query_as(
+            "SELECT id, enqueued_unix, raw, attempts, next_retry_unix, last_error
+             FROM outbox WHERE next_retry_unix <= ?1
+             ORDER BY enqueued_unix ASC",
+        )
+        .bind(now)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    pub async fn outbox_delete(&self, id: i64) -> Result<()> {
+        sqlx::query("DELETE FROM outbox WHERE id = ?1")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn outbox_record_failure(&self, id: i64, error: &str) -> Result<()> {
+        // Exponential backoff: 30, 60, 120, 240, … capped at 1h.
+        let row: Option<(i64,)> = sqlx::query_as("SELECT attempts FROM outbox WHERE id = ?1")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await?;
+        let attempts = row.map(|(a,)| a).unwrap_or(0) + 1;
+        let delay = 30i64.saturating_mul(1 << (attempts - 1).min(7)).min(3600);
+        let next = unix_now() + delay;
+        sqlx::query(
+            "UPDATE outbox SET attempts = ?2, next_retry_unix = ?3, last_error = ?4
+             WHERE id = ?1",
+        )
+        .bind(id)
+        .bind(attempts)
+        .bind(next)
+        .bind(error)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     pub async fn search(&self, query: &str, limit: u32) -> Result<Vec<MessageRow>> {
         let rows: Vec<MessageRow> = sqlx::query_as(
             "SELECT m.folder, m.uid, m.uidvalidity, m.message_id, m.subject, m.from_addr,
@@ -392,6 +471,13 @@ impl Store {
         std::fs::write(&path, raw)?;
         Ok(path)
     }
+}
+
+fn unix_now() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 /// Translate IMAP flag string ("\\Seen \\Flagged") into Maildir info chars.
