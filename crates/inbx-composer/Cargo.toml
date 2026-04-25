@@ -11,5 +11,10 @@ authors.workspace = true
 
 [dependencies]
 inbx-core.workspace = true
+inbx-config.workspace = true
 thiserror.workspace = true
-# hjkl deps wired at M6 once hjkl 0.1.0 ships `spec::*` traits.
+serde.workspace = true
+mail-parser.workspace = true
+mail-builder.workspace = true
+hjkl-editor.workspace = true
+hjkl-buffer.workspace = true

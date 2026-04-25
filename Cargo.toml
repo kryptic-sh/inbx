@@ -78,9 +78,13 @@ inbx-contacts = { path = "crates/inbx-contacts" }
 inbx-ical = { path = "crates/inbx-ical" }
 inbx-composer = { path = "crates/inbx-composer" }
 
-# hjkl path deps gated on hjkl 0.1.0 (`spec::*` traits). Wired at M6.
-# hjkl-editor = { path = "../hjkl/crates/hjkl-editor" }
-# hjkl-buffer = { path = "../hjkl/crates/hjkl-buffer", features = ["ratatui"] }
+# hjkl path deps. We consume runtime::* today (hjkl 0.0.15); migration
+# to spec::* lands when hjkl ships 0.1.0 traits.
+hjkl-editor = { path = "../hjkl/crates/hjkl-editor" }
+hjkl-buffer = { path = "../hjkl/crates/hjkl-buffer", features = ["ratatui"] }
+hjkl-engine = { path = "../hjkl/crates/hjkl-engine" }
+
+mail-builder = "0.4"
 
 [profile.release]
 lto = "thin"

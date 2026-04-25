@@ -293,8 +293,10 @@ inbx/
   Lean `html2text` for TUI, optional webview pane for GUI.
 - Sync daemon now or v2? Lean v2 — keep TUI self-contained first.
 - Per-account encryption-at-rest for Maildir? Defer.
-- ~~hjkl `runtime::*` vs `spec::*`?~~ **Decided: wait for hjkl 0.1.0
-  `spec::*`.** M6 (composer) blocked until hjkl ships.
+- ~~hjkl `runtime::*` vs `spec::*`?~~ **Reversed: start with
+  `runtime::*` (hjkl 0.0.15).** `spec::*` types landed but trait impls
+  are still forthcoming; sqeel + buffr already ship on `runtime::*`.
+  Composer migrates to `spec::*` when hjkl 0.1.0 traits land.
 - ~~OAuth from day 1?~~ **Decided: app password for MVP.** OAuth at M9.
 
 ## Non-Goals (v1)

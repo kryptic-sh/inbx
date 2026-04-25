@@ -121,6 +121,11 @@ enum Cmd {
         #[arg(long)]
         eml: bool,
     },
+    /// Emit an RFC 5322 draft (blank, reply, or forward) to stdout.
+    Draft {
+        #[command(subcommand)]
+        action: DraftCmd,
+    },
     /// Loop forever: fetch + notify, then IDLE for new mail.
     Watch {
         #[arg(long)]
@@ -152,6 +157,33 @@ enum Cmd {
         /// Print targets and exit without sending.
         #[arg(long)]
         dry_run: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum DraftCmd {
+    /// Empty draft scaffolded with the account's identity.
+    New {
+        #[arg(long)]
+        account: Option<String>,
+    },
+    /// Reply to the message at `uid` in `folder`.
+    Reply {
+        #[arg(long)]
+        account: Option<String>,
+        #[arg(long, default_value = "INBOX")]
+        folder: String,
+        uid: i64,
+        #[arg(long)]
+        all: bool,
+    },
+    /// Forward the message at `uid` in `folder`.
+    Forward {
+        #[arg(long)]
+        account: Option<String>,
+        #[arg(long, default_value = "INBOX")]
+        folder: String,
+        uid: i64,
     },
 }
 
@@ -429,6 +461,7 @@ async fn main() -> Result<()> {
         } => cmd_search(account, query, limit).await,
         Cmd::Thread { account, thread_id } => cmd_thread(account, thread_id).await,
         Cmd::Ical { action } => cmd_ical(action).await,
+        Cmd::Draft { action } => cmd_draft(action).await,
         Cmd::Watch { account, bodies } => cmd_watch(account, bodies).await,
         Cmd::Outbox { action } => cmd_outbox(action).await,
         Cmd::Sieve { action } => cmd_sieve(action).await,
@@ -451,6 +484,43 @@ async fn main() -> Result<()> {
             eml,
         } => cmd_import(account, folder, input, eml).await,
     }
+}
+
+async fn cmd_draft(action: DraftCmd) -> Result<()> {
+    let cfg = inbx_config::load()?;
+    let composer = match action {
+        DraftCmd::New { account } => {
+            let acct = pick_account(&cfg, account.as_deref())?;
+            inbx_composer::Composer::new_blank(inbx_composer::Identity::from_account(acct))
+        }
+        DraftCmd::Reply {
+            account,
+            folder,
+            uid,
+            all,
+        } => {
+            let acct = pick_account(&cfg, account.as_deref())?;
+            let raw = read_message_raw(&acct.name, &folder, uid).await?;
+            inbx_composer::Composer::new_reply(
+                inbx_composer::Identity::from_account(acct),
+                &raw,
+                all,
+            )?
+        }
+        DraftCmd::Forward {
+            account,
+            folder,
+            uid,
+        } => {
+            let acct = pick_account(&cfg, account.as_deref())?;
+            let raw = read_message_raw(&acct.name, &folder, uid).await?;
+            inbx_composer::Composer::new_forward(inbx_composer::Identity::from_account(acct), &raw)?
+        }
+    };
+    let draft = composer.to_draft();
+    use std::io::Write as _;
+    std::io::stdout().write_all(draft.as_bytes())?;
+    Ok(())
 }
 
 async fn cmd_watch(account: Option<String>, bodies: bool) -> Result<()> {
