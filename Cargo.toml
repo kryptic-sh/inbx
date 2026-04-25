@@ -78,8 +78,10 @@ inbx-contacts = { path = "crates/inbx-contacts" }
 inbx-ical = { path = "crates/inbx-ical" }
 inbx-composer = { path = "crates/inbx-composer" }
 
-# hjkl path deps. We consume runtime::* today (hjkl 0.0.15); migration
-# to spec::* lands when hjkl ships 0.1.0 traits.
+# hjkl path deps. Pinned to 0.0.15 (.github/hjkl-version.txt).
+# We consume runtime::* today; migration to spec::* lands when 0.1.0
+# ships traits — see .github/workflows/hjkl-watch.yml for the bot that
+# notices new releases.
 hjkl-editor = { path = "../hjkl/crates/hjkl-editor" }
 hjkl-buffer = { path = "../hjkl/crates/hjkl-buffer", features = ["ratatui"] }
 hjkl-engine = { path = "../hjkl/crates/hjkl-engine" }
