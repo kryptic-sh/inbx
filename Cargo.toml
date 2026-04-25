@@ -48,6 +48,8 @@ webpki-roots = "0.26"
 
 # Mail parsing
 mail-parser = "0.10"
+ammonia = "4"
+html2text = "0.13"
 
 # SMTP
 lettre = { version = "0.11", default-features = false, features = ["tokio1-rustls-tls", "smtp-transport", "builder", "ring", "webpki-roots"] }

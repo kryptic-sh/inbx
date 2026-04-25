@@ -12,3 +12,6 @@ authors.workspace = true
 [dependencies]
 inbx-core.workspace = true
 thiserror.workspace = true
+mail-parser.workspace = true
+ammonia.workspace = true
+html2text.workspace = true

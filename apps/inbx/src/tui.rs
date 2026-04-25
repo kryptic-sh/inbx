@@ -89,10 +89,7 @@ impl App {
                 self.body.clear();
             }
             Some(m) => match m.maildir_path.as_deref() {
-                Some(path) => match std::fs::read_to_string(path) {
-                    Ok(s) => self.body = s,
-                    Err(e) => self.body = format!("(unable to read {path}: {e})"),
-                },
+                Some(path) => self.body = render_path(path),
                 None => {
                     self.body = format!(
                         "[body not yet fetched — run `inbx fetch --bodies` to download]\n\n\
@@ -374,5 +371,27 @@ fn truncate(s: &str, n: usize) -> String {
     } else {
         let cut: String = s.chars().take(n.saturating_sub(1)).collect();
         format!("{cut}…")
+    }
+}
+
+fn render_path(path: &str) -> String {
+    let raw = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(e) => return format!("(unable to read {path}: {e})"),
+    };
+    match inbx_render::render_message(&raw, inbx_render::RemotePolicy::Block) {
+        Ok(r) => {
+            let banner = if r.blocked_remote > 0 || !r.trackers.is_empty() {
+                format!(
+                    "[remote content blocked: {} url(s); trackers: {}]\n\n",
+                    r.blocked_remote,
+                    r.trackers.len()
+                )
+            } else {
+                String::new()
+            };
+            format!("{banner}{}", r.plain)
+        }
+        Err(e) => format!("(render error: {e})\n\n{}", String::from_utf8_lossy(&raw)),
     }
 }
