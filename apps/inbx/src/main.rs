@@ -65,6 +65,37 @@ enum Cmd {
         #[command(subcommand)]
         action: OAuthCmd,
     },
+    /// Microsoft Graph (Outlook / M365) operations.
+    Graph {
+        #[command(subcommand)]
+        action: GraphCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum GraphCmd {
+    /// List Graph mail folders.
+    Folders {
+        #[arg(long)]
+        account: Option<String>,
+    },
+    /// Fetch headers from the Inbox (well-known "inbox" folder).
+    Fetch {
+        #[arg(long)]
+        account: Option<String>,
+        #[arg(long, default_value_t = 100)]
+        limit: u32,
+        /// Also download MIME bodies and write to Maildir.
+        #[arg(long)]
+        bodies: bool,
+    },
+    /// Read RFC 5322 from stdin and send via Graph.
+    Send {
+        #[arg(long)]
+        account: Option<String>,
+        #[arg(long)]
+        no_save: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -175,7 +206,155 @@ async fn main() -> Result<()> {
         Cmd::Tui { account } => cmd_tui(account).await,
         Cmd::Contacts { action } => cmd_contacts(action).await,
         Cmd::OAuth { action } => cmd_oauth(action).await,
+        Cmd::Graph { action } => cmd_graph(action).await,
     }
+}
+
+async fn cmd_graph(action: GraphCmd) -> Result<()> {
+    let cfg = inbx_config::load()?;
+    match action {
+        GraphCmd::Folders { account } => {
+            let acct = pick_account(&cfg, account.as_deref())?.clone();
+            let client = inbx_net::graph::GraphClient::connect(&acct).await?;
+            for f in client.list_folders().await? {
+                println!(
+                    "{:>5}u/{:<5}t  {}  {}",
+                    f.unread,
+                    f.total,
+                    f.well_known.unwrap_or_else(|| "-".into()),
+                    f.display_name
+                );
+            }
+        }
+        GraphCmd::Fetch {
+            account,
+            limit,
+            bodies,
+        } => {
+            let acct = pick_account(&cfg, account.as_deref())?.clone();
+            let client = inbx_net::graph::GraphClient::connect(&acct).await?;
+            let store = inbx_store::Store::open(&acct.name).await?;
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            // Graph "inbox" well-known folder ID.
+            let messages = client.list_messages("inbox", limit).await?;
+            store
+                .upsert_folder(&inbx_store::FolderRow {
+                    name: "Inbox".into(),
+                    delim: None,
+                    special_use: None,
+                    attrs: None,
+                    uidvalidity: Some(0),
+                    uidnext: None,
+                })
+                .await?;
+            for (i, m) in messages.iter().enumerate() {
+                let date_unix = m.received.as_deref().and_then(parse_iso8601);
+                let from = m.from.as_ref().map(|r| r.formatted());
+                let to = if m.to.is_empty() {
+                    None
+                } else {
+                    Some(
+                        m.to.iter()
+                            .map(|r| r.formatted())
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                    )
+                };
+                let row = inbx_store::MessageRow {
+                    folder: "Inbox".into(),
+                    // Synthesize a stable integer id from the Graph string id.
+                    uid: graph_uid(&m.id, i),
+                    uidvalidity: 0,
+                    message_id: m.message_id.clone(),
+                    subject: m.subject.clone(),
+                    from_addr: from,
+                    to_addrs: to,
+                    date_unix,
+                    flags: if m.is_read {
+                        "\\Seen".into()
+                    } else {
+                        String::new()
+                    },
+                    maildir_path: None,
+                    headers_only: 1,
+                    fetched_at_unix: now,
+                };
+                store.upsert_message(&row).await?;
+                if bodies {
+                    let raw = client.fetch_mime(&m.id).await?;
+                    let path = store.write_maildir(
+                        "Inbox",
+                        &raw,
+                        if m.is_read { "\\Seen" } else { "" },
+                    )?;
+                    store
+                        .set_maildir_path("Inbox", row.uid, 0, &path.to_string_lossy())
+                        .await?;
+                }
+            }
+            println!("Inbox: {} messages indexed", messages.len());
+        }
+        GraphCmd::Send { account, no_save } => {
+            use std::io::Read as _;
+            let acct = pick_account(&cfg, account.as_deref())?.clone();
+            let client = inbx_net::graph::GraphClient::connect(&acct).await?;
+            let mut raw = Vec::new();
+            std::io::stdin()
+                .read_to_end(&mut raw)
+                .context("read stdin")?;
+            if raw.is_empty() {
+                bail!("empty input on stdin");
+            }
+            let raw = normalize_crlf(raw);
+            client.send_mime(&raw, !no_save).await?;
+            println!("sent via Graph");
+            if let Ok(contacts) = inbx_contacts::ContactsStore::open(&acct.name).await {
+                let _ = contacts.harvest(&raw).await;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn graph_uid(id: &str, idx: usize) -> i64 {
+    // FNV-1a 64-bit, then sign-bit-clear so it fits comfortably in INTEGER.
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in id.as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    let h = (h ^ (idx as u64)) & 0x7fff_ffff_ffff_ffff;
+    h as i64
+}
+
+fn parse_iso8601(s: &str) -> Option<i64> {
+    // Simple Z-suffixed parse: YYYY-MM-DDTHH:MM:SS(.ffff)?Z
+    let bytes = s.as_bytes();
+    if bytes.len() < 20 {
+        return None;
+    }
+    let year: i64 = s.get(0..4)?.parse().ok()?;
+    let month: u32 = s.get(5..7)?.parse().ok()?;
+    let day: u32 = s.get(8..10)?.parse().ok()?;
+    let hour: u32 = s.get(11..13)?.parse().ok()?;
+    let minute: u32 = s.get(14..16)?.parse().ok()?;
+    let second: u32 = s.get(17..19)?.parse().ok()?;
+    Some(civil_to_unix(year, month, day, hour, minute, second))
+}
+
+fn civil_to_unix(y: i64, m: u32, d: u32, h: u32, mi: u32, s: u32) -> i64 {
+    // Howard Hinnant civil_to_days.
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let m = m as i64;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + (d as i64) - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    days * 86_400 + (h as i64) * 3600 + (mi as i64) * 60 + (s as i64)
 }
 
 async fn cmd_oauth(action: OAuthCmd) -> Result<()> {

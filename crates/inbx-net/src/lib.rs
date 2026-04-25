@@ -1,3 +1,4 @@
+pub mod graph;
 pub mod imap;
 pub mod oauth;
 pub mod smtp;
