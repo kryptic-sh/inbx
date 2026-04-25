@@ -384,6 +384,11 @@ fn render_path(path: &str) -> String {
         "[spf={:?} dkim={:?} dmarc={:?}]",
         auth.auth.spf, auth.auth.dkim, auth.auth.dmarc
     );
+    let security = inbx_render::pgp::detect(&raw);
+    let security_line = match security.label {
+        Some(l) => format!("[{l}]\n"),
+        None => String::new(),
+    };
     let mut warnings: Vec<&str> = Vec::new();
     if auth.phishing.reply_to_mismatch {
         warnings.push("reply-to mismatch");
@@ -410,10 +415,13 @@ fn render_path(path: &str) -> String {
             } else {
                 String::new()
             };
-            format!("{auth_line}\n{warn_line}{banner}\n{}", r.plain)
+            format!(
+                "{auth_line}\n{security_line}{warn_line}{banner}\n{}",
+                r.plain
+            )
         }
         Err(e) => format!(
-            "{auth_line}\n{warn_line}(render error: {e})\n\n{}",
+            "{auth_line}\n{security_line}{warn_line}(render error: {e})\n\n{}",
             String::from_utf8_lossy(&raw)
         ),
     }
