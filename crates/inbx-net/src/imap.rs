@@ -34,7 +34,7 @@ pub enum Error {
     #[error("config: {0}")]
     Config(#[from] inbx_config::Error),
     #[error("oauth: {0}")]
-    OAuth(#[from] oauth::Error),
+    Oauth(#[from] oauth::Error),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -88,7 +88,7 @@ async fn do_starttls(tcp: TcpStream) -> Result<TcpStream> {
 
 /// Open an authenticated IMAP session honoring the account's TLS mode and
 /// auth method. Resolves credentials from the OS keyring (app password) or
-/// performs an OAuth2 refresh and authenticates via XOAUTH2.
+/// performs an Oauth2 refresh and authenticates via XOAUTH2.
 pub async fn connect_imap(account: &Account) -> Result<ImapSession> {
     let addr = (account.imap_host.as_str(), account.imap_port);
 
@@ -113,7 +113,7 @@ pub async fn connect_imap(account: &Account) -> Result<ImapSession> {
                 .await
                 .map_err(|(e, _)| Error::Login(e.to_string()))?
         }
-        AuthMethod::OAuth2 { provider, .. } => {
+        AuthMethod::Oauth2 { provider, .. } => {
             let refresh = inbx_config::load_refresh_token(&account.name)?;
             let access = oauth::refresh(&account.auth, provider, &refresh).await?;
             let auth = Xoauth2Authenticator::new(&account.email, &access);

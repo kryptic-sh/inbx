@@ -25,14 +25,14 @@ pub enum Error {
     #[error("config: {0}")]
     Config(#[from] inbx_config::Error),
     #[error("oauth: {0}")]
-    OAuth(#[from] oauth::Error),
+    Oauth(#[from] oauth::Error),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// Send a raw RFC 5322 message via the account's SMTP server.
 /// Envelope is derived from From/To/Cc/Bcc headers in the message itself.
-/// Honors `account.auth` (app password vs OAuth2 XOAUTH2).
+/// Honors `account.auth` (app password vs Oauth2 XOAUTH2).
 pub async fn send_message(account: &Account, raw: &[u8]) -> Result<()> {
     let envelope = envelope_from_raw(raw)?;
     let builder = match account.smtp_security {
@@ -47,7 +47,7 @@ pub async fn send_message(account: &Account, raw: &[u8]) -> Result<()> {
             let password = inbx_config::load_password(&account.name)?;
             builder.credentials(Credentials::new(account.username.clone(), password))
         }
-        AuthMethod::OAuth2 { provider, .. } => {
+        AuthMethod::Oauth2 { provider, .. } => {
             let refresh = inbx_config::load_refresh_token(&account.name)?;
             let access = oauth::refresh(&account.auth, provider, &refresh).await?;
             builder

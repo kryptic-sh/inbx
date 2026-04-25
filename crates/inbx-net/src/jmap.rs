@@ -2,7 +2,7 @@
 //!
 //! Hand-rolled over reqwest because jmap-client crates churn fast. Targets
 //! Fastmail / Stalwart. Auth is HTTP basic with the account's app password
-//! (Bearer-token / OAuth wiring lives in the OAuth module and can attach
+//! (Bearer-token / Oauth wiring lives in the Oauth module and can attach
 //! later). Implements the bare slice we need to fetch headers and send
 //! mail; everything else (push, vacation, Sieve mgmt) lives in the
 //! provider's own protocol path.
@@ -32,10 +32,10 @@ pub enum Error {
     #[error("only AppPassword auth supported by this JMAP client")]
     UnsupportedAuth,
     #[error("oauth: {0}")]
-    OAuth(#[from] oauth::Error),
+    Oauth(#[from] oauth::Error),
 }
 
-/// Either basic auth (app password) or Bearer (OAuth2 access token).
+/// Either basic auth (app password) or Bearer (Oauth2 access token).
 #[derive(Debug, Clone)]
 enum JmapAuth {
     Basic { user: String, password: String },
@@ -83,7 +83,7 @@ impl JmapClient {
                 user: account.username.clone(),
                 password: inbx_config::load_password(&account.name)?,
             },
-            AuthMethod::OAuth2 { provider, .. } => {
+            AuthMethod::Oauth2 { provider, .. } => {
                 let refresh = inbx_config::load_refresh_token(&account.name)?;
                 let access = oauth::refresh(&account.auth, provider, &refresh).await?;
                 JmapAuth::Bearer(access)

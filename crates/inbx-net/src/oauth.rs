@@ -1,4 +1,4 @@
-//! OAuth2 + XOAUTH2 SASL helpers.
+//! Oauth2 + XOAUTH2 SASL helpers.
 //!
 //! Token storage strategy: persist only the refresh token in the OS keyring
 //! and derive a fresh access token on every connection. Access tokens are
@@ -6,7 +6,7 @@
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
-use inbx_config::{AuthMethod, OAuthProvider};
+use inbx_config::{AuthMethod, OauthProvider};
 use oauth2::basic::BasicClient;
 use oauth2::{
     AuthUrl, AuthorizationCode, ClientId, ClientSecret, CsrfToken, PkceCodeChallenge,
@@ -27,8 +27,8 @@ pub enum Error {
     Reqwest(#[from] reqwest::Error),
     #[error("oauth: missing client_id for provider")]
     MissingClient,
-    #[error("oauth: not an OAuth2 account")]
-    NotOAuth,
+    #[error("oauth: not an Oauth2 account")]
+    NotOauth,
     #[error("oauth: csrf state mismatch")]
     CsrfMismatch,
     #[error("oauth: callback missing code")]
@@ -43,7 +43,7 @@ pub enum Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// Built-in OAuth client credentials. Desktop public clients ship their IDs in
+/// Built-in Oauth client credentials. Desktop public clients ship their IDs in
 /// open source; PKCE makes the secret non-secret. Override per account in
 /// config when a tenant needs its own registration.
 struct ClientDefaults {
@@ -55,16 +55,16 @@ struct ClientDefaults {
     default_client_secret: Option<&'static str>,
 }
 
-fn defaults_for(provider: &OAuthProvider) -> ClientDefaults {
+fn defaults_for(provider: &OauthProvider) -> ClientDefaults {
     match provider {
-        OAuthProvider::Gmail => ClientDefaults {
+        OauthProvider::Gmail => ClientDefaults {
             auth_url: "https://accounts.google.com/o/oauth2/v2/auth",
             token_url: "https://oauth2.googleapis.com/token",
             scope: "https://mail.google.com/",
             default_client_id: None,
             default_client_secret: None,
         },
-        OAuthProvider::Microsoft { .. } => ClientDefaults {
+        OauthProvider::Microsoft { .. } => ClientDefaults {
             auth_url: "", // filled in dynamically per-tenant below
             token_url: "",
             scope: "https://outlook.office.com/IMAP.AccessAsUser.All \
@@ -76,11 +76,11 @@ fn defaults_for(provider: &OAuthProvider) -> ClientDefaults {
     }
 }
 
-fn endpoints(provider: &OAuthProvider) -> (String, String, String) {
+fn endpoints(provider: &OauthProvider) -> (String, String, String) {
     let d = defaults_for(provider);
     match provider {
-        OAuthProvider::Gmail => (d.auth_url.into(), d.token_url.into(), d.scope.into()),
-        OAuthProvider::Microsoft { tenant } => (
+        OauthProvider::Gmail => (d.auth_url.into(), d.token_url.into(), d.scope.into()),
+        OauthProvider::Microsoft { tenant } => (
             format!("https://login.microsoftonline.com/{tenant}/oauth2/v2.0/authorize"),
             format!("https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token"),
             d.scope.into(),
@@ -88,10 +88,10 @@ fn endpoints(provider: &OAuthProvider) -> (String, String, String) {
     }
 }
 
-fn pick_client_id(method: &AuthMethod, provider: &OAuthProvider) -> Result<ClientId> {
+fn pick_client_id(method: &AuthMethod, provider: &OauthProvider) -> Result<ClientId> {
     let configured = match method {
-        AuthMethod::OAuth2 { client_id, .. } => client_id.clone(),
-        _ => return Err(Error::NotOAuth),
+        AuthMethod::Oauth2 { client_id, .. } => client_id.clone(),
+        _ => return Err(Error::NotOauth),
     };
     let id = configured
         .or_else(|| defaults_for(provider).default_client_id.map(String::from))
@@ -99,9 +99,9 @@ fn pick_client_id(method: &AuthMethod, provider: &OAuthProvider) -> Result<Clien
     Ok(ClientId::new(id))
 }
 
-fn pick_client_secret(method: &AuthMethod, provider: &OAuthProvider) -> Option<ClientSecret> {
+fn pick_client_secret(method: &AuthMethod, provider: &OauthProvider) -> Option<ClientSecret> {
     let configured = match method {
-        AuthMethod::OAuth2 { client_secret, .. } => client_secret.clone(),
+        AuthMethod::Oauth2 { client_secret, .. } => client_secret.clone(),
         _ => None,
     };
     configured
@@ -123,7 +123,7 @@ fn http_client() -> Result<reqwest::Client> {
 
 /// Run an interactive auth-code flow with a loopback redirect on a random
 /// port. Returns (refresh_token, access_token, expires_in_secs).
-pub async fn login(method: &AuthMethod, provider: &OAuthProvider) -> Result<TokenSet> {
+pub async fn login(method: &AuthMethod, provider: &OauthProvider) -> Result<TokenSet> {
     let client_id = pick_client_id(method, provider)?;
     let client_secret = pick_client_secret(method, provider);
     let (auth_url_s, token_url_s, scope_s) = endpoints(provider);
@@ -148,7 +148,7 @@ pub async fn login(method: &AuthMethod, provider: &OAuthProvider) -> Result<Toke
         .authorize_url(CsrfToken::new_random)
         .add_scope(Scope::new(scope_s));
     // Gmail/MS need access_type=offline + prompt=consent to return refresh_token.
-    if matches!(provider, OAuthProvider::Gmail) {
+    if matches!(provider, OauthProvider::Gmail) {
         auth_req = auth_req
             .add_extra_param("access_type", "offline")
             .add_extra_param("prompt", "consent");
@@ -190,7 +190,7 @@ pub async fn login(method: &AuthMethod, provider: &OAuthProvider) -> Result<Toke
 /// Trade a stored refresh token for a fresh access token.
 pub async fn refresh(
     method: &AuthMethod,
-    provider: &OAuthProvider,
+    provider: &OauthProvider,
     refresh_token: &str,
 ) -> Result<String> {
     let client_id = pick_client_id(method, provider)?;

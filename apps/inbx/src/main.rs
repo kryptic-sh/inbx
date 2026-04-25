@@ -69,10 +69,10 @@ enum Cmd {
         #[command(subcommand)]
         action: ContactsCmd,
     },
-    /// OAuth2 token management.
-    OAuth {
+    /// Oauth2 token management.
+    Oauth {
         #[command(subcommand)]
-        action: OAuthCmd,
+        action: OauthCmd,
     },
     /// Microsoft Graph (Outlook / M365) operations.
     Graph {
@@ -465,13 +465,13 @@ enum GraphCmd {
 }
 
 #[derive(Subcommand)]
-enum OAuthCmd {
+enum OauthCmd {
     /// Run the auth-code flow and save a refresh token to the keyring.
     Login {
         #[arg(long)]
         account: Option<String>,
     },
-    /// Persist OAuth client credentials onto an account.
+    /// Persist Oauth client credentials onto an account.
     SetClient {
         #[arg(long)]
         account: Option<String>,
@@ -540,7 +540,7 @@ enum ContactsCmd {
 enum AccountCmd {
     /// Interactive add. Stores password in OS keyring.
     Add {
-        /// Configure account for OAuth2 instead of an app password.
+        /// Configure account for Oauth2 instead of an app password.
         #[arg(long, value_parser = ["gmail", "microsoft"])]
         oauth: Option<String>,
     },
@@ -594,7 +594,7 @@ async fn main() -> Result<()> {
         } => cmd_send(account, no_save, attachments).await,
         Cmd::Tui { account } => cmd_tui(account).await,
         Cmd::Contacts { action } => cmd_contacts(action).await,
-        Cmd::OAuth { action } => cmd_oauth(action).await,
+        Cmd::Oauth { action } => cmd_oauth(action).await,
         Cmd::Graph { action } => cmd_graph(action).await,
         Cmd::Jmap { action } => cmd_jmap(action).await,
         Cmd::Search {
@@ -1737,15 +1737,15 @@ fn civil_to_unix(y: i64, m: u32, d: u32, h: u32, mi: u32, s: u32) -> i64 {
     days * 86_400 + (h as i64) * 3600 + (mi as i64) * 60 + (s as i64)
 }
 
-async fn cmd_oauth(action: OAuthCmd) -> Result<()> {
+async fn cmd_oauth(action: OauthCmd) -> Result<()> {
     let cfg = inbx_config::load()?;
     match action {
-        OAuthCmd::Login { account } => {
+        OauthCmd::Login { account } => {
             let acct = pick_account(&cfg, account.as_deref())?.clone();
             let provider = match &acct.auth {
-                inbx_config::AuthMethod::OAuth2 { provider, .. } => provider.clone(),
+                inbx_config::AuthMethod::Oauth2 { provider, .. } => provider.clone(),
                 _ => bail!(
-                    "{} is not configured for OAuth2; set auth.kind = oauth2 in config.toml",
+                    "{} is not configured for Oauth2; set auth.kind = oauth2 in config.toml",
                     acct.name
                 ),
             };
@@ -1756,7 +1756,7 @@ async fn cmd_oauth(action: OAuthCmd) -> Result<()> {
                 acct.name, token.expires_in
             );
         }
-        OAuthCmd::SetClient {
+        OauthCmd::SetClient {
             account,
             client_id,
             client_secret,
@@ -1765,7 +1765,7 @@ async fn cmd_oauth(action: OAuthCmd) -> Result<()> {
             let name = pick_account(&cfg, account.as_deref())?.name.clone();
             let acct = cfg.accounts.iter_mut().find(|a| a.name == name).unwrap();
             match &mut acct.auth {
-                inbx_config::AuthMethod::OAuth2 {
+                inbx_config::AuthMethod::Oauth2 {
                     client_id: c,
                     client_secret: s,
                     ..
@@ -1774,13 +1774,13 @@ async fn cmd_oauth(action: OAuthCmd) -> Result<()> {
                     *s = client_secret;
                 }
                 other => {
-                    bail!("{} is not OAuth2 (auth = {other:?})", acct.name);
+                    bail!("{} is not Oauth2 (auth = {other:?})", acct.name);
                 }
             }
             inbx_config::save(&cfg)?;
-            println!("updated OAuth client for {}", name);
+            println!("updated Oauth client for {}", name);
         }
-        OAuthCmd::Logout { account } => {
+        OauthCmd::Logout { account } => {
             let acct = pick_account(&cfg, account.as_deref())?;
             inbx_config::delete_refresh_token(&acct.name)?;
             println!("removed refresh token for {}", acct.name);
@@ -1931,7 +1931,7 @@ fn cmd_accounts_add(oauth: Option<String>) -> Result<()> {
     }
     let email = prompt(&mut lock, &mut stdout, "email: ")?;
 
-    // Provider-aware host defaults when OAuth is selected.
+    // Provider-aware host defaults when Oauth is selected.
     let (default_imap_host, default_smtp_host) = match oauth.as_deref() {
         Some("gmail") => ("imap.gmail.com", "smtp.gmail.com"),
         Some("microsoft") => ("outlook.office365.com", "smtp.office365.com"),
@@ -1992,8 +1992,8 @@ fn cmd_accounts_add(oauth: Option<String>) -> Result<()> {
                 &mut stdout,
                 "oauth client_secret (blank for none): ",
             )?;
-            inbx_config::AuthMethod::OAuth2 {
-                provider: inbx_config::OAuthProvider::Gmail,
+            inbx_config::AuthMethod::Oauth2 {
+                provider: inbx_config::OauthProvider::Gmail,
                 client_id: (!client_id.is_empty()).then_some(client_id),
                 client_secret: (!client_secret.is_empty()).then_some(client_secret),
             }
@@ -2011,8 +2011,8 @@ fn cmd_accounts_add(oauth: Option<String>) -> Result<()> {
                 &mut stdout,
                 "oauth client_secret (blank for none): ",
             )?;
-            inbx_config::AuthMethod::OAuth2 {
-                provider: inbx_config::OAuthProvider::Microsoft { tenant },
+            inbx_config::AuthMethod::Oauth2 {
+                provider: inbx_config::OauthProvider::Microsoft { tenant },
                 client_id: (!client_id.is_empty()).then_some(client_id),
                 client_secret: (!client_secret.is_empty()).then_some(client_secret),
             }
@@ -2039,7 +2039,7 @@ fn cmd_accounts_add(oauth: Option<String>) -> Result<()> {
     });
     inbx_config::save(&cfg)?;
     if oauth.is_some() {
-        println!("added OAuth account {name}; run `inbx oauth login --account {name}`");
+        println!("added Oauth account {name}; run `inbx oauth login --account {name}`");
     } else {
         println!("added account {name}; password stored in keyring");
     }

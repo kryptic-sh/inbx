@@ -2,7 +2,7 @@
 //!
 //! Hand-rolled protocol over tokio-rustls because no Rust crate ships a
 //! mature async ManageSieve client. Supports AUTHENTICATE PLAIN with the
-//! account's app password (OAuth2 SASL is left to a future milestone) and
+//! account's app password (Oauth2 SASL is left to a future milestone) and
 //! the script-management verbs: LISTSCRIPTS, GETSCRIPT, PUTSCRIPT,
 //! SETACTIVE, DELETESCRIPT.
 
@@ -32,8 +32,8 @@ pub enum Error {
     Server(String),
     #[error("protocol: {0}")]
     Protocol(&'static str),
-    #[error("OAuth2 not supported on this ManageSieve client yet")]
-    OAuthNotSupported,
+    #[error("Oauth2 not supported on this ManageSieve client yet")]
+    OauthNotSupported,
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -56,7 +56,7 @@ fn tls_config() -> Arc<ClientConfig> {
 
 impl SieveClient {
     /// Connect over implicit TLS to host:4190 (configurable later) and
-    /// authenticate via SASL PLAIN. OAuth2 accounts are rejected — wire
+    /// authenticate via SASL PLAIN. Oauth2 accounts are rejected — wire
     /// XOAUTH2 SASL when the user asks.
     pub async fn connect(account: &Account) -> Result<Self> {
         let host = account.imap_host.as_str();
@@ -73,7 +73,7 @@ impl SieveClient {
 
         let password = match &account.auth {
             AuthMethod::AppPassword => inbx_config::load_password(&account.name)?,
-            AuthMethod::OAuth2 { .. } => return Err(Error::OAuthNotSupported),
+            AuthMethod::Oauth2 { .. } => return Err(Error::OauthNotSupported),
         };
         me.authenticate_plain(&account.username, &password).await?;
         Ok(me)
