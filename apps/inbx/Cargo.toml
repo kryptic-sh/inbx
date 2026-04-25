@@ -1,0 +1,23 @@
+[package]
+name = "inbx"
+description = "inbx — modal-vim email client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "inbx"
+path = "src/main.rs"
+
+[dependencies]
+inbx-core.workspace = true
+inbx-config.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

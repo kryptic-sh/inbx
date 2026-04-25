@@ -1,0 +1,54 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/inbx-core",
+    "crates/inbx-net",
+    "crates/inbx-store",
+    "crates/inbx-config",
+    "crates/inbx-render",
+    "crates/inbx-contacts",
+    "crates/inbx-ical",
+    "crates/inbx-composer",
+    "apps/inbx",
+    "xtask",
+]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT"
+repository = "https://github.com/kryptic-sh/inbx"
+homepage = "https://kryptic.sh"
+authors = ["mxaddict <mxaddict@kryptic.sh>"]
+
+[workspace.dependencies]
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+directories = "5"
+keyring = "3"
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["full"] }
+
+inbx-core = { path = "crates/inbx-core" }
+inbx-net = { path = "crates/inbx-net" }
+inbx-store = { path = "crates/inbx-store" }
+inbx-config = { path = "crates/inbx-config" }
+inbx-render = { path = "crates/inbx-render" }
+inbx-contacts = { path = "crates/inbx-contacts" }
+inbx-ical = { path = "crates/inbx-ical" }
+inbx-composer = { path = "crates/inbx-composer" }
+
+# hjkl path deps gated on hjkl 0.1.0 (`spec::*` traits). Wired at M6.
+# hjkl-editor = { path = "../hjkl/crates/hjkl-editor" }
+# hjkl-buffer = { path = "../hjkl/crates/hjkl-buffer", features = ["ratatui"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

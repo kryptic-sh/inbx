@@ -1,0 +1,14 @@
+[package]
+name = "inbx-contacts"
+description = "inbx contacts: address book + autocomplete"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[dependencies]
+inbx-core.workspace = true
+thiserror.workspace = true
