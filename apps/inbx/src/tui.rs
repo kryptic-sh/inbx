@@ -379,19 +379,42 @@ fn render_path(path: &str) -> String {
         Ok(b) => b,
         Err(e) => return format!("(unable to read {path}: {e})"),
     };
+    let auth = inbx_render::auth::evaluate(&raw);
+    let auth_line = format!(
+        "[spf={:?} dkim={:?} dmarc={:?}]",
+        auth.auth.spf, auth.auth.dkim, auth.auth.dmarc
+    );
+    let mut warnings: Vec<&str> = Vec::new();
+    if auth.phishing.reply_to_mismatch {
+        warnings.push("reply-to mismatch");
+    }
+    if auth.phishing.display_name_email {
+        warnings.push("display name has @");
+    }
+    if auth.phishing.lookalike_from {
+        warnings.push("lookalike domain");
+    }
+    let warn_line = if warnings.is_empty() {
+        String::new()
+    } else {
+        format!("[!! {}]\n", warnings.join("; "))
+    };
     match inbx_render::render_message(&raw, inbx_render::RemotePolicy::Block) {
         Ok(r) => {
             let banner = if r.blocked_remote > 0 || !r.trackers.is_empty() {
                 format!(
-                    "[remote content blocked: {} url(s); trackers: {}]\n\n",
+                    "[remote content blocked: {} url(s); trackers: {}]\n",
                     r.blocked_remote,
                     r.trackers.len()
                 )
             } else {
                 String::new()
             };
-            format!("{banner}{}", r.plain)
+            format!("{auth_line}\n{warn_line}{banner}\n{}", r.plain)
         }
-        Err(e) => format!("(render error: {e})\n\n{}", String::from_utf8_lossy(&raw)),
+        Err(e) => format!(
+            "{auth_line}\n{warn_line}(render error: {e})\n\n{}",
+            String::from_utf8_lossy(&raw)
+        ),
     }
 }

@@ -1,3 +1,5 @@
+pub mod auth;
+
 use std::collections::{HashMap, HashSet};
 
 use mail_parser::{MessageParser, MimeHeaders, PartType};
