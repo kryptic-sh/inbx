@@ -326,6 +326,17 @@ enum ContactsCmd {
         account: Option<String>,
         email: String,
     },
+    /// Sync contacts from a CardDAV addressbook URL via REPORT.
+    CardDav {
+        #[arg(long)]
+        account: Option<String>,
+        /// Full addressbook URL (e.g. https://host/remote.php/dav/addressbooks/users/alice/contacts/).
+        #[arg(long)]
+        url: String,
+        /// Username for HTTP basic auth (defaults to account.username).
+        #[arg(long)]
+        user: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1233,6 +1244,18 @@ async fn cmd_contacts(action: ContactsCmd) -> Result<()> {
                 }
             }
             println!("harvested {total} address occurrences");
+        }
+        ContactsCmd::CardDav { account, url, user } => {
+            let acct = pick_account(&cfg, account.as_deref())?.clone();
+            let username = user.unwrap_or_else(|| acct.username.clone());
+            let password = inbx_config::load_password(&acct.name)
+                .with_context(|| format!("no password in keyring for {}", acct.name))?;
+            let store = inbx_contacts::ContactsStore::open(&acct.name).await?;
+            let report = inbx_contacts::carddav::sync(&url, &username, &password, &store).await?;
+            println!(
+                "carddav: {} vcards, {} addresses imported",
+                report.vcards_seen, report.addresses_imported
+            );
         }
         ContactsCmd::Remove { account, email } => {
             let acct = pick_account(&cfg, account.as_deref())?;

@@ -17,3 +17,4 @@ tracing.workspace = true
 tokio.workspace = true
 sqlx.workspace = true
 mail-parser.workspace = true
+reqwest.workspace = true

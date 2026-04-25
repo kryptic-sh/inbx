@@ -1535,6 +1535,7 @@ dependencies = [
  "inbx-config",
  "inbx-core",
  "mail-parser",
+ "reqwest",
  "sqlx",
  "thiserror 2.0.18",
  "tokio",

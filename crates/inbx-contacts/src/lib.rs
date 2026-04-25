@@ -1,3 +1,5 @@
+pub mod carddav;
+
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use mail_parser::MessageParser;
