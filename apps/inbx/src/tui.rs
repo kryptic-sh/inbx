@@ -115,6 +115,27 @@ impl App {
         Ok(())
     }
 
+    async fn save_draft(&mut self) -> Result<()> {
+        let Some(composer) = self.composer.as_ref() else {
+            return Ok(());
+        };
+        let raw = composer.to_mime()?;
+        let mut session = inbx_net::connect_imap(&self.account).await?;
+        let folders = inbx_net::list_folders(&mut session).await?;
+        match inbx_net::find_drafts_folder(&folders) {
+            Some(drafts) => {
+                inbx_net::append_draft(&mut session, &drafts, &raw).await?;
+                self.composer = None;
+                self.status = format!("draft saved to {drafts}");
+            }
+            None => {
+                self.status = "no Drafts folder discovered".into();
+            }
+        }
+        let _ = session.logout().await;
+        Ok(())
+    }
+
     async fn send_composer(&mut self) -> Result<()> {
         let Some(composer) = self.composer.as_ref() else {
             return Ok(());
@@ -386,6 +407,10 @@ async fn handle_composer_key(app: &mut App, key: KeyEvent) -> Result<bool> {
                 app.send_composer().await?;
                 return Ok(false);
             }
+            KeyCode::Char('d') => {
+                app.save_draft().await?;
+                return Ok(false);
+            }
             KeyCode::Char('q') => {
                 app.close_composer();
                 return Ok(false);
@@ -561,7 +586,8 @@ fn draw_composer(f: &mut ratatui::Frame, composer: &Composer, status: &str, area
         composer.focus == ComposerField::Bcc,
         layout[3],
     );
-    let body_title = format!("body — Tab field · Ctrl-S send · Ctrl-Q discard · {status}");
+    let body_title =
+        format!("body — Tab field · Ctrl-S send · Ctrl-D draft · Ctrl-Q discard · {status}");
     let body_para = Paragraph::new(composer.body_text())
         .block(pane_block(
             &body_title,

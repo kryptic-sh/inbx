@@ -299,6 +299,30 @@ fn uid_set(uids: &[u32]) -> String {
         .join(",")
 }
 
+/// Locate the Drafts folder by SPECIAL-USE flag with name fallbacks.
+pub fn find_drafts_folder(folders: &[FolderInfo]) -> Option<String> {
+    if let Some(f) = folders
+        .iter()
+        .find(|f| f.special_use.as_deref() == Some("\\Drafts"))
+    {
+        return Some(f.name.clone());
+    }
+    for guess in ["Drafts", "INBOX/Drafts", "Draft", "[Gmail]/Drafts"] {
+        if let Some(f) = folders.iter().find(|f| f.name.eq_ignore_ascii_case(guess)) {
+            return Some(f.name.clone());
+        }
+    }
+    None
+}
+
+/// APPEND a draft into the named folder with `\Draft` (and `\Seen`).
+pub async fn append_draft(session: &mut ImapSession, folder: &str, raw: &[u8]) -> Result<()> {
+    session
+        .append(folder, Some("(\\Seen \\Draft)"), None, raw)
+        .await?;
+    Ok(())
+}
+
 /// Locate the Sent folder by SPECIAL-USE flag, falling back to common names.
 pub fn find_sent_folder(folders: &[FolderInfo]) -> Option<String> {
     if let Some(f) = folders

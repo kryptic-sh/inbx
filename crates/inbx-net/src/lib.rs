@@ -8,8 +8,9 @@ pub mod smtp;
 pub mod unsubscribe;
 
 pub use imap::{
-    Error as ImapError, FolderInfo, HeaderRow, ImapSession, append_message, connect_imap,
-    fetch_bodies, fetch_inbox_headers, find_sent_folder, list_folders,
+    Error as ImapError, FolderInfo, HeaderRow, ImapSession, append_draft, append_message,
+    connect_imap, fetch_bodies, fetch_inbox_headers, find_drafts_folder, find_sent_folder,
+    list_folders,
 };
 pub use oauth::{Error as OAuthError, TokenSet, login as oauth_login, refresh as oauth_refresh};
 pub use smtp::{Error as SmtpError, send_message};

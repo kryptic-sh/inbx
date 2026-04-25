@@ -185,6 +185,11 @@ enum DraftCmd {
         folder: String,
         uid: i64,
     },
+    /// Read RFC 5322 from stdin and APPEND to the server's Drafts folder.
+    Save {
+        #[arg(long)]
+        account: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -516,10 +521,35 @@ async fn cmd_draft(action: DraftCmd) -> Result<()> {
             let raw = read_message_raw(&acct.name, &folder, uid).await?;
             inbx_composer::Composer::new_forward(inbx_composer::Identity::from_account(acct), &raw)?
         }
+        DraftCmd::Save { account } => {
+            return cmd_draft_save(account).await;
+        }
     };
     let draft = composer.to_draft();
     use std::io::Write as _;
     std::io::stdout().write_all(draft.as_bytes())?;
+    Ok(())
+}
+
+async fn cmd_draft_save(account: Option<String>) -> Result<()> {
+    use std::io::Read as _;
+    let cfg = inbx_config::load()?;
+    let acct = pick_account(&cfg, account.as_deref())?.clone();
+    let mut raw = Vec::new();
+    std::io::stdin()
+        .read_to_end(&mut raw)
+        .context("read stdin")?;
+    if raw.is_empty() {
+        bail!("empty input on stdin");
+    }
+    let raw = normalize_crlf(raw);
+    let mut session = inbx_net::connect_imap(&acct).await?;
+    let folders = inbx_net::list_folders(&mut session).await?;
+    let drafts = inbx_net::find_drafts_folder(&folders)
+        .with_context(|| "no Drafts folder discovered on server")?;
+    inbx_net::append_draft(&mut session, &drafts, &raw).await?;
+    let _ = session.logout().await;
+    println!("saved to {drafts}");
     Ok(())
 }
 
