@@ -48,6 +48,30 @@ enum Cmd {
         #[arg(long, default_value_t = 50)]
         limit: u32,
     },
+    /// Print a stored message: rendered body + auth banner + header summary.
+    Show {
+        #[arg(long)]
+        account: Option<String>,
+        #[arg(long, default_value = "INBOX")]
+        folder: String,
+        uid: i64,
+    },
+    /// Print all RFC 5322 headers of a stored message.
+    Headers {
+        #[arg(long)]
+        account: Option<String>,
+        #[arg(long, default_value = "INBOX")]
+        folder: String,
+        uid: i64,
+    },
+    /// Print the raw body of a stored message (no rendering).
+    Body {
+        #[arg(long)]
+        account: Option<String>,
+        #[arg(long, default_value = "INBOX")]
+        folder: String,
+        uid: i64,
+    },
     /// Read RFC 5322 from stdin, send via SMTP, append to Sent.
     Send {
         #[arg(long)]
@@ -615,6 +639,21 @@ async fn main() -> Result<()> {
             folder,
             limit,
         } => cmd_list(account, folder, limit).await,
+        Cmd::Show {
+            account,
+            folder,
+            uid,
+        } => cmd_show(account, folder, uid).await,
+        Cmd::Headers {
+            account,
+            folder,
+            uid,
+        } => cmd_headers(account, folder, uid).await,
+        Cmd::Body {
+            account,
+            folder,
+            uid,
+        } => cmd_body(account, folder, uid).await,
         Cmd::Send {
             account,
             no_save,
@@ -2353,11 +2392,128 @@ async fn cmd_list(account: Option<String>, folder: String, limit: u32) -> Result
         return Ok(());
     }
     for m in rows {
-        let date = m.date_unix.map(format_unix).unwrap_or_else(|| "—".into());
+        let date = m
+            .date_unix
+            .map(format_unix_relative)
+            .unwrap_or_else(|| "—".into());
+        let unread = !m.flags.to_ascii_lowercase().contains("seen");
+        let starred = m.flags.contains("\\Flagged");
+        let mark = format!(
+            "{}{}",
+            if unread { "●" } else { " " },
+            if starred { "★" } else { " " }
+        );
         let from = m.from_addr.unwrap_or_default();
         let subj = m.subject.unwrap_or_default();
-        println!("{:>10}  {:<30}  {}", date, truncate(&from, 30), subj);
+        println!(
+            "{:>4}  {mark}  {:>6}  {:<28}  {}",
+            m.uid,
+            date,
+            truncate(&from, 28),
+            subj
+        );
     }
+    Ok(())
+}
+
+async fn cmd_show(account: Option<String>, folder: String, uid: i64) -> Result<()> {
+    let cfg = inbx_config::load()?;
+    let acct = pick_account(&cfg, account.as_deref())?;
+    let raw = read_message_raw(&acct.name, &folder, uid).await?;
+    let auth = inbx_render::auth::evaluate(&raw);
+    let security = inbx_render::pgp::detect(&raw);
+    let banner = format!(
+        "[spf={:?} dkim={:?} dmarc={:?}]{}",
+        auth.auth.spf,
+        auth.auth.dkim,
+        auth.auth.dmarc,
+        security
+            .label
+            .map(|l| format!(" [{l}]"))
+            .unwrap_or_default(),
+    );
+    let parsed = mail_parser::MessageParser::default()
+        .parse(&raw)
+        .with_context(|| "parse message")?;
+    println!("{banner}");
+    println!("From:    {}", header_addr(&parsed, "From"));
+    println!("To:      {}", header_addr(&parsed, "To"));
+    if let Some(s) = parsed.subject() {
+        println!("Subject: {s}");
+    }
+    if let Some(d) = parsed
+        .header_values("Date")
+        .next()
+        .and_then(|v| v.as_text())
+    {
+        println!("Date:    {d}");
+    }
+    println!();
+    let r = inbx_render::render_message(&raw, inbx_render::RemotePolicy::Block)?;
+    if r.blocked_remote > 0 || !r.trackers.is_empty() {
+        println!(
+            "[remote blocked: {} url(s); trackers: {}]",
+            r.blocked_remote,
+            r.trackers.len()
+        );
+        println!();
+    }
+    println!("{}", r.plain);
+    Ok(())
+}
+
+fn header_addr(parsed: &mail_parser::Message<'_>, name: &str) -> String {
+    let group = match name {
+        "From" => parsed.from(),
+        "To" => parsed.to(),
+        "Cc" => parsed.cc(),
+        "Bcc" => parsed.bcc(),
+        _ => None,
+    };
+    group
+        .map(|g| {
+            g.iter()
+                .map(|a| match (a.name(), a.address()) {
+                    (Some(n), Some(addr)) => format!("{n} <{addr}>"),
+                    (_, Some(addr)) => addr.to_string(),
+                    _ => String::new(),
+                })
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .unwrap_or_default()
+}
+
+async fn cmd_headers(account: Option<String>, folder: String, uid: i64) -> Result<()> {
+    let cfg = inbx_config::load()?;
+    let acct = pick_account(&cfg, account.as_deref())?;
+    let raw = read_message_raw(&acct.name, &folder, uid).await?;
+    // Headers end at the first blank line.
+    let mut end = raw.len();
+    let mut i = 0;
+    while i + 3 < raw.len() {
+        if &raw[i..i + 4] == b"\r\n\r\n" {
+            end = i + 2;
+            break;
+        }
+        if &raw[i..i + 2] == b"\n\n" {
+            end = i + 1;
+            break;
+        }
+        i += 1;
+    }
+    use std::io::Write as _;
+    std::io::stdout().write_all(&raw[..end])?;
+    Ok(())
+}
+
+async fn cmd_body(account: Option<String>, folder: String, uid: i64) -> Result<()> {
+    let cfg = inbx_config::load()?;
+    let acct = pick_account(&cfg, account.as_deref())?;
+    let raw = read_message_raw(&acct.name, &folder, uid).await?;
+    use std::io::Write as _;
+    std::io::stdout().write_all(&raw)?;
     Ok(())
 }
 
@@ -2507,4 +2663,44 @@ fn format_unix(ts: i64) -> String {
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let year = if m <= 2 { y + 1 } else { y };
     format!("{year:04}-{m:02}-{d:02}")
+}
+
+/// Human-friendly timestamp for list views: "3m", "5h", "Mon", "12 Apr", "2024".
+fn format_unix_relative(ts: i64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let delta = (now - ts).max(0);
+    if delta < 60 {
+        return "now".into();
+    }
+    if delta < 3600 {
+        return format!("{}m", delta / 60);
+    }
+    if delta < 86_400 {
+        return format!("{}h", delta / 3600);
+    }
+    if delta < 86_400 * 7 {
+        let secs = ts.max(0) as u64;
+        let days = (secs / 86400) as i64;
+        let dow = ((days % 7) + 4).rem_euclid(7);
+        return ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][dow as usize].into();
+    }
+    if delta < 86_400 * 365 {
+        let s = format_unix(ts);
+        if let (Some(m), Some(d)) = (
+            s.get(5..7).and_then(|m| m.parse::<u32>().ok()),
+            s.get(8..10),
+        ) {
+            const MONTHS: [&str; 12] = [
+                "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+            ];
+            if let Some(name) = MONTHS.get(m.saturating_sub(1) as usize) {
+                return format!("{d} {name}");
+            }
+        }
+        return s;
+    }
+    format_unix(ts).get(0..4).unwrap_or("").to_string()
 }
