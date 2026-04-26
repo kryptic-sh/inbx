@@ -42,6 +42,9 @@ pub(super) fn draw(f: &mut ratatui::Frame, app: &App) {
     if app.search.is_some() {
         draw_search(f, app, outer[0]);
     }
+    if app.thread.is_some() {
+        draw_thread(f, app, outer[0]);
+    }
     if app.show_help {
         draw_help(f, outer[0]);
     }
@@ -435,6 +438,70 @@ fn draw_search(f: &mut ratatui::Frame, app: &App, area: Rect) {
         .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
         .highlight_symbol("> ");
     f.render_stateful_widget(list, layout[1], &mut s.state.clone());
+}
+
+fn draw_thread(f: &mut ratatui::Frame, app: &App, area: Rect) {
+    let Some(t) = app.thread.as_ref() else {
+        return;
+    };
+    let height = (t.messages.len() as u16 + 4).min(area.height).max(6);
+    let width = 90u16.min(area.width);
+    let x = area.x + area.width.saturating_sub(width) / 2;
+    let y = area.y + area.height.saturating_sub(height) / 2;
+    let popup = Rect {
+        x,
+        y,
+        width,
+        height,
+    };
+    f.render_widget(Clear, popup);
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(3), Constraint::Min(1)])
+        .split(popup);
+
+    let header = Paragraph::new(format!("{} message(s) in thread", t.messages.len()))
+        .block(pane_block("thread (Enter jump · j/k · Esc)", true));
+    f.render_widget(header, layout[0]);
+
+    let items: Vec<ListItem> = t
+        .messages
+        .iter()
+        .map(|m| {
+            let date = m
+                .date_unix
+                .map(format_date_utc)
+                .unwrap_or_else(|| "          ".into());
+            let from = m.from_addr.clone().unwrap_or_default();
+            let subj = m.subject.clone().unwrap_or_default();
+            let line = format!("{}  {}  {}", date, truncate(&from, 20), truncate(&subj, 44));
+            ListItem::new(line)
+        })
+        .collect();
+    let list = List::new(items)
+        .block(pane_block("messages", true))
+        .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
+        .highlight_symbol("> ");
+    f.render_stateful_widget(list, layout[1], &mut t.state.clone());
+}
+
+/// Format a unix timestamp as `YYYY-MM-DD` in UTC. Uses Howard Hinnant's
+/// civil-from-days algorithm to avoid pulling in chrono/time for a single
+/// call site.
+fn format_date_utc(unix: i64) -> String {
+    let days = unix.div_euclid(86_400);
+    // Shift epoch to 0000-03-01.
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64; // [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!("{y:04}-{m:02}-{d:02}")
 }
 
 fn draw_move_picker(f: &mut ratatui::Frame, app: &App, area: Rect) {

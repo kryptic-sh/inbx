@@ -31,6 +31,7 @@ pub(super) struct App {
     pub(super) move_picker: Option<MovePickerState>,
     pub(super) outbox: Option<OutboxState>,
     pub(super) search: Option<SearchState>,
+    pub(super) thread: Option<ThreadState>,
 }
 
 pub(super) struct MovePickerState {
@@ -46,6 +47,11 @@ pub(super) struct OutboxState {
 pub(super) struct SearchState {
     pub(super) query: String,
     pub(super) results: Vec<MessageRow>,
+    pub(super) state: ListState,
+}
+
+pub(super) struct ThreadState {
+    pub(super) messages: Vec<MessageRow>,
     pub(super) state: ListState,
 }
 
@@ -96,6 +102,7 @@ impl App {
             move_picker: None,
             outbox: None,
             search: None,
+            thread: None,
         };
         app.reload_messages().await?;
         Ok(app)
@@ -479,6 +486,29 @@ impl App {
         self.refresh_body();
         self.pane = Pane::Messages;
         self.status = format!("jumped to {folder}/uid {uid}");
+        Ok(())
+    }
+
+    pub(super) async fn open_thread(&mut self) -> Result<()> {
+        let Some(msg) = self.current_message().cloned() else {
+            return Ok(());
+        };
+        let messages = match msg.thread_id.as_deref() {
+            Some(tid) => self.store.list_thread(tid).await?,
+            None => vec![msg.clone()],
+        };
+        let mut state = ListState::default();
+        if !messages.is_empty() {
+            // Select the row matching the current message when present.
+            let pick = messages
+                .iter()
+                .position(|m| m.folder == msg.folder && m.uid == msg.uid)
+                .unwrap_or(0);
+            state.select(Some(pick));
+        }
+        let n = messages.len();
+        self.thread = Some(ThreadState { messages, state });
+        self.status = format!("thread: {n} message(s)");
         Ok(())
     }
 

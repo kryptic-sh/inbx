@@ -88,6 +88,10 @@ pub(super) async fn handle_list_key(app: &mut App, key: KeyEvent) -> Result<bool
                 app.unsubscribe_current().await?;
                 return Ok(false);
             }
+            KeyCode::Char('T') => {
+                app.open_thread().await?;
+                return Ok(false);
+            }
             _ => {}
         }
     }
@@ -406,6 +410,46 @@ pub(super) async fn handle_search_key(app: &mut App, key: KeyEvent) -> Result<()
             }
             _ => {}
         }
+    }
+    Ok(())
+}
+
+pub(super) async fn handle_thread_key(app: &mut App, key: KeyEvent) -> Result<()> {
+    let len = app.thread.as_ref().map(|t| t.messages.len()).unwrap_or(0);
+    match key.code {
+        KeyCode::Esc => {
+            app.thread = None;
+        }
+        KeyCode::Enter => {
+            let pick = app.thread.as_ref().and_then(|t| {
+                t.state
+                    .selected()
+                    .and_then(|i| t.messages.get(i))
+                    .map(|m| (m.folder.clone(), m.uid))
+            });
+            if let Some((folder, uid)) = pick {
+                app.thread = None;
+                app.jump_to_message(&folder, uid).await?;
+            }
+        }
+        KeyCode::Up | KeyCode::Char('k') if key.modifiers.is_empty() => {
+            if len > 0
+                && let Some(t) = app.thread.as_mut()
+            {
+                let cur = t.state.selected().unwrap_or(0);
+                t.state
+                    .select(Some(if cur == 0 { len - 1 } else { cur - 1 }));
+            }
+        }
+        KeyCode::Down | KeyCode::Char('j') if key.modifiers.is_empty() => {
+            if len > 0
+                && let Some(t) = app.thread.as_mut()
+            {
+                let cur = t.state.selected().unwrap_or(0);
+                t.state.select(Some((cur + 1) % len));
+            }
+        }
+        _ => {}
     }
     Ok(())
 }
