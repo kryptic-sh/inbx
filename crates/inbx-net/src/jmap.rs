@@ -190,6 +190,72 @@ impl JmapClient {
         Ok(emails)
     }
 
+    /// Email/changes — pass the previously-stored state. Returns the new
+    /// state plus created/updated/destroyed Email ids since.
+    pub async fn changes(&self, since_state: &str) -> Result<EmailChanges> {
+        let v = self
+            .invoke(
+                vec![json!([
+                    "Email/changes",
+                    {"accountId": self.account_id, "sinceState": since_state},
+                    "c"
+                ])],
+                vec![CORE_CAPABILITY, MAIL_CAPABILITY],
+            )
+            .await?;
+        let resp = &v["methodResponses"][0][1];
+        Ok(EmailChanges {
+            new_state: resp["newState"].as_str().unwrap_or_default().to_string(),
+            created: as_id_vec(&resp["created"]),
+            updated: as_id_vec(&resp["updated"]),
+            destroyed: as_id_vec(&resp["destroyed"]),
+            has_more_changes: resp["hasMoreChanges"].as_bool().unwrap_or(false),
+        })
+    }
+
+    /// First-time state probe — Email/get on no ids just to grab `state`.
+    pub async fn current_state(&self) -> Result<String> {
+        let v = self
+            .invoke(
+                vec![json!([
+                    "Email/get",
+                    {"accountId": self.account_id, "ids": []},
+                    "s"
+                ])],
+                vec![CORE_CAPABILITY, MAIL_CAPABILITY],
+            )
+            .await?;
+        Ok(v["methodResponses"][0][1]["state"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string())
+    }
+
+    /// Hydrate Email headers for the listed ids.
+    pub async fn fetch_by_ids(&self, ids: &[String]) -> Result<Vec<EmailHeader>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let v = self
+            .invoke(
+                vec![json!([
+                    "Email/get",
+                    {
+                        "accountId": self.account_id,
+                        "ids": ids,
+                        "properties": [
+                            "id","subject","from","to","receivedAt","messageId","keywords"
+                        ]
+                    },
+                    "g"
+                ])],
+                vec![CORE_CAPABILITY, MAIL_CAPABILITY],
+            )
+            .await?;
+        let list = v["methodResponses"][0][1]["list"].clone();
+        Ok(serde_json::from_value(list)?)
+    }
+
     /// Upload a raw RFC 5322 blob and submit it via Email/import +
     /// EmailSubmission/set. Stalwart and Fastmail both accept this.
     pub async fn send_mime(&self, raw: &[u8]) -> Result<()> {
@@ -309,6 +375,26 @@ pub struct EmailAddress {
     #[serde(default)]
     pub name: Option<String>,
     pub email: String,
+}
+
+fn as_id_vec(value: &Value) -> Vec<String> {
+    value
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[derive(Debug, Clone)]
+pub struct EmailChanges {
+    pub new_state: String,
+    pub created: Vec<String>,
+    pub updated: Vec<String>,
+    pub destroyed: Vec<String>,
+    pub has_more_changes: bool,
 }
 
 fn apply_auth(builder: reqwest::RequestBuilder, auth: &JmapAuth) -> reqwest::RequestBuilder {

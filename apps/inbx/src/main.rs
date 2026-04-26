@@ -531,6 +531,16 @@ enum JmapCmd {
         #[arg(long)]
         session: String,
     },
+    /// Polling watch via Email/changes. Logs newly created/updated/destroyed ids.
+    Watch {
+        #[arg(long)]
+        account: Option<String>,
+        #[arg(long)]
+        session: String,
+        /// Poll interval in seconds.
+        #[arg(long, default_value_t = 30)]
+        interval: u64,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1828,6 +1838,50 @@ async fn cmd_jmap(action: JmapCmd) -> Result<()> {
             let raw = normalize_crlf(raw);
             client.send_mime(&raw).await?;
             println!("sent via JMAP");
+        }
+        JmapCmd::Watch {
+            account,
+            session,
+            interval,
+        } => {
+            let acct = pick_account(&cfg, account.as_deref())?;
+            let client = inbx_net::jmap::JmapClient::connect(acct, &session).await?;
+            let mut state = client.current_state().await?;
+            println!("watching from state {state} (poll every {interval}s)");
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(interval)).await;
+                match client.changes(&state).await {
+                    Ok(ch) => {
+                        if !ch.created.is_empty()
+                            || !ch.updated.is_empty()
+                            || !ch.destroyed.is_empty()
+                        {
+                            tracing::info!(
+                                created = ch.created.len(),
+                                updated = ch.updated.len(),
+                                destroyed = ch.destroyed.len(),
+                                "JMAP changes"
+                            );
+                            // Hydrate created so the user sees subjects on the fly.
+                            for h in client.fetch_by_ids(&ch.created).await.unwrap_or_default() {
+                                println!(
+                                    "+ {}  {}",
+                                    h.from
+                                        .as_ref()
+                                        .and_then(|v| v.first())
+                                        .map(|a| a.formatted())
+                                        .unwrap_or_default(),
+                                    h.subject.as_deref().unwrap_or(""),
+                                );
+                            }
+                        }
+                        state = ch.new_state;
+                    }
+                    Err(e) => {
+                        tracing::warn!(%e, "Email/changes failed; continuing");
+                    }
+                }
+            }
         }
     }
     Ok(())
