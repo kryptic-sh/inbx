@@ -622,12 +622,17 @@ enum ContactsCmd {
     CardDav {
         #[arg(long)]
         account: Option<String>,
-        /// Full addressbook URL (e.g. https://host/remote.php/dav/addressbooks/users/alice/contacts/).
+        /// Full addressbook URL. If `--discover` is set, this is the
+        /// server's base URL and the addressbook is auto-discovered.
         #[arg(long)]
         url: String,
         /// Username for HTTP basic auth (defaults to account.username).
         #[arg(long)]
         user: Option<String>,
+        /// RFC 6764 PROPFIND chain to find the addressbook URL from
+        /// the supplied base URL. Picks the first addressbook found.
+        #[arg(long)]
+        discover: bool,
     },
 }
 
@@ -2115,13 +2120,35 @@ async fn cmd_contacts(action: ContactsCmd) -> Result<()> {
             }
             println!("harvested {total} address occurrences");
         }
-        ContactsCmd::CardDav { account, url, user } => {
+        ContactsCmd::CardDav {
+            account,
+            url,
+            user,
+            discover,
+        } => {
             let acct = pick_account(&cfg, account.as_deref())?.clone();
             let username = user.unwrap_or_else(|| acct.username.clone());
             let password = inbx_config::load_password(&acct.name)
                 .with_context(|| format!("no password in keyring for {}", acct.name))?;
             let store = inbx_contacts::ContactsStore::open(&acct.name).await?;
-            let report = inbx_contacts::carddav::sync(&url, &username, &password, &store).await?;
+            let target_url = if discover {
+                let books = inbx_contacts::carddav::discover(&url, &username, &password).await?;
+                if books.is_empty() {
+                    bail!("no addressbooks discovered at {url}");
+                }
+                let pick = &books[0];
+                println!(
+                    "discovered {} addressbook(s); syncing {} ({})",
+                    books.len(),
+                    pick.display_name.clone().unwrap_or_else(|| "?".into()),
+                    pick.url
+                );
+                pick.url.clone()
+            } else {
+                url
+            };
+            let report =
+                inbx_contacts::carddav::sync(&target_url, &username, &password, &store).await?;
             println!(
                 "carddav: {} vcards, {} addresses imported",
                 report.vcards_seen, report.addresses_imported
