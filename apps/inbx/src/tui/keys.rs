@@ -69,6 +69,10 @@ pub(super) async fn handle_list_key(app: &mut App, key: KeyEvent) -> Result<bool
                 app.move_picker = Some(MovePickerState::new());
                 return Ok(false);
             }
+            KeyCode::Char('U') => {
+                app.unsubscribe_current().await?;
+                return Ok(false);
+            }
             _ => {}
         }
     }

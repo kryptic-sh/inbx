@@ -2274,6 +2274,7 @@ dependencies = [
  "inbx-net",
  "inbx-render",
  "inbx-store",
+ "mail-builder",
  "mail-parser",
  "notify-rust",
  "ratatui",

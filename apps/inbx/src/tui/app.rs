@@ -127,6 +127,43 @@ impl App {
         Ok(())
     }
 
+    pub(super) async fn unsubscribe_current(&mut self) -> Result<()> {
+        let Some(msg) = self.current_message().cloned() else {
+            return Ok(());
+        };
+        let Some(path) = msg.maildir_path else {
+            self.status = "no body fetched — press Enter or F first".into();
+            return Ok(());
+        };
+        let raw = std::fs::read(&path)?;
+        let header = match extract_list_unsubscribe(&raw) {
+            Some(h) => h,
+            None => {
+                self.status = "no List-Unsubscribe header".into();
+                return Ok(());
+            }
+        };
+        let uris = parse_unsubscribe_uris(&header);
+        if let Some(mailto) = uris.iter().find(|u| u.starts_with("mailto:")) {
+            let (to, subject, body) = parse_mailto(mailto);
+            let raw = build_unsubscribe_mime(&self.account.email, &to, &subject, &body);
+            match inbx_net::send_message(&self.account, &raw).await {
+                Ok(()) => self.status = format!("unsubscribe sent to {to}"),
+                Err(e) => self.status = format!("unsubscribe failed: {e}"),
+            }
+            return Ok(());
+        }
+        if let Some(https) = uris.iter().find(|u| u.starts_with("https:")) {
+            match open_url(https) {
+                Ok(()) => self.status = format!("opened {https}"),
+                Err(e) => self.status = format!("open failed: {e}"),
+            }
+            return Ok(());
+        }
+        self.status = "no List-Unsubscribe header".into();
+        Ok(())
+    }
+
     pub(super) async fn save_draft(&mut self) -> Result<()> {
         let Some(composer) = self.composer.as_ref() else {
             return Ok(());
@@ -457,4 +494,113 @@ impl App {
             (Pane::Preview, false) => Pane::Messages,
         };
     }
+}
+
+fn extract_list_unsubscribe(raw: &[u8]) -> Option<String> {
+    let parsed = mail_parser::MessageParser::default().parse(raw)?;
+    let val = parsed.header_values("List-Unsubscribe").next()?;
+    val.as_text().map(|s| s.to_string())
+}
+
+fn parse_unsubscribe_uris(header: &str) -> Vec<String> {
+    header
+        .split(',')
+        .filter_map(|part| {
+            let s = part.trim();
+            let s = s.strip_prefix('<').unwrap_or(s);
+            let s = s.strip_suffix('>').unwrap_or(s);
+            let s = s.trim();
+            if s.is_empty() {
+                None
+            } else {
+                Some(s.to_string())
+            }
+        })
+        .collect()
+}
+
+fn parse_mailto(uri: &str) -> (String, String, String) {
+    let stripped = uri.strip_prefix("mailto:").unwrap_or(uri);
+    let (addr, query) = match stripped.split_once('?') {
+        Some((a, q)) => (a, q),
+        None => (stripped, ""),
+    };
+    let mut subject = String::new();
+    let mut body = String::new();
+    for pair in query.split('&').filter(|s| !s.is_empty()) {
+        let (k, v) = match pair.split_once('=') {
+            Some(kv) => kv,
+            None => continue,
+        };
+        let decoded = url_decode(v);
+        match k.to_ascii_lowercase().as_str() {
+            "subject" => subject = decoded,
+            "body" => body = decoded,
+            _ => {}
+        }
+    }
+    if subject.is_empty() {
+        subject = "unsubscribe".to_string();
+    }
+    (addr.to_string(), subject, body)
+}
+
+fn url_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            b'%' if i + 2 < bytes.len() => {
+                let hi = (bytes[i + 1] as char).to_digit(16);
+                let lo = (bytes[i + 2] as char).to_digit(16);
+                if let (Some(h), Some(l)) = (hi, lo) {
+                    out.push((h * 16 + l) as u8);
+                    i += 3;
+                } else {
+                    out.push(bytes[i]);
+                    i += 1;
+                }
+            }
+            b => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn build_unsubscribe_mime(from: &str, to: &str, subject: &str, body: &str) -> Vec<u8> {
+    mail_builder::MessageBuilder::new()
+        .from((String::new(), from.to_string()))
+        .to(vec![(String::new(), to.to_string())])
+        .subject(subject)
+        .text_body(body)
+        .write_to_vec()
+        .unwrap_or_default()
+}
+
+fn open_url(url: &str) -> std::io::Result<()> {
+    use std::process::{Command, Stdio};
+    let primary = Command::new("xdg-open")
+        .arg(url)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
+    if primary.is_ok() {
+        return Ok(());
+    }
+    Command::new("open")
+        .arg(url)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map(|_| ())
 }
