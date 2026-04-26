@@ -541,6 +541,13 @@ enum JmapCmd {
         #[arg(long, default_value_t = 30)]
         interval: u64,
     },
+    /// Real-time push via the JMAP EventSource (RFC 8620 §7.3).
+    Push {
+        #[arg(long)]
+        account: Option<String>,
+        #[arg(long)]
+        session: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1851,6 +1858,16 @@ async fn cmd_jmap(action: JmapCmd) -> Result<()> {
             let raw = normalize_crlf(raw);
             client.send_mime(&raw).await?;
             println!("sent via JMAP");
+        }
+        JmapCmd::Push { account, session } => {
+            let acct = pick_account(&cfg, account.as_deref())?;
+            let client = inbx_net::jmap::JmapClient::connect(acct, &session).await?;
+            let mut stream = client.open_event_source().await?;
+            tracing::info!("EventSource open");
+            while let Some(payload) = stream.next_event().await? {
+                println!("{payload}");
+            }
+            println!("(stream closed)");
         }
         JmapCmd::Watch {
             account,

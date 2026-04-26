@@ -16,6 +16,7 @@ thiserror.workspace = true
 tracing.workspace = true
 tokio.workspace = true
 futures-util.workspace = true
+bytes.workspace = true
 async-imap.workspace = true
 tokio-rustls.workspace = true
 rustls.workspace = true

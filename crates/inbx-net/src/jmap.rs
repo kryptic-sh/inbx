@@ -7,13 +7,71 @@
 //! mail; everything else (push, vacation, Sieve mgmt) lives in the
 //! provider's own protocol path.
 
+use std::pin::Pin;
 use std::time::Duration;
 
+use bytes::Bytes;
+use futures_util::Stream;
+use futures_util::StreamExt as _;
 use inbx_config::{Account, AuthMethod};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::oauth;
+
+/// Wrapper around a chunked SSE response. `next_event` strips the SSE
+/// envelope (`event:` / `data:` / blank-line delimiter) and returns each
+/// JSON state-change payload. Returns `Ok(None)` on stream close.
+pub struct EventStream {
+    inner: Pin<Box<dyn Stream<Item = std::result::Result<Bytes, reqwest::Error>> + Send>>,
+    buf: Vec<u8>,
+}
+
+impl EventStream {
+    pub async fn next_event(&mut self) -> Result<Option<String>> {
+        loop {
+            // Look for a complete SSE record (terminated by blank line `\n\n`).
+            if let Some(end) = find_blank_line(&self.buf) {
+                let raw = self.buf.drain(..end).collect::<Vec<u8>>();
+                // Drop the blank-line terminator.
+                let consume = if self.buf.starts_with(b"\r\n\r\n") {
+                    4
+                } else {
+                    2
+                };
+                if self.buf.len() >= consume {
+                    self.buf.drain(..consume);
+                }
+                let text = String::from_utf8_lossy(&raw);
+                let mut data = String::new();
+                for line in text.lines() {
+                    if let Some(rest) = line.strip_prefix("data:") {
+                        if !data.is_empty() {
+                            data.push('\n');
+                        }
+                        data.push_str(rest.trim_start());
+                    }
+                }
+                if !data.is_empty() {
+                    return Ok(Some(data));
+                }
+                continue;
+            }
+            match self.inner.next().await {
+                Some(Ok(chunk)) => self.buf.extend_from_slice(&chunk),
+                Some(Err(e)) => return Err(Error::Reqwest(e)),
+                None => return Ok(None),
+            }
+        }
+    }
+}
+
+fn find_blank_line(buf: &[u8]) -> Option<usize> {
+    if let Some(p) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+        return Some(p);
+    }
+    buf.windows(2).position(|w| w == b"\n\n")
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -57,6 +115,8 @@ pub struct Session {
     pub primary_accounts: serde_json::Map<String, Value>,
     #[serde(rename = "uploadUrl", default)]
     pub upload_url: Option<String>,
+    #[serde(rename = "eventSourceUrl", default)]
+    pub event_source_url: Option<String>,
 }
 
 impl Session {
@@ -188,6 +248,38 @@ impl JmapClient {
         let list = v["methodResponses"][1][1]["list"].clone();
         let emails: Vec<EmailHeader> = serde_json::from_value(list)?;
         Ok(emails)
+    }
+
+    /// Open the JMAP EventSource (RFC 8620 §7.3) stream and yield one
+    /// notification per state-change line. The stream stays open until
+    /// the server closes it or the caller drops the future.
+    pub async fn open_event_source(&self) -> Result<EventStream> {
+        let raw = self
+            .session
+            .event_source_url
+            .as_deref()
+            .ok_or(Error::Server {
+                status: 0,
+                body: "session has no eventSourceUrl".into(),
+            })?;
+        // Some implementations template `{types}`/`{closeafter}`/`{ping}`.
+        let url = raw
+            .replace("{types}", "Email")
+            .replace("{closeafter}", "no")
+            .replace("{ping}", "30");
+        let res = apply_auth(self.http.get(&url), &self.auth)
+            .header("Accept", "text/event-stream")
+            .send()
+            .await?;
+        if !res.status().is_success() {
+            let status = res.status().as_u16();
+            let body = res.text().await.unwrap_or_default();
+            return Err(Error::Server { status, body });
+        }
+        Ok(EventStream {
+            inner: Box::pin(res.bytes_stream()),
+            buf: Vec::new(),
+        })
     }
 
     /// Email/changes — pass the previously-stored state. Returns the new
