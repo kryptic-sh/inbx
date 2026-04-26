@@ -44,12 +44,13 @@ pub enum AuthMethod {
     #[default]
     AppPassword,
     /// XOAUTH2 with a refresh token from the keyring.
-    Oauth2 {
-        provider: OauthProvider,
-        /// Oauth client ID. Required when no built-in default exists.
+    #[serde(rename = "oauth2")]
+    OAuth2 {
+        provider: OAuthProvider,
+        /// OAuth client ID. Required when no built-in default exists.
         #[serde(default)]
         client_id: Option<String>,
-        /// Oauth client secret (treat as public for desktop apps + PKCE).
+        /// OAuth client secret (treat as public for desktop apps + PKCE).
         #[serde(default)]
         client_secret: Option<String>,
     },
@@ -57,7 +58,7 @@ pub enum AuthMethod {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum OauthProvider {
+pub enum OAuthProvider {
     Gmail,
     Microsoft {
         #[serde(default = "default_ms_tenant")]

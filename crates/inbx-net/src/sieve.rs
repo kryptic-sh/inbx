@@ -2,7 +2,7 @@
 //!
 //! Hand-rolled protocol over tokio-rustls because no Rust crate ships a
 //! mature async ManageSieve client. Supports AUTHENTICATE PLAIN with the
-//! account's app password (Oauth2 SASL is left to a future milestone) and
+//! account's app password (OAuth2 SASL is left to a future milestone) and
 //! the script-management verbs: LISTSCRIPTS, GETSCRIPT, PUTSCRIPT,
 //! SETACTIVE, DELETESCRIPT.
 
@@ -35,7 +35,7 @@ pub enum Error {
     #[error("protocol: {0}")]
     Protocol(&'static str),
     #[error("oauth: {0}")]
-    Oauth(#[from] oauth::Error),
+    OAuth(#[from] oauth::Error),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -58,7 +58,7 @@ fn tls_config() -> Arc<ClientConfig> {
 
 impl SieveClient {
     /// Connect over implicit TLS to host:4190 (configurable later) and
-    /// authenticate via SASL PLAIN. Oauth2 accounts are rejected — wire
+    /// authenticate via SASL PLAIN. OAuth2 accounts are rejected — wire
     /// XOAUTH2 SASL when the user asks.
     pub async fn connect(account: &Account) -> Result<Self> {
         let host = account.imap_host.as_str();
@@ -78,7 +78,7 @@ impl SieveClient {
                 let password = inbx_config::load_password(&account.name)?;
                 me.authenticate_plain(&account.username, &password).await?;
             }
-            AuthMethod::Oauth2 { provider, .. } => {
+            AuthMethod::OAuth2 { provider, .. } => {
                 let refresh = inbx_config::load_refresh_token(&account.name)?;
                 let access = oauth::refresh(&account.auth, provider, &refresh).await?;
                 me.authenticate_xoauth2(&account.email, &access).await?;

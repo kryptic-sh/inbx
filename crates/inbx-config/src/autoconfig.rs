@@ -4,7 +4,7 @@
 //! provider hint based on a built-in table of common providers. Unknown
 //! domains fall back to a `imap.<domain>` / `smtp.<domain>` heuristic guess.
 
-use crate::{OauthProvider, TlsMode};
+use crate::{OAuthProvider, TlsMode};
 
 /// Where the suggestion came from.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -24,7 +24,7 @@ pub struct Suggestion {
     pub smtp_host: String,
     pub smtp_port: u16,
     pub smtp_security: TlsMode,
-    pub oauth_provider: Option<OauthProvider>,
+    pub oauth_provider: Option<OAuthProvider>,
     pub source: SuggestionSource,
 }
 
@@ -74,7 +74,7 @@ fn builtin(domain: &str) -> Option<Suggestion> {
             smtp_host: "smtp.gmail.com".into(),
             smtp_port: 465,
             smtp_security: TlsMode::Tls,
-            oauth_provider: Some(OauthProvider::Gmail),
+            oauth_provider: Some(OAuthProvider::Gmail),
             source: SuggestionSource::BuiltIn { name: "gmail" },
         }),
         "outlook.com" | "hotmail.com" | "live.com" | "msn.com" | "office365.com" => {
@@ -85,7 +85,7 @@ fn builtin(domain: &str) -> Option<Suggestion> {
                 smtp_host: "smtp.office365.com".into(),
                 smtp_port: 587,
                 smtp_security: TlsMode::Starttls,
-                oauth_provider: Some(OauthProvider::Microsoft {
+                oauth_provider: Some(OAuthProvider::Microsoft {
                     tenant: "common".into(),
                 }),
                 source: SuggestionSource::BuiltIn { name: "microsoft" },
@@ -162,7 +162,7 @@ mod tests {
         assert_eq!(s.smtp_host, "smtp.gmail.com");
         assert_eq!(s.smtp_port, 465);
         assert_eq!(s.smtp_security, TlsMode::Tls);
-        assert_eq!(s.oauth_provider, Some(OauthProvider::Gmail));
+        assert_eq!(s.oauth_provider, Some(OAuthProvider::Gmail));
         assert_eq!(s.source, SuggestionSource::BuiltIn { name: "gmail" });
     }
 
@@ -177,7 +177,7 @@ mod tests {
         assert_eq!(s.smtp_security, TlsMode::Starttls);
         assert!(matches!(
             s.oauth_provider,
-            Some(OauthProvider::Microsoft { .. })
+            Some(OAuthProvider::Microsoft { .. })
         ));
         assert_eq!(s.source, SuggestionSource::BuiltIn { name: "microsoft" });
     }

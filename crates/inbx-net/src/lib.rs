@@ -13,5 +13,5 @@ pub use imap::{
     fetch_headers_uids, fetch_inbox_headers, find_drafts_folder, find_sent_folder, list_folders,
     rename_folder, search_since, store_flags, subscribe_folder, uid_copy, uid_move,
 };
-pub use oauth::{Error as OauthError, TokenSet, login as oauth_login, refresh as oauth_refresh};
+pub use oauth::{Error as OAuthError, TokenSet, login as oauth_login, refresh as oauth_refresh};
 pub use smtp::{Error as SmtpError, send_message};

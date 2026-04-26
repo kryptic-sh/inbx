@@ -1,11 +1,11 @@
 //! Microsoft Graph backend for Outlook / Microsoft 365.
 //!
 //! Lives next to the IMAP/SMTP path so individual accounts can opt in. Uses
-//! the same Oauth2 refresh-token storage as IMAP-side XOAUTH2.
+//! the same OAuth2 refresh-token storage as IMAP-side XOAUTH2.
 
 use std::time::Duration;
 
-use inbx_config::{Account, AuthMethod, OauthProvider};
+use inbx_config::{Account, AuthMethod, OAuthProvider};
 use serde::Deserialize;
 
 use crate::oauth;
@@ -19,8 +19,8 @@ pub enum Error {
     #[error("config: {0}")]
     Config(#[from] inbx_config::Error),
     #[error("oauth: {0}")]
-    Oauth(#[from] oauth::Error),
-    #[error("graph: account is not Microsoft Oauth2")]
+    OAuth(#[from] oauth::Error),
+    #[error("graph: account is not Microsoft OAuth2")]
     NotMicrosoft,
     #[error("graph: api error {status}: {body}")]
     Api { status: u16, body: String },
@@ -39,8 +39,8 @@ pub struct GraphClient {
 impl GraphClient {
     pub async fn connect(account: &Account) -> Result<Self> {
         let provider = match &account.auth {
-            AuthMethod::Oauth2 {
-                provider: provider @ OauthProvider::Microsoft { .. },
+            AuthMethod::OAuth2 {
+                provider: provider @ OAuthProvider::Microsoft { .. },
                 ..
             } => provider.clone(),
             _ => return Err(Error::NotMicrosoft),
