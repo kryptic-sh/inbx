@@ -20,6 +20,11 @@ pub(super) async fn handle_list_key(app: &mut App, key: KeyEvent) -> Result<bool
         return Ok(true);
     }
 
+    if key.code == KeyCode::Char('a') {
+        app.open_account_picker()?;
+        return Ok(false);
+    }
+
     // Compose / reply / forward shortcuts.
     match key.code {
         KeyCode::Char('c') => {
@@ -410,6 +415,48 @@ pub(super) async fn handle_search_key(app: &mut App, key: KeyEvent) -> Result<()
             }
             _ => {}
         }
+    }
+    Ok(())
+}
+
+pub(super) async fn handle_account_picker_key(app: &mut App, key: KeyEvent) -> Result<()> {
+    let len = app
+        .account_picker
+        .as_ref()
+        .map(|p| p.accounts.len())
+        .unwrap_or(0);
+    match key.code {
+        KeyCode::Esc => {
+            app.account_picker = None;
+        }
+        KeyCode::Enter => {
+            let pick = app
+                .account_picker
+                .as_ref()
+                .and_then(|p| p.state.selected().and_then(|i| p.accounts.get(i)).cloned());
+            if let Some(acct) = pick {
+                app.account_picker = None;
+                app.switch_account(acct).await?;
+            }
+        }
+        KeyCode::Up | KeyCode::Char('k') if key.modifiers.is_empty() => {
+            if len > 0
+                && let Some(p) = app.account_picker.as_mut()
+            {
+                let cur = p.state.selected().unwrap_or(0);
+                p.state
+                    .select(Some(if cur == 0 { len - 1 } else { cur - 1 }));
+            }
+        }
+        KeyCode::Down | KeyCode::Char('j') if key.modifiers.is_empty() => {
+            if len > 0
+                && let Some(p) = app.account_picker.as_mut()
+            {
+                let cur = p.state.selected().unwrap_or(0);
+                p.state.select(Some((cur + 1) % len));
+            }
+        }
+        _ => {}
     }
     Ok(())
 }

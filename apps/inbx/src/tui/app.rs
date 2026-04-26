@@ -32,6 +32,22 @@ pub(super) struct App {
     pub(super) outbox: Option<OutboxState>,
     pub(super) search: Option<SearchState>,
     pub(super) thread: Option<ThreadState>,
+    pub(super) account_picker: Option<AccountPickerState>,
+}
+
+pub(super) struct AccountPickerState {
+    pub(super) accounts: Vec<Account>,
+    pub(super) state: ListState,
+}
+
+impl AccountPickerState {
+    pub(super) fn new(accounts: Vec<Account>) -> Self {
+        let mut state = ListState::default();
+        if !accounts.is_empty() {
+            state.select(Some(0));
+        }
+        Self { accounts, state }
+    }
 }
 
 pub(super) struct MovePickerState {
@@ -103,6 +119,7 @@ impl App {
             outbox: None,
             search: None,
             thread: None,
+            account_picker: None,
         };
         app.reload_messages().await?;
         Ok(app)
@@ -509,6 +526,41 @@ impl App {
         let n = messages.len();
         self.thread = Some(ThreadState { messages, state });
         self.status = format!("thread: {n} message(s)");
+        Ok(())
+    }
+
+    pub(super) fn open_account_picker(&mut self) -> Result<()> {
+        let cfg = inbx_config::load()?;
+        let accounts = cfg.accounts;
+        if accounts.is_empty() {
+            self.status = "no accounts configured".into();
+            return Ok(());
+        }
+        let n = accounts.len();
+        self.account_picker = Some(AccountPickerState::new(accounts));
+        self.status = format!("accounts: {n}");
+        Ok(())
+    }
+
+    pub(super) async fn switch_account(&mut self, target: Account) -> Result<()> {
+        if target.name == self.account.name {
+            self.status = format!("already on {}", target.name);
+            return Ok(());
+        }
+        let store = Store::open(&target.name).await?;
+        self.store = store;
+        self.account = target;
+        self.folders = self.store.list_folders().await?;
+        self.folder_state = ListState::default();
+        if !self.folders.is_empty() {
+            self.folder_state.select(Some(0));
+        }
+        self.msg_state = ListState::default();
+        self.body.clear();
+        self.body_scroll = 0;
+        self.reload_messages().await?;
+        self.pane = Pane::Folders;
+        self.status = format!("switched to {}", self.account.name);
         Ok(())
     }
 

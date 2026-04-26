@@ -45,6 +45,9 @@ pub(super) fn draw(f: &mut ratatui::Frame, app: &App) {
     if app.thread.is_some() {
         draw_thread(f, app, outer[0]);
     }
+    if app.account_picker.is_some() {
+        draw_account_picker(f, app, outer[0]);
+    }
     if app.show_help {
         draw_help(f, outer[0]);
     }
@@ -502,6 +505,45 @@ fn format_date_utc(unix: i64) -> String {
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = if m <= 2 { y + 1 } else { y };
     format!("{y:04}-{m:02}-{d:02}")
+}
+
+fn draw_account_picker(f: &mut ratatui::Frame, app: &App, area: Rect) {
+    let Some(picker) = app.account_picker.as_ref() else {
+        return;
+    };
+    let height = (picker.accounts.len() as u16 + 4).min(area.height).max(6);
+    let width = 60u16.min(area.width);
+    let x = area.x + area.width.saturating_sub(width) / 2;
+    let y = area.y + area.height.saturating_sub(height) / 2;
+    let popup = Rect {
+        x,
+        y,
+        width,
+        height,
+    };
+    f.render_widget(Clear, popup);
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(3), Constraint::Min(1)])
+        .split(popup);
+
+    let header = Paragraph::new(format!("current: {}", app.account.name))
+        .block(pane_block("switch account (Enter pick · j/k · Esc)", true));
+    f.render_widget(header, layout[0]);
+
+    let items: Vec<ListItem> = picker
+        .accounts
+        .iter()
+        .map(|a| {
+            let marker = if a.name == app.account.name { "*" } else { " " };
+            ListItem::new(format!("{marker} {}  <{}>", a.name, a.email))
+        })
+        .collect();
+    let list = List::new(items)
+        .block(pane_block("accounts", true))
+        .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
+        .highlight_symbol("> ");
+    f.render_stateful_widget(list, layout[1], &mut picker.state.clone());
 }
 
 fn draw_move_picker(f: &mut ratatui::Frame, app: &App, area: Rect) {
