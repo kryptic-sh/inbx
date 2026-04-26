@@ -23,6 +23,7 @@ inbx-contacts.workspace = true
 inbx-ical.workspace = true
 inbx-composer.workspace = true
 hjkl-editor.workspace = true
+hjkl-engine.workspace = true
 mail-parser.workspace = true
 notify-rust.workspace = true
 directories = "5"
