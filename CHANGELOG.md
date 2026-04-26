@@ -10,6 +10,9 @@ patch bumps.
 
 ### Changed
 
+- bump hjkl =0.0.36 — adopts named-marks consolidation; consumer-side change is
+  pin bump only. Composer migration to spec::\* still pending Editor<B,H>
+  generic at 0.1.0.
 - bump hjkl =0.0.35 — adopts search FSM migration into `hjkl_editor::Editor`;
   consumer-side change is pin bump only. Composer migration to spec::\* still
   pending Editor<B,H> generic at 0.1.0.
