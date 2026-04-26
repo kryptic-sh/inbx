@@ -21,7 +21,6 @@ jobs:
         with:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
-      - uses: ./.github/actions/sync-hjkl
       - uses: dtolnay/rust-toolchain@stable
       - name: release-plz release-pr
         uses: release-plz/action@v0.5
@@ -40,7 +39,6 @@ jobs:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
-      - uses: ./.github/actions/sync-hjkl
       - uses: dtolnay/rust-toolchain@stable
       - uses: release-plz/action@v0.5
         with:
