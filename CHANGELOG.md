@@ -10,6 +10,9 @@ patch bumps.
 
 ### Changed
 
+- bump hjkl =0.0.37 — adopts spans + search-pattern relocation out of Buffer;
+  consumer-side change is pin bump only. Composer migration to spec::\* still
+  pending Editor<B,H> generic at 0.1.0.
 - bump hjkl =0.0.36 — adopts named-marks consolidation; consumer-side change is
   pin bump only. Composer migration to spec::\* still pending Editor<B,H>
   generic at 0.1.0.
