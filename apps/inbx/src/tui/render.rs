@@ -76,6 +76,9 @@ fn draw_help(f: &mut ratatui::Frame, area: Rect) {
         "    e           — EXPUNGE folder",
         "    m           — move to folder",
         "    F           — manual sync",
+        "    T           — thread view",
+        "    U           — list-unsubscribe",
+        "    i           — accept/decline invite",
         "",
         "  compose",
         "    c           — new draft",
@@ -88,12 +91,19 @@ fn draw_help(f: &mut ratatui::Frame, area: Rect) {
         "    Ctrl-D      — save draft to server",
         "    Ctrl-Q      — discard",
         "",
+        "  overlays",
+        "    /           — search (FTS)",
+        "    a           — switch account",
+        "    C           — contacts",
+        "    O           — outbox panel",
+        "    L           — oauth login",
+        "",
         "  global",
         "    ?           — toggle this help",
         "    q / Ctrl-C  — quit",
     ];
     let height = (lines.len() as u16 + 2).min(area.height);
-    let width = 56u16.min(area.width);
+    let width = 60u16.min(area.width);
     let x = area.x + area.width.saturating_sub(width) / 2;
     let y = area.y + area.height.saturating_sub(height) / 2;
     let popup = Rect {
