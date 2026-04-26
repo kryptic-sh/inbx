@@ -1,0 +1,155 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+env:
+  CARGO_TERM_COLOR: always
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            glibc: "2.28"
+            macos_min: ""
+            suffix: ""
+            archive: tar.gz
+            gui: true
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            glibc: ""
+            macos_min: ""
+            suffix: ".exe"
+            archive: zip
+            gui: false
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            glibc: ""
+            macos_min: "11.0"
+            suffix: ""
+            archive: tar.gz
+            gui: true
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            glibc: ""
+            macos_min: "10.15"
+            suffix: ""
+            archive: tar.gz
+            gui: true
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Verify tag matches Cargo.toml version
+        shell: bash
+        run: |
+          CARGO_VER=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          if [ "v$CARGO_VER" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match workspace.package version v$CARGO_VER"
+            exit 1
+          fi
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+          components: clippy, rustfmt
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Setup zig
+        if: matrix.glibc != ''
+        uses: mlugg/setup-zig@v2
+
+      - name: Install cargo-zigbuild
+        if: matrix.glibc != ''
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked --target ${{ matrix.target }} -- -D warnings
+
+      - name: Build binaries with GUI (zigbuild)
+        if: matrix.glibc != '' && matrix.gui
+        run: cargo zigbuild --release --locked --target ${{ matrix.target }}.${{ matrix.glibc }} --bin inbx --bin inbx-gui --bin inbx-sync
+
+      - name: Build binaries with GUI
+        if: matrix.glibc == '' && matrix.gui
+        env:
+          MACOSX_DEPLOYMENT_TARGET: ${{ matrix.macos_min }}
+        run: cargo build --release --locked --target ${{ matrix.target }} --bin inbx --bin inbx-gui --bin inbx-sync
+
+      - name: Build binaries (no GUI)
+        if: matrix.glibc == '' && !matrix.gui
+        env:
+          MACOSX_DEPLOYMENT_TARGET: ${{ matrix.macos_min }}
+        run: cargo build --release --locked --target ${{ matrix.target }} --bin inbx --bin inbx-sync
+
+      - name: Package (Linux / macOS)
+        if: matrix.archive == 'tar.gz'
+        run: |
+          TAG=${GITHUB_REF_NAME}
+          ARCHIVE="inbx-${TAG}-${{ matrix.target }}.tar.gz"
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/inbx${{ matrix.suffix }} dist/
+          cp target/${{ matrix.target }}/release/inbx-sync${{ matrix.suffix }} dist/
+          if [ "${{ matrix.gui }}" = "true" ]; then
+            cp target/${{ matrix.target }}/release/inbx-gui${{ matrix.suffix }} dist/
+          fi
+          cp README.md LICENSE dist/
+          tar -czf "$ARCHIVE" -C dist .
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "$ARCHIVE" > "$ARCHIVE.sha256"
+          else
+            shasum -a 256 "$ARCHIVE" > "$ARCHIVE.sha256"
+          fi
+
+      - name: Package (Windows)
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: |
+          $TAG = $env:GITHUB_REF_NAME
+          $ARCHIVE = "inbx-$TAG-${{ matrix.target }}.zip"
+          New-Item -ItemType Directory -Force dist
+          Copy-Item "target/${{ matrix.target }}/release/inbx${{ matrix.suffix }}" dist/
+          Copy-Item "target/${{ matrix.target }}/release/inbx-sync${{ matrix.suffix }}" dist/
+          if ("${{ matrix.gui }}" -eq "true") {
+            Copy-Item "target/${{ matrix.target }}/release/inbx-gui${{ matrix.suffix }}" dist/
+          }
+          Copy-Item README.md, LICENSE dist/
+          Compress-Archive -Path dist/* -DestinationPath $ARCHIVE
+          $hash = (Get-FileHash -Algorithm SHA256 $ARCHIVE).Hash.ToLower()
+          "$hash  $ARCHIVE" | Out-File -Encoding ASCII "$ARCHIVE.sha256"
+
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          files: |
+            inbx-*.${{ matrix.archive }}
+            inbx-*.${{ matrix.archive }}.sha256
+          fail_on_unmatched_files: true
+          generate_release_notes: ${{ matrix.target == 'x86_64-unknown-linux-gnu' }}
+          prerelease: ${{ contains(github.ref_name, '-') }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
