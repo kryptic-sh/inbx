@@ -1,5 +1,9 @@
 # inbx
 
+[![CI](https://github.com/kryptic-sh/inbx/actions/workflows/ci.yml/badge.svg)](https://github.com/kryptic-sh/inbx/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Website](https://img.shields.io/badge/website-inbx.kryptic.sh-7ee787)](https://inbx.kryptic.sh)
+
 Modal-vim email client. Rust workspace.
 
 Sibling to [sqeel](https://github.com/kryptic-sh/sqeel),
@@ -12,12 +16,12 @@ Working CLI + TUI + GUI. Real-account dogfood pending.
 
 ## Providers
 
-| Provider                | Status         | Path                                     |
-| ----------------------- | -------------- | ---------------------------------------- |
-| Generic IMAP + SMTP     | Working        | TLS + STARTTLS, app password / OAuth2    |
-| Gmail / Workspace       | Working        | OAuth2 (XOAUTH2 SASL) over IMAP + SMTP   |
-| Microsoft 365 / Outlook | Working        | OAuth2 IMAP/SMTP, or native MS Graph     |
-| Fastmail / Stalwart     | Working        | JMAP (basic + Bearer auth)               |
+| Provider                | Status  | Path                                   |
+| ----------------------- | ------- | -------------------------------------- |
+| Generic IMAP + SMTP     | Working | TLS + STARTTLS, app password / OAuth2  |
+| Gmail / Workspace       | Working | OAuth2 (XOAUTH2 SASL) over IMAP + SMTP |
+| Microsoft 365 / Outlook | Working | OAuth2 IMAP/SMTP, or native MS Graph   |
+| Fastmail / Stalwart     | Working | JMAP (basic + Bearer auth)             |
 
 ## Workspace
 
@@ -38,20 +42,20 @@ apps/
 
 ## Highlights
 
-- **TUI** with vim navigation (j/k, h/l, gg/G, Tab) and a modal composer
-  overlay (`c`/`r`/`R`/`f`, Ctrl-S send, Ctrl-D save draft)
+- **TUI** with vim navigation (j/k, h/l, gg/G, Tab) and a modal composer overlay
+  (`c`/`r`/`R`/`f`, Ctrl-S send, Ctrl-D save draft)
 - **GUI** (eframe + egui) — read-only three-pane: folders / messages / preview
-- **Auth** — app password via OS keyring, OAuth2 (Gmail + Microsoft) with
-  PKCE + auth-code loopback flow, refresh tokens stored in the keyring
+- **Auth** — app password via OS keyring, OAuth2 (Gmail + Microsoft) with PKCE +
+  auth-code loopback flow, refresh tokens stored in the keyring
 - **Render** — HTML sanitized via ammonia, remote content blocked by default,
-  tracker pixels surfaced, SPF/DKIM/DMARC + phishing heuristics, PGP /
-  S/MIME presence detection
+  tracker pixels surfaced, SPF/DKIM/DMARC + phishing heuristics, PGP / S/MIME
+  presence detection
 - **Search + threading** — SQLite FTS5 over subject / from / to / body,
   In-Reply-To walk for thread grouping
 - **Sync** — IMAP IDLE watch loop, offline outbox queue with exponential
   backoff, Microsoft Graph delta sync
-- **Server-side filters** — ManageSieve client (RFC 5804) + vacation
-  responder generator
+- **Server-side filters** — ManageSieve client (RFC 5804) + vacation responder
+  generator
 - **Calendar** — `.ics` invite parsing + METHOD:REPLY for accept/decline
 - **Mailbox ops** — UID STORE flags (`mark read/unread/star/trash`), UID
   MOVE/COPY (RFC 6851), EXPUNGE, mailbox CRUD, SUBSCRIBE
@@ -112,16 +116,16 @@ cargo test --workspace
 
 ## Theme
 
-`$XDG_CONFIG_HOME/inbx/theme.toml` — RGB triples for focused border,
-unfocused border, status bg/fg, unread accent, highlight. Partial overrides
-fall back to a built-in dark palette.
+`$XDG_CONFIG_HOME/inbx/theme.toml` — RGB triples for focused border, unfocused
+border, status bg/fg, unread accent, highlight. Partial overrides fall back to a
+built-in dark palette.
 
 ## hjkl tracking
 
 The composer is built on [hjkl-editor](https://github.com/kryptic-sh/hjkl)
-`runtime::*`. A Claude routine polls hourly for new hjkl releases and
-opens an integration PR on this repo when one lands; if 0.1.0 ships
-its `spec::*` trait surface, the routine performs the migration in the PR.
+`runtime::*`. A Claude routine polls hourly for new hjkl releases and opens an
+integration PR on this repo when one lands; if 0.1.0 ships its `spec::*` trait
+surface, the routine performs the migration in the PR.
 
 See [PLAN.md](PLAN.md) for full design.
 
