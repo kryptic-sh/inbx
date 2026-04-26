@@ -1,0 +1,44 @@
+# Keep a Changelog format for release-plz
+header = """# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/) once it
+reaches 0.1.0; the 0.0.x series is a churn phase where breaking changes may
+land on patch bumps.
+"""
+
+body = """
+## [{{ version | trim_start_matches(pat="v") }}]{%- if release_link -%}({{ release_link }}){% endif %} - {{ timestamp | date(format="%Y-%m-%d") }}
+{% for group, commits in commits | group_by(attribute="group") %}
+### {{ group | upper_first }}
+{% for commit in commits %}
+- {% if commit.scope %}**({{commit.scope}})** {% endif %}\
+{{ commit.message | upper_first }}\
+{% if commit.links %} ({% for link in commit.links %}[{{link.text}}]({{link.href}}){% if not loop.last %}, {% endif %}{% endfor %}){% endif %}\
+{% endfor %}
+{% endfor %}
+"""
+
+commit_parsers = [
+  { message = "^feat", group = "Added" },
+  { message = "^add", group = "Added" },
+  { message = "^change", group = "Changed" },
+  { message = "^deprecate", group = "Deprecated" },
+  { message = "^remove", group = "Removed" },
+  { message = "^fix", group = "Fixed" },
+  { message = "^security", group = "Security" },
+  { message = "^perf", group = "Changed" },
+  { message = "^refactor", group = "Changed" },
+  { message = "^docs", skip = true },
+  { message = "^chore", skip = true },
+  { message = "^test", skip = true },
+  { message = "^ci", skip = true },
+  { message = "^build", skip = true },
+  { message = "^style", skip = true },
+]
+
+protect_breaking_commits = true
+filter_unconventional = true
+sort_commits = "oldest"

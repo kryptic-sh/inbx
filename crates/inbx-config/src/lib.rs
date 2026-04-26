@@ -1,3 +1,4 @@
+pub mod autoconfig;
 pub mod theme;
 
 use std::path::PathBuf;

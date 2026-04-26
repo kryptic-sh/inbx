@@ -18,6 +18,8 @@ use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
 use tokio_rustls::client::TlsStream;
 
+use crate::oauth;
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("io: {0}")]
@@ -32,8 +34,8 @@ pub enum Error {
     Server(String),
     #[error("protocol: {0}")]
     Protocol(&'static str),
-    #[error("Oauth2 not supported on this ManageSieve client yet")]
-    OauthNotSupported,
+    #[error("oauth: {0}")]
+    Oauth(#[from] oauth::Error),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -71,11 +73,17 @@ impl SieveClient {
         // Drain greeting (capability lines + tagged OK).
         let _ = me.read_until_done().await?;
 
-        let password = match &account.auth {
-            AuthMethod::AppPassword => inbx_config::load_password(&account.name)?,
-            AuthMethod::Oauth2 { .. } => return Err(Error::OauthNotSupported),
-        };
-        me.authenticate_plain(&account.username, &password).await?;
+        match &account.auth {
+            AuthMethod::AppPassword => {
+                let password = inbx_config::load_password(&account.name)?;
+                me.authenticate_plain(&account.username, &password).await?;
+            }
+            AuthMethod::Oauth2 { provider, .. } => {
+                let refresh = inbx_config::load_refresh_token(&account.name)?;
+                let access = oauth::refresh(&account.auth, provider, &refresh).await?;
+                me.authenticate_xoauth2(&account.email, &access).await?;
+            }
+        }
         Ok(me)
     }
 
@@ -132,6 +140,14 @@ impl SieveClient {
         let raw = format!("\0{user}\0{password}");
         let sasl = B64.encode(raw);
         let line = format!("AUTHENTICATE \"PLAIN\" \"{sasl}\"");
+        self.write_line(&line).await?;
+        let _ = self.read_until_done().await?;
+        Ok(())
+    }
+
+    async fn authenticate_xoauth2(&mut self, email: &str, access_token: &str) -> Result<()> {
+        let sasl = xoauth2_sasl_string(email, access_token);
+        let line = format!("AUTHENTICATE \"XOAUTH2\" \"{sasl}\"");
         self.write_line(&line).await?;
         let _ = self.read_until_done().await?;
         Ok(())
@@ -230,6 +246,12 @@ fn parse_quoted(line: &str) -> Option<String> {
 
 fn quote_escape(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+/// Encode an XOAUTH2 SASL initial response per Google's spec, base64 encoded.
+fn xoauth2_sasl_string(email: &str, access_token: &str) -> String {
+    let raw = format!("user={email}\x01auth=Bearer {access_token}\x01\x01");
+    B64.encode(raw)
 }
 
 /// Build a Sieve vacation script per RFC 5230.

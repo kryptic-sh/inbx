@@ -37,9 +37,27 @@ struct App {
     pane: Pane,
     pending_g: bool,
     body: String,
+    body_scroll: u16,
     status: String,
     composer: Option<Composer>,
     show_help: bool,
+    move_picker: Option<MovePickerState>,
+}
+
+struct MovePickerState {
+    filter: String,
+    state: ListState,
+}
+
+impl MovePickerState {
+    fn new() -> Self {
+        let mut state = ListState::default();
+        state.select(Some(0));
+        Self {
+            filter: String::new(),
+            state,
+        }
+    }
 }
 
 impl App {
@@ -61,9 +79,11 @@ impl App {
             pane: Pane::Folders,
             pending_g: false,
             body: String::new(),
+            body_scroll: 0,
             status: String::new(),
             composer: None,
             show_help: false,
+            move_picker: None,
         };
         app.reload_messages().await?;
         Ok(app)
@@ -216,6 +236,39 @@ impl App {
         Ok(())
     }
 
+    async fn move_current_to(&mut self, target: &str) -> Result<()> {
+        let Some(source) = self.current_folder().map(|f| f.name.clone()) else {
+            return Ok(());
+        };
+        if source == target {
+            self.status = format!("already in {target}");
+            return Ok(());
+        }
+        let Some(msg) = self.current_message().cloned() else {
+            return Ok(());
+        };
+        let mut session = inbx_net::connect_imap(&self.account).await?;
+        inbx_net::uid_move(&mut session, &source, &[msg.uid as u32], target).await?;
+        let _ = session.logout().await;
+        self.store.delete_messages(&source, &[msg.uid]).await?;
+        self.reload_messages().await?;
+        self.status = format!("moved uid {} → {target}", msg.uid);
+        Ok(())
+    }
+
+    fn picker_targets(&self) -> Vec<String> {
+        let filter = self
+            .move_picker
+            .as_ref()
+            .map(|p| p.filter.to_ascii_lowercase())
+            .unwrap_or_default();
+        self.folders
+            .iter()
+            .filter(|f| f.name.to_ascii_lowercase().contains(&filter))
+            .map(|f| f.name.clone())
+            .collect()
+    }
+
     fn current_folder(&self) -> Option<&FolderRow> {
         self.folder_state
             .selected()
@@ -246,6 +299,7 @@ impl App {
     }
 
     fn refresh_body(&mut self) {
+        self.body_scroll = 0;
         match self.current_message() {
             None => {
                 self.body.clear();
@@ -358,6 +412,10 @@ async fn event_loop(term: &mut Term, app: &mut App) -> Result<()> {
                 }
                 continue;
             }
+            if app.move_picker.is_some() {
+                handle_move_picker_key(app, key).await?;
+                continue;
+            }
             if handle_list_key(app, key).await? {
                 break;
             }
@@ -421,6 +479,56 @@ async fn handle_list_key(app: &mut App, key: KeyEvent) -> Result<bool> {
             }
             KeyCode::Char('e') => {
                 app.expunge().await?;
+                return Ok(false);
+            }
+            KeyCode::Char('m') => {
+                app.move_picker = Some(MovePickerState::new());
+                return Ok(false);
+            }
+            _ => {}
+        }
+    }
+
+    // Body scroll keys when Preview pane is focused.
+    if app.pane == Pane::Preview {
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down => {
+                app.body_scroll = app.body_scroll.saturating_add(1);
+                return Ok(false);
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                app.body_scroll = app.body_scroll.saturating_sub(1);
+                return Ok(false);
+            }
+            KeyCode::PageDown => {
+                app.body_scroll = app.body_scroll.saturating_add(10);
+                return Ok(false);
+            }
+            KeyCode::PageUp => {
+                app.body_scroll = app.body_scroll.saturating_sub(10);
+                return Ok(false);
+            }
+            KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                app.body_scroll = app.body_scroll.saturating_add(10);
+                return Ok(false);
+            }
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                app.body_scroll = app.body_scroll.saturating_sub(10);
+                return Ok(false);
+            }
+            KeyCode::Char('g') => {
+                if app.pending_g {
+                    app.body_scroll = 0;
+                    app.pending_g = false;
+                } else {
+                    app.pending_g = true;
+                }
+                return Ok(false);
+            }
+            KeyCode::Char('G') => {
+                let lines = app.body.lines().count() as u16;
+                app.body_scroll = lines.saturating_sub(1);
+                app.pending_g = false;
                 return Ok(false);
             }
             _ => {}
@@ -552,6 +660,9 @@ fn draw(f: &mut ratatui::Frame, app: &App) {
     draw_folders(f, app, body[0]);
     draw_messages(f, app, body[1]);
     draw_preview(f, app, body[2]);
+    if app.move_picker.is_some() {
+        draw_move_picker(f, app, outer[0]);
+    }
     if app.show_help {
         draw_help(f, outer[0]);
     }
@@ -685,7 +796,8 @@ fn draw_preview(f: &mut ratatui::Frame, app: &App, area: Rect) {
         .unwrap_or_else(|| "preview".into());
     let para = Paragraph::new(app.body.as_str())
         .block(pane_block(&title, app.pane == Pane::Preview))
-        .wrap(Wrap { trim: false });
+        .wrap(Wrap { trim: false })
+        .scroll((app.body_scroll, 0));
     f.render_widget(para, area);
 }
 
@@ -853,4 +965,85 @@ fn render_path(path: &str) -> String {
             String::from_utf8_lossy(&raw)
         ),
     }
+}
+
+async fn handle_move_picker_key(app: &mut App, key: KeyEvent) -> Result<()> {
+    let targets = app.picker_targets();
+    let Some(picker) = app.move_picker.as_mut() else {
+        return Ok(());
+    };
+    match key.code {
+        KeyCode::Esc => {
+            app.move_picker = None;
+        }
+        KeyCode::Enter => {
+            let idx = picker.state.selected().unwrap_or(0);
+            if let Some(target) = targets.get(idx).cloned() {
+                app.move_picker = None;
+                app.move_current_to(&target).await?;
+            }
+        }
+        KeyCode::Up | KeyCode::Char('k') if key.modifiers.is_empty() => {
+            let len = targets.len();
+            if len > 0 {
+                let cur = picker.state.selected().unwrap_or(0);
+                picker
+                    .state
+                    .select(Some(if cur == 0 { len - 1 } else { cur - 1 }));
+            }
+        }
+        KeyCode::Down | KeyCode::Char('j') if key.modifiers.is_empty() => {
+            let len = targets.len();
+            if len > 0 {
+                let cur = picker.state.selected().unwrap_or(0);
+                picker.state.select(Some((cur + 1) % len));
+            }
+        }
+        KeyCode::Backspace => {
+            picker.filter.pop();
+            picker.state.select(Some(0));
+        }
+        KeyCode::Char(c) => {
+            picker.filter.push(c);
+            picker.state.select(Some(0));
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn draw_move_picker(f: &mut ratatui::Frame, app: &App, area: Rect) {
+    let Some(picker) = app.move_picker.as_ref() else {
+        return;
+    };
+    let targets = app.picker_targets();
+    let height = (targets.len() as u16 + 4).min(area.height).max(6);
+    let width = 60u16.min(area.width);
+    let x = area.x + area.width.saturating_sub(width) / 2;
+    let y = area.y + area.height.saturating_sub(height) / 2;
+    let popup = Rect {
+        x,
+        y,
+        width,
+        height,
+    };
+    f.render_widget(Clear, popup);
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(3), Constraint::Min(1)])
+        .split(popup);
+
+    let filter_para = Paragraph::new(format!("/{}", picker.filter))
+        .block(pane_block("move to (Esc cancel · Enter pick)", true));
+    f.render_widget(filter_para, layout[0]);
+
+    let items: Vec<ListItem> = targets
+        .iter()
+        .map(|name| ListItem::new(name.clone()))
+        .collect();
+    let list = List::new(items)
+        .block(pane_block("folders", true))
+        .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
+        .highlight_symbol("> ");
+    f.render_stateful_widget(list, layout[1], &mut picker.state.clone());
 }
