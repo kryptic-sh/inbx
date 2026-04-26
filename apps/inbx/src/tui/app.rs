@@ -15,6 +15,32 @@ pub(super) enum Pane {
     Preview,
 }
 
+/// Modal indicator surfaced in the status line. Mirrors vim's idea of a
+/// global mode but collapsed to the four states inbx actually has today:
+/// `Normal` for list navigation, `Insert` while the composer is open,
+/// `Search` while the `/` overlay accepts query input, and `Visual` —
+/// reserved for a future per-message-range visual mode (no current
+/// binding emits it; included so render code can match exhaustively
+/// without churn when visual lands).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum Mode {
+    Normal,
+    Insert,
+    Visual,
+    Search,
+}
+
+impl Mode {
+    pub(super) fn label(self) -> &'static str {
+        match self {
+            Mode::Normal => "NORMAL",
+            Mode::Insert => "INSERT",
+            Mode::Visual => "VISUAL",
+            Mode::Search => "SEARCH",
+        }
+    }
+}
+
 pub(super) struct App {
     pub(super) account: Account,
     pub(super) store: Store,
@@ -40,6 +66,10 @@ pub(super) struct App {
     /// that `n` / `N` from the main list jumps through results without
     /// retyping the query, and reopening `/` restores the prior session.
     pub(super) last_search: Option<LastSearch>,
+    /// Unix timestamp of the most recent successful manual sync. `None`
+    /// when no sync has run yet this session. Surfaced in the status line
+    /// as a relative age (`12s`, `3m`, `1h`).
+    pub(super) last_sync_unix: Option<i64>,
 }
 
 #[derive(Clone, Copy)]
@@ -118,6 +148,16 @@ pub(super) struct LastSearch {
     pub(super) results: Vec<MessageRow>,
     /// Index into `results` of the most recently visited match.
     pub(super) cursor: usize,
+}
+
+/// Count unread messages in a row slice. Pure so the status-line tests
+/// don't need a `Store`. "Unread" mirrors `draw_messages` — a row is
+/// considered unread when its cached IMAP flags don't contain `\Seen`
+/// (case-insensitive).
+pub(super) fn unread_count(rows: &[MessageRow]) -> usize {
+    rows.iter()
+        .filter(|m| !m.flags.to_ascii_lowercase().contains("seen"))
+        .count()
 }
 
 /// Pure cursor-step helper for n/N navigation. Returns the next index after
@@ -207,6 +247,7 @@ impl App {
             contacts: None,
             ical: None,
             last_search: None,
+            last_sync_unix: None,
         };
         app.reload_messages().await?;
         Ok(app)
@@ -592,11 +633,32 @@ impl App {
         }
         let _ = session.logout().await;
         self.reload_messages().await?;
+        self.last_sync_unix = Some(now);
         self.status = format!(
             "synced {folder_name} ({} msgs, {new_count} new)",
             rows.len()
         );
         Ok(())
+    }
+
+    /// Current modal state for the status-line indicator. The composer
+    /// implies `Insert`, the `/` overlay implies `Search`, and otherwise
+    /// the app is `Normal`. (`Visual` is reserved — see `Mode`.)
+    pub(super) fn mode(&self) -> Mode {
+        if self.composer.is_some() {
+            Mode::Insert
+        } else if self.search.is_some() {
+            Mode::Search
+        } else {
+            Mode::Normal
+        }
+    }
+
+    /// Count unread messages in the currently-loaded message list. The
+    /// status line surfaces this for the focused folder; "unread" means
+    /// the cached IMAP flags don't include `\Seen`.
+    pub(super) fn unread_in_current_folder(&self) -> usize {
+        unread_count(&self.messages)
     }
 
     /// Lazy body fetch. If the selected message is header-only, pull its
@@ -1277,5 +1339,35 @@ mod tests {
         let s = build_search_state(Some(&prior));
         assert_eq!(s.state.selected(), None);
         assert_eq!(s.query, "noresults");
+    }
+
+    fn flagged(uid: i64, flags: &str) -> MessageRow {
+        let mut m = fake_msg("INBOX", uid);
+        m.flags = flags.to_string();
+        m
+    }
+
+    #[test]
+    fn unread_count_zero_when_all_seen() {
+        let rows = vec![flagged(1, "\\Seen"), flagged(2, "\\Seen \\Flagged")];
+        assert_eq!(unread_count(&rows), 0);
+    }
+
+    #[test]
+    fn unread_count_counts_missing_seen() {
+        // Empty flag string and a "starred but unread" row both count as unread.
+        let rows = vec![
+            flagged(1, "\\Seen"),
+            flagged(2, ""),
+            flagged(3, "\\Flagged"),
+        ];
+        assert_eq!(unread_count(&rows), 2);
+    }
+
+    #[test]
+    fn unread_count_case_insensitive() {
+        // Defensive: real flag tokens are `\Seen` but normalize anyway.
+        let rows = vec![flagged(1, "\\SEEN"), flagged(2, "\\seen"), flagged(3, "")];
+        assert_eq!(unread_count(&rows), 1);
     }
 }

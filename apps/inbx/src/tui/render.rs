@@ -6,7 +6,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 
 use super::ACTIVE_THEME;
-use super::app::{App, Pane};
+use super::app::{App, Mode, Pane};
 
 pub(super) fn draw(f: &mut ratatui::Frame, app: &App) {
     let area = f.area();
@@ -200,19 +200,88 @@ fn draw_preview(f: &mut ratatui::Frame, app: &App, area: Rect) {
 }
 
 fn draw_status(f: &mut ratatui::Frame, app: &App, area: Rect) {
-    let pane = match app.pane {
-        Pane::Folders => "folders",
-        Pane::Messages => "messages",
-        Pane::Preview => "preview",
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let ctx = StatusCtx {
+        mode: app.mode(),
+        pane: app.pane,
+        account: app.account.name.as_str(),
+        folder: app.current_folder().map(|f| f.name.as_str()),
+        unread: app.unread_in_current_folder(),
+        last_sync_unix: app.last_sync_unix,
+        now_unix: now,
+        message: app.status.as_str(),
     };
-    let text = format!(
-        " [{pane}]  ? help · q quit · h/l pane · j/k move · Enter open  {}",
-        app.status
-    );
+    let text = format_status_line(&ctx);
     let t = theme();
     let para =
         Paragraph::new(text).style(Style::default().bg(rgb(&t.status_bg)).fg(rgb(&t.status_fg)));
     f.render_widget(para, area);
+}
+
+/// Inputs to [`format_status_line`]. Bundled into a struct so the helper
+/// stays pure and unit-testable without spinning up a real `App`.
+pub(super) struct StatusCtx<'a> {
+    pub(super) mode: Mode,
+    pub(super) pane: Pane,
+    pub(super) account: &'a str,
+    pub(super) folder: Option<&'a str>,
+    pub(super) unread: usize,
+    pub(super) last_sync_unix: Option<i64>,
+    pub(super) now_unix: i64,
+    pub(super) message: &'a str,
+}
+
+/// Build the persistent status-line string. Format is
+/// ` -- MODE --  acct · folder (N unread) · [pane] · synced 12s ago  message`.
+/// Pure: identical inputs always produce identical output.
+pub(super) fn format_status_line(ctx: &StatusCtx<'_>) -> String {
+    let pane = match ctx.pane {
+        Pane::Folders => "folders",
+        Pane::Messages => "messages",
+        Pane::Preview => "preview",
+    };
+    let folder = ctx.folder.unwrap_or("(no folder)");
+    let unread = if ctx.unread == 0 {
+        String::new()
+    } else {
+        format!(" ({} unread)", ctx.unread)
+    };
+    let sync = match ctx.last_sync_unix {
+        None => "never synced".to_string(),
+        Some(t) => {
+            let delta = (ctx.now_unix - t).max(0);
+            format!("synced {} ago", format_age_short(delta))
+        }
+    };
+    let trailing = if ctx.message.is_empty() {
+        String::new()
+    } else {
+        format!("  {}", ctx.message)
+    };
+    format!(
+        " -- {mode} --  {acct} · {folder}{unread} · [{pane}] · {sync}{trailing}",
+        mode = ctx.mode.label(),
+        acct = ctx.account,
+    )
+}
+
+/// Compact relative-age formatter for the sync indicator. Returns
+/// `Ns` under a minute, `Nm` under an hour, `Nh` under a day, else
+/// `Nd`. Negative deltas (clock skew) clamp to `0s`.
+fn format_age_short(seconds: i64) -> String {
+    let s = seconds.max(0);
+    if s < 60 {
+        format!("{s}s")
+    } else if s < 3_600 {
+        format!("{}m", s / 60)
+    } else if s < 86_400 {
+        format!("{}h", s / 3_600)
+    } else {
+        format!("{}d", s / 86_400)
+    }
 }
 
 fn draw_composer(f: &mut ratatui::Frame, composer: &Composer, status: &str, area: Rect) {
@@ -679,4 +748,114 @@ fn draw_move_picker(f: &mut ratatui::Frame, app: &App, area: Rect) {
         .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
         .highlight_symbol("> ");
     f.render_stateful_widget(list, layout[1], &mut picker.state.clone());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ctx() -> StatusCtx<'static> {
+        StatusCtx {
+            mode: Mode::Normal,
+            pane: Pane::Messages,
+            account: "work",
+            folder: Some("INBOX"),
+            unread: 0,
+            last_sync_unix: None,
+            now_unix: 1_000,
+            message: "",
+        }
+    }
+
+    #[test]
+    fn status_line_normal_mode_no_sync_no_unread() {
+        let s = format_status_line(&ctx());
+        // Mode label, account, folder, pane, never-synced sentinel.
+        assert!(s.contains("-- NORMAL --"), "{s}");
+        assert!(s.contains("work · INBOX"), "{s}");
+        assert!(s.contains("[messages]"), "{s}");
+        assert!(s.contains("never synced"), "{s}");
+        // No unread bracket when unread == 0.
+        assert!(!s.contains("unread"), "{s}");
+    }
+
+    #[test]
+    fn status_line_shows_unread_when_nonzero() {
+        let mut c = ctx();
+        c.unread = 7;
+        let s = format_status_line(&c);
+        assert!(s.contains("(7 unread)"), "{s}");
+    }
+
+    #[test]
+    fn status_line_renders_each_mode() {
+        let mut c = ctx();
+        c.mode = Mode::Insert;
+        assert!(format_status_line(&c).contains("-- INSERT --"));
+        c.mode = Mode::Search;
+        assert!(format_status_line(&c).contains("-- SEARCH --"));
+        c.mode = Mode::Visual;
+        assert!(format_status_line(&c).contains("-- VISUAL --"));
+    }
+
+    #[test]
+    fn status_line_sync_age_seconds() {
+        let mut c = ctx();
+        c.last_sync_unix = Some(990);
+        c.now_unix = 1_000;
+        assert!(format_status_line(&c).contains("synced 10s ago"));
+    }
+
+    #[test]
+    fn status_line_sync_age_minutes() {
+        let mut c = ctx();
+        c.last_sync_unix = Some(0);
+        c.now_unix = 125; // 2m 5s
+        assert!(format_status_line(&c).contains("synced 2m ago"));
+    }
+
+    #[test]
+    fn status_line_sync_age_hours_and_days() {
+        let mut c = ctx();
+        c.last_sync_unix = Some(0);
+        c.now_unix = 7_200; // 2h
+        assert!(format_status_line(&c).contains("synced 2h ago"));
+        c.now_unix = 200_000; // > 2 days
+        assert!(format_status_line(&c).contains("synced 2d ago"));
+    }
+
+    #[test]
+    fn status_line_clamps_negative_clock_skew_to_zero() {
+        // System clock jumps backwards: report 0s rather than panicking
+        // or printing a negative number.
+        let mut c = ctx();
+        c.last_sync_unix = Some(2_000);
+        c.now_unix = 1_000;
+        assert!(format_status_line(&c).contains("synced 0s ago"));
+    }
+
+    #[test]
+    fn status_line_appends_transient_message() {
+        let mut c = ctx();
+        c.message = "moved uid 42 → Trash";
+        let s = format_status_line(&c);
+        assert!(s.ends_with("moved uid 42 → Trash"), "{s}");
+    }
+
+    #[test]
+    fn status_line_no_folder_fallback() {
+        let mut c = ctx();
+        c.folder = None;
+        let s = format_status_line(&c);
+        assert!(s.contains("(no folder)"), "{s}");
+    }
+
+    #[test]
+    fn status_line_pane_label_tracks_focus() {
+        let mut c = ctx();
+        c.pane = Pane::Folders;
+        assert!(format_status_line(&c).contains("[folders]"));
+        c.pane = Pane::Preview;
+        assert!(format_status_line(&c).contains("[preview]"));
+    }
 }
