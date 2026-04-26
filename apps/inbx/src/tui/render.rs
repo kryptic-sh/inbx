@@ -39,6 +39,9 @@ pub(super) fn draw(f: &mut ratatui::Frame, app: &App) {
     if app.outbox.is_some() {
         draw_outbox(f, app, outer[0]);
     }
+    if app.search.is_some() {
+        draw_search(f, app, outer[0]);
+    }
     if app.show_help {
         draw_help(f, outer[0]);
     }
@@ -386,6 +389,52 @@ fn draw_outbox(f: &mut ratatui::Frame, app: &App, area: Rect) {
         .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
         .highlight_symbol("> ");
     f.render_stateful_widget(list, layout[1], &mut ob.state.clone());
+}
+
+fn draw_search(f: &mut ratatui::Frame, app: &App, area: Rect) {
+    let Some(s) = app.search.as_ref() else {
+        return;
+    };
+    let height = (s.results.len() as u16 + 5).min(area.height).max(8);
+    let width = 80u16.min(area.width);
+    let x = area.x + area.width.saturating_sub(width) / 2;
+    let y = area.y + area.height.saturating_sub(height) / 2;
+    let popup = Rect {
+        x,
+        y,
+        width,
+        height,
+    };
+    f.render_widget(Clear, popup);
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(3), Constraint::Min(1)])
+        .split(popup);
+
+    let query_para = Paragraph::new(format!("/{}", s.query))
+        .block(pane_block("search (Enter run/jump · j/k · Esc)", true));
+    f.render_widget(query_para, layout[0]);
+
+    let items: Vec<ListItem> = s
+        .results
+        .iter()
+        .map(|m| {
+            let from = m.from_addr.clone().unwrap_or_default();
+            let subj = m.subject.clone().unwrap_or_default();
+            let line = format!(
+                "{}  {}  {}",
+                truncate(&m.folder, 14),
+                truncate(&from, 18),
+                truncate(&subj, 40)
+            );
+            ListItem::new(line)
+        })
+        .collect();
+    let list = List::new(items)
+        .block(pane_block("results", true))
+        .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
+        .highlight_symbol("> ");
+    f.render_stateful_widget(list, layout[1], &mut s.state.clone());
 }
 
 fn draw_move_picker(f: &mut ratatui::Frame, app: &App, area: Rect) {

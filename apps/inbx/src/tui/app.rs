@@ -30,6 +30,7 @@ pub(super) struct App {
     pub(super) show_help: bool,
     pub(super) move_picker: Option<MovePickerState>,
     pub(super) outbox: Option<OutboxState>,
+    pub(super) search: Option<SearchState>,
 }
 
 pub(super) struct MovePickerState {
@@ -40,6 +41,22 @@ pub(super) struct MovePickerState {
 pub(super) struct OutboxState {
     pub(super) entries: Vec<OutboxRow>,
     pub(super) state: ListState,
+}
+
+pub(super) struct SearchState {
+    pub(super) query: String,
+    pub(super) results: Vec<MessageRow>,
+    pub(super) state: ListState,
+}
+
+impl SearchState {
+    pub(super) fn new() -> Self {
+        Self {
+            query: String::new(),
+            results: Vec::new(),
+            state: ListState::default(),
+        }
+    }
 }
 
 impl MovePickerState {
@@ -78,6 +95,7 @@ impl App {
             show_help: false,
             move_picker: None,
             outbox: None,
+            search: None,
         };
         app.reload_messages().await?;
         Ok(app)
@@ -410,6 +428,57 @@ impl App {
         self.store.delete_messages(&source, &[msg.uid]).await?;
         self.reload_messages().await?;
         self.status = format!("moved uid {} → {target}", msg.uid);
+        Ok(())
+    }
+
+    pub(super) async fn run_search(&mut self) -> Result<()> {
+        let Some(s) = self.search.as_mut() else {
+            return Ok(());
+        };
+        let q = s.query.trim().to_string();
+        if q.is_empty() {
+            s.results.clear();
+            s.state.select(None);
+            self.status = "search: empty query".into();
+            return Ok(());
+        }
+        match self.store.search(&q, 200).await {
+            Ok(rows) => {
+                let n = rows.len();
+                if let Some(s) = self.search.as_mut() {
+                    s.results = rows;
+                    if s.results.is_empty() {
+                        s.state.select(None);
+                    } else {
+                        s.state.select(Some(0));
+                    }
+                }
+                self.status = format!("search: {n} results");
+            }
+            Err(e) => {
+                if let Some(s) = self.search.as_mut() {
+                    s.results.clear();
+                    s.state.select(None);
+                }
+                self.status = format!("search failed: {e}");
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) async fn jump_to_message(&mut self, folder: &str, uid: i64) -> Result<()> {
+        let Some(idx) = self.folders.iter().position(|f| f.name == folder) else {
+            self.status = format!("folder {folder} not found");
+            return Ok(());
+        };
+        self.folder_state.select(Some(idx));
+        self.reload_messages().await?;
+        if let Some(mi) = self.messages.iter().position(|m| m.uid == uid) {
+            self.msg_state.select(Some(mi));
+        }
+        self.refresh_body();
+        self.pane = Pane::Messages;
+        self.status = format!("jumped to {folder}/uid {uid}");
         Ok(())
     }
 

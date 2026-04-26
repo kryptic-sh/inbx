@@ -1,7 +1,7 @@
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use super::app::{App, MovePickerState, Pane};
+use super::app::{App, MovePickerState, Pane, SearchState};
 
 /// Returns true to quit the TUI.
 pub(super) async fn handle_list_key(app: &mut App, key: KeyEvent) -> Result<bool> {
@@ -54,6 +54,11 @@ pub(super) async fn handle_list_key(app: &mut App, key: KeyEvent) -> Result<bool
 
     if key.code == KeyCode::Char('O') {
         app.open_outbox().await?;
+        return Ok(false);
+    }
+
+    if key.code == KeyCode::Char('/') {
+        app.search = Some(SearchState::new());
         return Ok(false);
     }
 
@@ -318,6 +323,89 @@ pub(super) async fn handle_move_picker_key(app: &mut App, key: KeyEvent) -> Resu
             picker.state.select(Some(0));
         }
         _ => {}
+    }
+    Ok(())
+}
+
+pub(super) async fn handle_search_key(app: &mut App, key: KeyEvent) -> Result<()> {
+    match key.code {
+        KeyCode::Esc => {
+            app.search = None;
+            return Ok(());
+        }
+        KeyCode::Enter => {
+            let has_results = app
+                .search
+                .as_ref()
+                .map(|s| !s.results.is_empty())
+                .unwrap_or(false);
+            if has_results {
+                let pick = app.search.as_ref().and_then(|s| {
+                    s.state
+                        .selected()
+                        .and_then(|i| s.results.get(i))
+                        .map(|m| (m.folder.clone(), m.uid))
+                });
+                if let Some((folder, uid)) = pick {
+                    app.search = None;
+                    app.jump_to_message(&folder, uid).await?;
+                }
+            } else {
+                app.run_search().await?;
+            }
+            return Ok(());
+        }
+        _ => {}
+    }
+
+    let has_results = app
+        .search
+        .as_ref()
+        .map(|s| !s.results.is_empty())
+        .unwrap_or(false);
+
+    if has_results {
+        let len = app.search.as_ref().map(|s| s.results.len()).unwrap_or(0);
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') if key.modifiers.is_empty() => {
+                if len > 0
+                    && let Some(s) = app.search.as_mut()
+                {
+                    let cur = s.state.selected().unwrap_or(0);
+                    s.state
+                        .select(Some(if cur == 0 { len - 1 } else { cur - 1 }));
+                }
+                return Ok(());
+            }
+            KeyCode::Down | KeyCode::Char('j') if key.modifiers.is_empty() => {
+                if len > 0
+                    && let Some(s) = app.search.as_mut()
+                {
+                    let cur = s.state.selected().unwrap_or(0);
+                    s.state.select(Some((cur + 1) % len));
+                }
+                return Ok(());
+            }
+            _ => {}
+        }
+    }
+
+    // Fall through: edit the query input.
+    if let Some(s) = app.search.as_mut() {
+        match key.code {
+            KeyCode::Backspace => {
+                s.query.pop();
+                // Editing invalidates results so Enter re-runs.
+                s.results.clear();
+                s.state.select(None);
+            }
+            KeyCode::Char(c) => {
+                s.query.push(c);
+                s.results.clear();
+                s.state.select(None);
+            }
+            _ => {}
+        }
     }
     Ok(())
 }
