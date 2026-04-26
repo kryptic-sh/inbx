@@ -91,11 +91,20 @@ inbx-composer = { path = "crates/inbx-composer" }
 # today; migration to spec::* lands when 0.1.0 ships traits — the
 # `inbx — hjkl release watcher` Claude routine notices new releases and
 # opens an integration PR.
-hjkl-editor = "=0.0.15"
-hjkl-buffer = { version = "=0.0.15", features = ["ratatui"] }
-hjkl-engine = "=0.0.15"
+hjkl-editor = "=0.0.22"
+hjkl-buffer = { version = "=0.0.22", features = ["ratatui"] }
+hjkl-engine = "=0.0.22"
 
 mail-builder = "0.4"
+
+# Local-dev override: point hjkl-* crates at the in-tree checkout so
+# we can iterate against unreleased changes without waiting on the
+# crates.io publish rate limit. Comment out once the matching tag
+# publishes and the release-watcher routine has caught up.
+[patch.crates-io]
+hjkl-buffer = { path = "../hjkl/crates/hjkl-buffer" }
+hjkl-engine = { path = "../hjkl/crates/hjkl-engine" }
+hjkl-editor = { path = "../hjkl/crates/hjkl-editor" }
 
 [profile.release]
 lto = "thin"
