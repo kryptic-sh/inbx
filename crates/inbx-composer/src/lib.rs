@@ -9,7 +9,8 @@
 pub mod identity;
 pub mod templates;
 
-use hjkl_editor::runtime::{Editor, KeybindingMode};
+use hjkl_editor::buffer::Buffer as EditorBuffer;
+use hjkl_editor::runtime::{DefaultHost, Editor, KeybindingMode, Options};
 use mail_builder::MessageBuilder;
 use mail_parser::{HeaderValue, MessageParser};
 
@@ -73,11 +74,11 @@ impl Field {
 /// pre-populated below the cursor.
 pub struct Composer {
     pub identity: Identity,
-    pub subject: Editor<'static>,
-    pub to: Editor<'static>,
-    pub cc: Editor<'static>,
-    pub bcc: Editor<'static>,
-    pub body: Editor<'static>,
+    pub subject: Editor,
+    pub to: Editor,
+    pub cc: Editor,
+    pub bcc: Editor,
+    pub body: Editor,
     pub focus: Field,
     pub in_reply_to: Option<String>,
     pub references: Vec<String>,
@@ -93,16 +94,16 @@ pub struct Attachment {
 
 impl Composer {
     pub fn new_blank(identity: Identity) -> Self {
-        let mut body = Editor::new(KeybindingMode::Vim);
+        let mut body = new_vim_editor();
         if let Some(sig) = identity.signature_block() {
             body.set_content(&sig);
         }
         Self {
             identity,
-            subject: Editor::new(KeybindingMode::Vim),
-            to: Editor::new(KeybindingMode::Vim),
-            cc: Editor::new(KeybindingMode::Vim),
-            bcc: Editor::new(KeybindingMode::Vim),
+            subject: new_vim_editor(),
+            to: new_vim_editor(),
+            cc: new_vim_editor(),
+            bcc: new_vim_editor(),
             body,
             focus: Field::To,
             in_reply_to: None,
@@ -227,7 +228,7 @@ impl Composer {
         self.focus = self.focus.prev();
     }
 
-    pub fn editor_for(&mut self, field: Field) -> &mut Editor<'static> {
+    pub fn editor_for(&mut self, field: Field) -> &mut Editor {
         match field {
             Field::Subject => &mut self.subject,
             Field::To => &mut self.to,
@@ -237,7 +238,7 @@ impl Composer {
         }
     }
 
-    pub fn focused_editor(&mut self) -> &mut Editor<'static> {
+    pub fn focused_editor(&mut self) -> &mut Editor {
         self.editor_for(self.focus)
     }
 
@@ -385,9 +386,21 @@ fn guess_content_type(filename: &str) -> String {
     .to_string()
 }
 
-fn editor_text(ed: &Editor<'static>) -> String {
+fn editor_text(ed: &Editor) -> String {
     let s = ed.content();
     s.trim_end_matches('\n').to_string()
+}
+
+/// Construct an `Editor` configured with the vim keybinding mode and the
+/// pre-0.1.0 `shiftwidth = 2` default the composer relies on.
+fn new_vim_editor() -> Editor {
+    let opts = Options {
+        shiftwidth: 2,
+        ..Options::default()
+    };
+    let mut ed = Editor::new(EditorBuffer::new(), DefaultHost::new(), opts);
+    ed.keybinding_mode = KeybindingMode::Vim;
+    ed
 }
 
 fn parse_addresses(s: &str) -> Vec<(String, String)> {

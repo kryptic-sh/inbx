@@ -361,7 +361,7 @@ fn composer_field_text(c: &Composer, f: ComposerField) -> String {
     }
 }
 
-fn editor_text_ref(ed: &hjkl_editor::runtime::Editor<'static>) -> String {
+fn editor_text_ref(ed: &hjkl_editor::runtime::Editor) -> String {
     ed.content().trim_end_matches('\n').to_string()
 }
 
