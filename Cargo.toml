@@ -91,9 +91,9 @@ inbx-composer = { path = "crates/inbx-composer" }
 # today; migration to spec::* lands when 0.1.0 ships traits — the
 # `inbx — hjkl release watcher` Claude routine notices new releases and
 # opens an integration PR.
-hjkl-editor = "=0.0.31"
-hjkl-buffer = { version = "=0.0.31", features = ["ratatui"] }
-hjkl-engine = { version = "=0.0.31", features = ["crossterm"] }
+hjkl-editor = "=0.0.32"
+hjkl-buffer = { version = "=0.0.32", features = ["ratatui"] }
+hjkl-engine = { version = "=0.0.32", features = ["crossterm"] }
 
 mail-builder = "0.4"
 

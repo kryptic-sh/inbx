@@ -10,6 +10,11 @@ patch bumps.
 
 ### Changed
 
+- bump hjkl =0.0.32 — adopts Patch C-β partial (breaking renames for rect-scoped
+  mouse/cursor helpers and ratatui-flavored syntax/style interners, plus new
+  `FoldProvider` trait); consumer-side change is pin bump only — inbx has no
+  call sites affected. Composer migration to spec::\* still pending Editor<B,H>
+  generic at 0.1.0.
 - bump hjkl =0.0.30 — adopts Patch C-α (motion vocabulary relocated from
   `hjkl_buffer::Buffer` inherent methods into `hjkl_engine::motions` module);
   consumer-side change is pin bump only. Composer migration to spec::\* still
