@@ -352,6 +352,27 @@ impl App {
         Ok(())
     }
 
+    pub(super) async fn oauth_login(&mut self) -> Result<()> {
+        let provider = match &self.account.auth {
+            inbx_config::AuthMethod::OAuth2 { provider, .. } => provider.clone(),
+            _ => {
+                self.status = "not an oauth2 account".into();
+                return Ok(());
+            }
+        };
+        self.status = "oauth login: opening browser…".into();
+        match inbx_net::oauth_login(&self.account.auth, &provider).await {
+            Ok(token) => {
+                inbx_config::store_refresh_token(&self.account.name, &token.refresh)?;
+                self.status = "oauth login complete".into();
+            }
+            Err(e) => {
+                self.status = format!("oauth login failed: {e}");
+            }
+        }
+        Ok(())
+    }
+
     pub(super) async fn expunge(&mut self) -> Result<()> {
         let Some(folder_name) = self.current_folder().map(|f| f.name.clone()) else {
             return Ok(());

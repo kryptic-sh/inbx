@@ -47,6 +47,11 @@ pub(super) async fn handle_list_key(app: &mut App, key: KeyEvent) -> Result<bool
         return Ok(false);
     }
 
+    if key.code == KeyCode::Char('L') {
+        app.oauth_login().await?;
+        return Ok(false);
+    }
+
     if app.pane == Pane::Messages {
         match key.code {
             KeyCode::Char('s') => {
