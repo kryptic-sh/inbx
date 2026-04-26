@@ -51,6 +51,9 @@ pub(super) fn draw(f: &mut ratatui::Frame, app: &App) {
     if app.contacts.is_some() {
         draw_contacts(f, app, outer[0]);
     }
+    if app.ical.is_some() {
+        draw_ical(f, app, outer[0]);
+    }
     if app.show_help {
         draw_help(f, outer[0]);
     }
@@ -593,6 +596,36 @@ fn draw_contacts(f: &mut ratatui::Frame, app: &App, area: Rect) {
         .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
         .highlight_symbol("> ");
     f.render_stateful_widget(list, layout[1], &mut state.state.clone());
+}
+
+fn draw_ical(f: &mut ratatui::Frame, app: &App, area: Rect) {
+    let Some(state) = app.ical.as_ref() else {
+        return;
+    };
+    let lines = [
+        format!("summary:   {}", state.summary),
+        format!("start:     {}", state.start),
+        format!("end:       {}", state.end),
+        format!("location:  {}", state.location),
+        format!("organizer: {}", state.organizer),
+        String::new(),
+        "a accept · t tentative · d decline · Esc cancel".to_string(),
+    ];
+    let height = (lines.len() as u16 + 2).min(area.height).max(6);
+    let width = 76u16.min(area.width);
+    let x = area.x + area.width.saturating_sub(width) / 2;
+    let y = area.y + area.height.saturating_sub(height) / 2;
+    let popup = Rect {
+        x,
+        y,
+        width,
+        height,
+    };
+    f.render_widget(Clear, popup);
+    let para = Paragraph::new(lines.join("\n"))
+        .block(pane_block("calendar invite", true))
+        .wrap(Wrap { trim: false });
+    f.render_widget(para, popup);
 }
 
 fn draw_move_picker(f: &mut ratatui::Frame, app: &App, area: Rect) {

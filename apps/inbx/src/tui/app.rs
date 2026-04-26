@@ -35,6 +35,23 @@ pub(super) struct App {
     pub(super) thread: Option<ThreadState>,
     pub(super) account_picker: Option<AccountPickerState>,
     pub(super) contacts: Option<ContactsState>,
+    pub(super) ical: Option<IcalState>,
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum IcalResponse {
+    Accept,
+    Tentative,
+    Decline,
+}
+
+pub(super) struct IcalState {
+    pub(super) summary: String,
+    pub(super) start: String,
+    pub(super) end: String,
+    pub(super) location: String,
+    pub(super) organizer: String,
+    pub(super) raw: Vec<u8>,
 }
 
 pub(super) struct ContactsState {
@@ -143,6 +160,7 @@ impl App {
             thread: None,
             account_picker: None,
             contacts: None,
+            ical: None,
         };
         app.reload_messages().await?;
         Ok(app)
@@ -271,6 +289,115 @@ impl App {
         }
         self.status = "no List-Unsubscribe header".into();
         Ok(())
+    }
+
+    pub(super) async fn open_ical(&mut self) -> Result<()> {
+        let Some(msg) = self.current_message().cloned() else {
+            return Ok(());
+        };
+        let Some(path) = msg.maildir_path else {
+            self.status = "no body fetched — press Enter or F first".into();
+            return Ok(());
+        };
+        let raw = std::fs::read(&path)?;
+        let invite = match inbx_ical::parse_message(&raw) {
+            Ok(i) => i,
+            Err(_) => {
+                self.status = "no calendar invite in this message".into();
+                return Ok(());
+            }
+        };
+        let method = invite.method.as_deref().unwrap_or("").to_ascii_uppercase();
+        if method != "REQUEST" {
+            self.status = "no calendar invite in this message".into();
+            return Ok(());
+        }
+        self.ical = Some(IcalState {
+            summary: invite.summary.unwrap_or_default(),
+            start: invite.start.unwrap_or_default(),
+            end: invite.end.unwrap_or_default(),
+            location: invite.location.unwrap_or_default(),
+            organizer: invite.organizer.unwrap_or_default(),
+            raw: invite.raw.into_bytes(),
+        });
+        self.status = "ical: a accept · t tentative · d decline · Esc cancel".into();
+        Ok(())
+    }
+
+    pub(super) async fn respond_ical(&mut self, response: IcalResponse) -> Result<()> {
+        let Some(state) = self.ical.as_ref() else {
+            return Ok(());
+        };
+        let invite = match inbx_ical::parse_ics(&String::from_utf8_lossy(&state.raw)) {
+            Ok(i) => i,
+            Err(e) => {
+                self.status = format!("ical parse failed: {e}");
+                self.ical = None;
+                return Ok(());
+            }
+        };
+        let attendee = format!("mailto:{}", self.account.email);
+        let rsvp = match response {
+            IcalResponse::Accept => inbx_ical::RsvpResponse::Accept,
+            IcalResponse::Tentative => inbx_ical::RsvpResponse::Tentative,
+            IcalResponse::Decline => inbx_ical::RsvpResponse::Decline,
+        };
+        let reply_ics = match inbx_ical::build_reply(&invite, rsvp, &attendee) {
+            Ok(s) => s,
+            Err(e) => {
+                self.status = format!("ical reply failed: {e}");
+                self.ical = None;
+                return Ok(());
+            }
+        };
+        let organizer_email = invite
+            .organizer
+            .as_deref()
+            .map(strip_mailto)
+            .unwrap_or_default()
+            .to_string();
+        if organizer_email.is_empty() {
+            self.status = "ical reply: no organizer to send to".into();
+            self.ical = None;
+            return Ok(());
+        }
+        let subject = format!(
+            "{}: {}",
+            match response {
+                IcalResponse::Accept => "Accepted",
+                IcalResponse::Tentative => "Tentative",
+                IcalResponse::Decline => "Declined",
+            },
+            invite.summary.as_deref().unwrap_or(""),
+        );
+        let raw = build_ical_reply_mime(
+            &self.account.email,
+            &organizer_email,
+            &subject,
+            reply_ics.as_bytes(),
+        );
+        match inbx_net::send_message(&self.account, &raw).await {
+            Ok(()) => {
+                self.status = format!(
+                    "ical reply sent to {organizer_email} ({})",
+                    match response {
+                        IcalResponse::Accept => "accepted",
+                        IcalResponse::Tentative => "tentative",
+                        IcalResponse::Decline => "declined",
+                    }
+                );
+            }
+            Err(e) => {
+                self.status = format!("ical reply failed: {e}");
+            }
+        }
+        self.ical = None;
+        Ok(())
+    }
+
+    pub(super) fn close_ical(&mut self) {
+        self.ical = None;
+        self.status = "ical: cancelled".into();
     }
 
     pub(super) async fn save_draft(&mut self) -> Result<()> {
@@ -906,6 +1033,35 @@ fn build_unsubscribe_mime(from: &str, to: &str, subject: &str, body: &str) -> Ve
         .to(vec![(String::new(), to.to_string())])
         .subject(subject)
         .text_body(body)
+        .write_to_vec()
+        .unwrap_or_default()
+}
+
+fn strip_mailto(s: &str) -> &str {
+    let lower = s.to_ascii_lowercase();
+    if let Some(rest) = lower.strip_prefix("mailto:") {
+        &s[s.len() - rest.len()..]
+    } else {
+        s
+    }
+}
+
+fn build_ical_reply_mime(from: &str, to: &str, subject: &str, ics: &[u8]) -> Vec<u8> {
+    use mail_builder::MessageBuilder;
+    use mail_builder::headers::content_type::ContentType;
+    use mail_builder::mime::{BodyPart, MimePart};
+
+    let part = MimePart::new(
+        ContentType::new("text/calendar")
+            .attribute("method", "REPLY")
+            .attribute("charset", "utf-8"),
+        BodyPart::Binary(ics.to_vec().into()),
+    );
+    MessageBuilder::new()
+        .from((String::new(), from.to_string()))
+        .to(vec![(String::new(), to.to_string())])
+        .subject(subject)
+        .body(part)
         .write_to_vec()
         .unwrap_or_default()
 }

@@ -1,7 +1,7 @@
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use super::app::{App, MovePickerState, Pane, SearchState};
+use super::app::{App, IcalResponse, MovePickerState, Pane, SearchState};
 
 /// Returns true to quit the TUI.
 pub(super) async fn handle_list_key(app: &mut App, key: KeyEvent) -> Result<bool> {
@@ -100,6 +100,10 @@ pub(super) async fn handle_list_key(app: &mut App, key: KeyEvent) -> Result<bool
             }
             KeyCode::Char('T') => {
                 app.open_thread().await?;
+                return Ok(false);
+            }
+            KeyCode::Char('i') => {
+                app.open_ical().await?;
                 return Ok(false);
             }
             _ => {}
@@ -501,6 +505,17 @@ pub(super) async fn handle_contacts_key(app: &mut App, key: KeyEvent) -> Result<
             state.filter.push(c);
             state.state.select(Some(0));
         }
+        _ => {}
+    }
+    Ok(())
+}
+
+pub(super) async fn handle_ical_key(app: &mut App, key: KeyEvent) -> Result<()> {
+    match key.code {
+        KeyCode::Esc => app.close_ical(),
+        KeyCode::Char('a') => app.respond_ical(IcalResponse::Accept).await?,
+        KeyCode::Char('t') => app.respond_ical(IcalResponse::Tentative).await?,
+        KeyCode::Char('d') => app.respond_ical(IcalResponse::Decline).await?,
         _ => {}
     }
     Ok(())

@@ -94,6 +94,10 @@ async fn event_loop(term: &mut Term, app: &mut App) -> Result<()> {
                 keys::handle_contacts_key(app, key).await?;
                 continue;
             }
+            if app.ical.is_some() {
+                keys::handle_ical_key(app, key).await?;
+                continue;
+            }
             if keys::handle_list_key(app, key).await? {
                 break;
             }
