@@ -628,6 +628,19 @@ enum ContactsCmd {
         account: Option<String>,
         email: String,
     },
+    /// PUT a VCARD into a CardDAV addressbook for one local contact.
+    CardDavPush {
+        #[arg(long)]
+        account: Option<String>,
+        /// Addressbook base URL (without trailing filename).
+        #[arg(long)]
+        url: String,
+        /// Email of the local contact to push.
+        email: String,
+        /// HTTP basic-auth username (defaults to account.username).
+        #[arg(long)]
+        user: Option<String>,
+    },
     /// Sync contacts from a CardDAV addressbook URL via REPORT.
     CardDav {
         #[arg(long)]
@@ -2173,6 +2186,33 @@ async fn cmd_contacts(action: ContactsCmd) -> Result<()> {
                 }
             }
             println!("harvested {total} address occurrences");
+        }
+        ContactsCmd::CardDavPush {
+            account,
+            url,
+            email,
+            user,
+        } => {
+            let acct = pick_account(&cfg, account.as_deref())?.clone();
+            let username = user.unwrap_or_else(|| acct.username.clone());
+            let password = inbx_config::load_password(&acct.name)
+                .with_context(|| format!("no password in keyring for {}", acct.name))?;
+            let store = inbx_contacts::ContactsStore::open(&acct.name).await?;
+            let matches = store.search(&email, 1).await?;
+            let contact = matches
+                .into_iter()
+                .find(|c| c.email.eq_ignore_ascii_case(&email))
+                .with_context(|| format!("no local contact for {email}"))?;
+            let uid = format!("inbx-{}", email.replace('@', "-at-"));
+            let vcard = inbx_contacts::carddav::build_vcard(
+                &contact.email,
+                contact.name.as_deref(),
+                Some(&uid),
+            );
+            let resource_url = format!("{}/{uid}.vcf", url.trim_end_matches('/'));
+            inbx_contacts::carddav::put_vcard(&resource_url, &username, &password, &vcard, None)
+                .await?;
+            println!("pushed {email} → {resource_url}");
         }
         ContactsCmd::CardDav {
             account,

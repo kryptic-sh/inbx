@@ -57,6 +57,61 @@ pub struct DiscoveredBook {
     pub display_name: Option<String>,
 }
 
+/// PUT a single VCARD to the given addressbook resource URL. The full URL
+/// must include the resource filename (e.g. `<book>/<uuid>.vcf`). When
+/// `if_match` is `None` the server treats this as a create.
+pub async fn put_vcard(
+    resource_url: &str,
+    user: &str,
+    password: &str,
+    vcard: &str,
+    if_match: Option<&str>,
+) -> Result<()> {
+    let http = reqwest::ClientBuilder::new()
+        .timeout(Duration::from_secs(30))
+        .build()?;
+    let mut req = http
+        .put(resource_url)
+        .basic_auth(user, Some(password))
+        .header("Content-Type", "text/vcard; charset=utf-8")
+        .body(vcard.to_string());
+    if let Some(etag) = if_match {
+        req = req.header("If-Match", etag);
+    } else {
+        req = req.header("If-None-Match", "*");
+    }
+    let res = req.send().await?;
+    if !res.status().is_success() {
+        let status = res.status().as_u16();
+        let body = res.text().await.unwrap_or_default();
+        return Err(Error::Server { status, body });
+    }
+    Ok(())
+}
+
+/// Build a minimal VCARD 3.0 string for `email` with optional display name.
+pub fn build_vcard(email: &str, name: Option<&str>, uid: Option<&str>) -> String {
+    let uid = uid.map(|s| s.to_string()).unwrap_or_else(rand_uuid);
+    let display = name.unwrap_or(email);
+    format!(
+        "BEGIN:VCARD\r\n\
+         VERSION:3.0\r\n\
+         FN:{display}\r\n\
+         EMAIL;TYPE=INTERNET:{email}\r\n\
+         UID:{uid}\r\n\
+         END:VCARD\r\n"
+    )
+}
+
+fn rand_uuid() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("{:032x}", nanos)
+}
+
 /// RFC 6764 simplified discovery chain. Pass any URL on the CardDAV server
 /// (`/.well-known/carddav` redirect target, account base URL, principal,
 /// or home set — the chain follows whichever step is needed).
