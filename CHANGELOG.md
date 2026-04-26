@@ -8,22 +8,26 @@ patch bumps.
 
 ## [Unreleased]
 
+### Changed
+
+- bump hjkl =0.0.26 (spec trait declarations available; M6 composer migration
+  remains gated on generic Editor wiring).
+
 ### Added
 
 - Workspace skeleton mirroring buffr layout: `crates/` (inbx-core, inbx-net,
-  inbx-store, inbx-config, inbx-render, inbx-contacts, inbx-ical,
-  inbx-composer) plus `apps/` (inbx TUI, inbx-gui) and `xtask/`.
-- Multi-provider mail networking surface in `inbx-net`: generic IMAP+SMTP,
-  Gmail XOAUTH2, Microsoft 365 OAuth2 device-code + auth-code flows,
-  groundwork for JMAP and Microsoft Graph backends behind a `MailProvider`
-  trait.
+  inbx-store, inbx-config, inbx-render, inbx-contacts, inbx-ical, inbx-composer)
+  plus `apps/` (inbx TUI, inbx-gui) and `xtask/`.
+- Multi-provider mail networking surface in `inbx-net`: generic IMAP+SMTP, Gmail
+  XOAUTH2, Microsoft 365 OAuth2 device-code + auth-code flows, groundwork for
+  JMAP and Microsoft Graph backends behind a `MailProvider` trait.
 - Local store: Maildir-on-disk + SQLite index via sqlx, plus search hooks.
 - HTML render pipeline (`inbx-render`) using ammonia + html2text for safe
   text-mode display.
-- Composer crate (`inbx-composer`) embedding hjkl-editor (pinned `=0.0.15`)
-  for modal message editing.
+- Composer crate (`inbx-composer`) embedding hjkl-editor (pinned `=0.0.15`) for
+  modal message editing.
 - Calendar (`inbx-ical`) and contacts (`inbx-contacts`) crates.
 - Config crate with `directories` + `keyring` for secret storage.
-- Release tooling: release-plz workspace config, Keep a Changelog format,
-  GitHub Actions release-plz workflow (publish gated off until first
-  dry-run pass clears).
+- Release tooling: release-plz workspace config, Keep a Changelog format, GitHub
+  Actions release-plz workflow (publish gated off until first dry-run pass
+  clears).
