@@ -2417,6 +2417,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "inbx-sync"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "clap",
+ "directories",
+ "inbx-composer",
+ "inbx-config",
+ "inbx-contacts",
+ "inbx-core",
+ "inbx-net",
+ "inbx-render",
+ "inbx-store",
+ "mail-parser",
+ "notify-rust",
+ "tokio",
+ "tracing",
+ "tracing-appender",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "indexmap"
 version = "2.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -11,6 +11,7 @@ members = [
     "crates/inbx-composer",
     "apps/inbx",
     "apps/inbx-gui",
+    "apps/inbx-sync",
     "xtask",
 ]
 
