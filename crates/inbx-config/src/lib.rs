@@ -66,6 +66,22 @@ pub enum OAuthProvider {
     },
 }
 
+/// How the account talks to its server. The default IMAP path uses the
+/// existing imap_host / smtp_host fields. Graph and JMAP override the
+/// transport so the top-level `fetch` / `send` / `watch` commands hit
+/// the right protocol without per-call subcommand prefixes.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum Transport {
+    /// IMAP for fetch + IDLE; SMTP for send.
+    #[default]
+    Imap,
+    /// Microsoft Graph (`/me/messages`, `/me/sendMail`).
+    Graph,
+    /// JMAP via the supplied session document.
+    Jmap { session_url: String },
+}
+
 fn default_ms_tenant() -> String {
     "common".into()
 }
@@ -87,6 +103,8 @@ pub struct Account {
     pub username: String,
     #[serde(default)]
     pub auth: AuthMethod,
+    #[serde(default)]
+    pub transport: Transport,
 }
 
 fn default_imap_port() -> u16 {
@@ -183,6 +201,7 @@ mod tests {
                 smtp_security: TlsMode::Tls,
                 username: "me".into(),
                 auth: AuthMethod::AppPassword,
+                transport: Transport::Imap,
             }],
         };
         let raw = toml::to_string_pretty(&cfg).unwrap();

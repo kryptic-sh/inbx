@@ -636,34 +636,52 @@ enum ContactsCmd {
         account: Option<String>,
         email: String,
     },
-    /// PUT a VCARD into a CardDAV addressbook for one local contact.
-    CardDavPush {
+    /// CardDAV addressbook operations (pull / push / discover).
+    Carddav {
+        #[command(subcommand)]
+        action: CarddavCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum CarddavCmd {
+    /// Sync VCARDs from an addressbook URL via REPORT.
+    Pull {
+        #[arg(long)]
+        account: Option<String>,
+        /// Addressbook URL. With `--discover`, treat this as a server
+        /// base URL and walk the RFC 6764 PROPFIND chain.
+        #[arg(long)]
+        url: String,
+        /// HTTP basic-auth username (defaults to account.username).
+        #[arg(long)]
+        user: Option<String>,
+        /// PROPFIND-walk current-user-principal → addressbook-home →
+        /// resourcetype to find the addressbook URL automatically.
+        #[arg(long)]
+        discover: bool,
+    },
+    /// PUT one local contact into the addressbook as a VCARD.
+    Push {
         #[arg(long)]
         account: Option<String>,
         /// Addressbook base URL (without trailing filename).
         #[arg(long)]
         url: String,
-        /// Email of the local contact to push.
-        email: String,
         /// HTTP basic-auth username (defaults to account.username).
         #[arg(long)]
         user: Option<String>,
+        /// Email of the local contact to push.
+        email: String,
     },
-    /// Sync contacts from a CardDAV addressbook URL via REPORT.
-    CardDav {
+    /// PROPFIND-walk to enumerate addressbooks at a server base URL.
+    Discover {
         #[arg(long)]
         account: Option<String>,
-        /// Full addressbook URL. If `--discover` is set, this is the
-        /// server's base URL and the addressbook is auto-discovered.
         #[arg(long)]
         url: String,
-        /// Username for HTTP basic auth (defaults to account.username).
         #[arg(long)]
         user: Option<String>,
-        /// RFC 6764 PROPFIND chain to find the addressbook URL from
-        /// the supplied base URL. Picks the first addressbook found.
-        #[arg(long)]
-        discover: bool,
     },
 }
 
@@ -1036,7 +1054,18 @@ async fn cmd_draft_save(account: Option<String>) -> Result<()> {
 
 async fn cmd_watch(account: Option<String>, folder: String, bodies: bool) -> Result<()> {
     let cfg = inbx_config::load()?;
-    let acct_name = pick_account(&cfg, account.as_deref())?.name.clone();
+    let acct = pick_account(&cfg, account.as_deref())?.clone();
+    let acct_name = acct.name.clone();
+    // Transport dispatch — IDLE only applies to IMAP. Graph and JMAP
+    // use their own push paths; for now we forward JMAP to its push
+    // subcommand. Graph push is a delta-poll for now.
+    if let inbx_config::Transport::Jmap { session_url } = &acct.transport {
+        return cmd_jmap(JmapCmd::Push {
+            account: Some(acct_name),
+            session: session_url.clone(),
+        })
+        .await;
+    }
     loop {
         // Drain outbox before each fetch so retries piggyback on the connect.
         if let Err(e) = drain_outbox_silent(&acct_name).await {
@@ -2205,67 +2234,93 @@ async fn cmd_contacts(action: ContactsCmd) -> Result<()> {
             }
             println!("harvested {total} address occurrences");
         }
-        ContactsCmd::CardDavPush {
-            account,
-            url,
-            email,
-            user,
-        } => {
-            let acct = pick_account(&cfg, account.as_deref())?.clone();
-            let username = user.unwrap_or_else(|| acct.username.clone());
-            let password = inbx_config::load_password(&acct.name)
-                .with_context(|| format!("no password in keyring for {}", acct.name))?;
-            let store = inbx_contacts::ContactsStore::open(&acct.name).await?;
-            let matches = store.search(&email, 1).await?;
-            let contact = matches
-                .into_iter()
-                .find(|c| c.email.eq_ignore_ascii_case(&email))
-                .with_context(|| format!("no local contact for {email}"))?;
-            let uid = format!("inbx-{}", email.replace('@', "-at-"));
-            let vcard = inbx_contacts::carddav::build_vcard(
-                &contact.email,
-                contact.name.as_deref(),
-                Some(&uid),
-            );
-            let resource_url = format!("{}/{uid}.vcf", url.trim_end_matches('/'));
-            inbx_contacts::carddav::put_vcard(&resource_url, &username, &password, &vcard, None)
+        ContactsCmd::Carddav { action } => match action {
+            CarddavCmd::Push {
+                account,
+                url,
+                email,
+                user,
+            } => {
+                let acct = pick_account(&cfg, account.as_deref())?.clone();
+                let username = user.unwrap_or_else(|| acct.username.clone());
+                let password = inbx_config::load_password(&acct.name)
+                    .with_context(|| format!("no password in keyring for {}", acct.name))?;
+                let store = inbx_contacts::ContactsStore::open(&acct.name).await?;
+                let matches = store.search(&email, 1).await?;
+                let contact = matches
+                    .into_iter()
+                    .find(|c| c.email.eq_ignore_ascii_case(&email))
+                    .with_context(|| format!("no local contact for {email}"))?;
+                let uid = format!("inbx-{}", email.replace('@', "-at-"));
+                let vcard = inbx_contacts::carddav::build_vcard(
+                    &contact.email,
+                    contact.name.as_deref(),
+                    Some(&uid),
+                );
+                let resource_url = format!("{}/{uid}.vcf", url.trim_end_matches('/'));
+                inbx_contacts::carddav::put_vcard(
+                    &resource_url,
+                    &username,
+                    &password,
+                    &vcard,
+                    None,
+                )
                 .await?;
-            println!("pushed {email} → {resource_url}");
-        }
-        ContactsCmd::CardDav {
-            account,
-            url,
-            user,
-            discover,
-        } => {
-            let acct = pick_account(&cfg, account.as_deref())?.clone();
-            let username = user.unwrap_or_else(|| acct.username.clone());
-            let password = inbx_config::load_password(&acct.name)
-                .with_context(|| format!("no password in keyring for {}", acct.name))?;
-            let store = inbx_contacts::ContactsStore::open(&acct.name).await?;
-            let target_url = if discover {
+                println!("pushed {email} → {resource_url}");
+            }
+            CarddavCmd::Pull {
+                account,
+                url,
+                user,
+                discover,
+            } => {
+                let acct = pick_account(&cfg, account.as_deref())?.clone();
+                let username = user.unwrap_or_else(|| acct.username.clone());
+                let password = inbx_config::load_password(&acct.name)
+                    .with_context(|| format!("no password in keyring for {}", acct.name))?;
+                let store = inbx_contacts::ContactsStore::open(&acct.name).await?;
+                let target_url = if discover {
+                    let books =
+                        inbx_contacts::carddav::discover(&url, &username, &password).await?;
+                    if books.is_empty() {
+                        bail!("no addressbooks discovered at {url}");
+                    }
+                    let pick = &books[0];
+                    println!(
+                        "discovered {} addressbook(s); syncing {} ({})",
+                        books.len(),
+                        pick.display_name.clone().unwrap_or_else(|| "?".into()),
+                        pick.url
+                    );
+                    pick.url.clone()
+                } else {
+                    url
+                };
+                let report =
+                    inbx_contacts::carddav::sync(&target_url, &username, &password, &store).await?;
+                println!(
+                    "carddav: {} vcards, {} addresses imported",
+                    report.vcards_seen, report.addresses_imported
+                );
+            }
+            CarddavCmd::Discover { account, url, user } => {
+                let acct = pick_account(&cfg, account.as_deref())?.clone();
+                let username = user.unwrap_or_else(|| acct.username.clone());
+                let password = inbx_config::load_password(&acct.name)
+                    .with_context(|| format!("no password in keyring for {}", acct.name))?;
                 let books = inbx_contacts::carddav::discover(&url, &username, &password).await?;
                 if books.is_empty() {
-                    bail!("no addressbooks discovered at {url}");
+                    println!("(no addressbooks found)");
                 }
-                let pick = &books[0];
-                println!(
-                    "discovered {} addressbook(s); syncing {} ({})",
-                    books.len(),
-                    pick.display_name.clone().unwrap_or_else(|| "?".into()),
-                    pick.url
-                );
-                pick.url.clone()
-            } else {
-                url
-            };
-            let report =
-                inbx_contacts::carddav::sync(&target_url, &username, &password, &store).await?;
-            println!(
-                "carddav: {} vcards, {} addresses imported",
-                report.vcards_seen, report.addresses_imported
-            );
-        }
+                for b in books {
+                    println!(
+                        "{:<40}  {}",
+                        b.display_name.unwrap_or_else(|| "?".into()),
+                        b.url
+                    );
+                }
+            }
+        },
         ContactsCmd::Remove { account, email } => {
             let acct = pick_account(&cfg, account.as_deref())?;
             let store = inbx_contacts::ContactsStore::open(&acct.name).await?;
@@ -2479,6 +2534,7 @@ fn cmd_accounts_add(oauth: Option<String>) -> Result<()> {
         smtp_security,
         username,
         auth,
+        transport: inbx_config::Transport::Imap,
     });
     inbx_config::save(&cfg)?;
     if oauth.is_some() {
@@ -2656,6 +2712,28 @@ async fn cmd_fetch(
 ) -> Result<()> {
     let cfg = inbx_config::load()?;
     let acct = pick_account(&cfg, account.as_deref())?.clone();
+
+    // Transport dispatch — Graph and JMAP have their own fetch paths.
+    match &acct.transport {
+        inbx_config::Transport::Imap => {} // fall through
+        inbx_config::Transport::Graph => {
+            return cmd_graph(GraphCmd::Fetch {
+                account: Some(acct.name.clone()),
+                limit: 100,
+                bodies: fetch_bodies,
+            })
+            .await;
+        }
+        inbx_config::Transport::Jmap { session_url } => {
+            return cmd_jmap(JmapCmd::Fetch {
+                account: Some(acct.name.clone()),
+                session: session_url.clone(),
+                limit: 100,
+            })
+            .await;
+        }
+    }
+    let _ = (folder.as_str(), since, body_limit, notify); // silence unused-warn fallthrough on non-IMAP
 
     tracing::info!(account = %acct.name, "connecting");
     let mut session = inbx_net::connect_imap(&acct).await?;
@@ -2949,8 +3027,24 @@ async fn cmd_send(
         rebuild_with_attachments(&acct, &raw, &attachments)?
     };
 
-    tracing::info!(account = %acct.name, bytes = raw.len(), "sending");
-    if let Err(e) = inbx_net::send_message(&acct, &raw).await {
+    tracing::info!(account = %acct.name, transport = ?acct.transport, bytes = raw.len(), "sending");
+    let send_result = match &acct.transport {
+        inbx_config::Transport::Imap => inbx_net::send_message(&acct, &raw)
+            .await
+            .map_err(anyhow::Error::from),
+        inbx_config::Transport::Graph => {
+            let client = inbx_net::graph::GraphClient::connect(&acct).await?;
+            client
+                .send_mime(&raw, !no_save)
+                .await
+                .map_err(anyhow::Error::from)
+        }
+        inbx_config::Transport::Jmap { session_url } => {
+            let client = inbx_net::jmap::JmapClient::connect(&acct, session_url).await?;
+            client.send_mime(&raw).await.map_err(anyhow::Error::from)
+        }
+    };
+    if let Err(e) = send_result {
         tracing::warn!(%e, "send failed; queueing in outbox");
         let store = inbx_store::Store::open(&acct.name).await?;
         let id = store.outbox_enqueue(&raw).await?;
@@ -2965,6 +3059,12 @@ async fn cmd_send(
     }
 
     if no_save {
+        return Ok(());
+    }
+
+    // Sent-folder append only applies to IMAP; Graph + JMAP both save to
+    // Sent server-side via their send paths (saveToSentItems / send_mime).
+    if !matches!(acct.transport, inbx_config::Transport::Imap) {
         return Ok(());
     }
 
