@@ -43,6 +43,7 @@ fn main() -> Result<()> {
         messages,
         selected_message: 0,
         body_cache: String::new(),
+        composer: None,
     };
 
     eframe::run_native(
@@ -81,9 +82,41 @@ struct App {
     messages: Vec<MessageRow>,
     selected_message: usize,
     body_cache: String,
+    composer: Option<ComposerState>,
+}
+
+#[derive(Default)]
+struct ComposerState {
+    subject: String,
+    to: String,
+    cc: String,
+    bcc: String,
+    body: String,
+    status: String,
 }
 
 impl App {
+    fn send_composer(&mut self) {
+        let Some(c) = self.composer.as_mut() else {
+            return;
+        };
+        let raw = build_mime(&self.account, &c.subject, &c.to, &c.cc, &c.bcc, &c.body);
+        let acct = self.account.clone();
+        let result = self
+            .runtime
+            .block_on(async move { inbx_net::send_message(&acct, &raw).await });
+        match result {
+            Ok(()) => {
+                self.composer = None;
+            }
+            Err(e) => {
+                if let Some(c) = self.composer.as_mut() {
+                    c.status = format!("send failed: {e}");
+                }
+            }
+        }
+    }
+
     fn reload_messages(&mut self) {
         let folder = match &self.selected_folder {
             Some(f) => f.clone(),
@@ -162,12 +195,25 @@ impl App {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let mut open_compose = false;
         egui::TopBottomPanel::top("hdr").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.heading("inbx");
                 ui.label(format!("· {} <{}>", self.account.name, self.account.email));
+                ui.separator();
+                if ui.button("✉ Compose").clicked() {
+                    open_compose = true;
+                }
             });
         });
+        if open_compose && self.composer.is_none() {
+            self.composer = Some(ComposerState::default());
+        }
+
+        if self.composer.is_some() {
+            self.draw_composer(ctx);
+            return;
+        }
 
         let mut new_folder: Option<String> = None;
         egui::SidePanel::left("folders")
@@ -251,4 +297,93 @@ impl eframe::App for App {
             });
         });
     }
+}
+
+impl App {
+    fn draw_composer(&mut self, ctx: &egui::Context) {
+        let mut send_clicked = false;
+        let mut cancel_clicked = false;
+        egui::CentralPanel::default().show(ctx, |ui| {
+            let Some(c) = self.composer.as_mut() else {
+                return;
+            };
+            ui.heading("compose");
+            ui.separator();
+            egui::Grid::new("compose-headers")
+                .num_columns(2)
+                .spacing([8.0, 4.0])
+                .show(ui, |ui| {
+                    ui.label("Subject:");
+                    ui.add(egui::TextEdit::singleline(&mut c.subject).desired_width(f32::INFINITY));
+                    ui.end_row();
+                    ui.label("To:");
+                    ui.add(egui::TextEdit::singleline(&mut c.to).desired_width(f32::INFINITY));
+                    ui.end_row();
+                    ui.label("Cc:");
+                    ui.add(egui::TextEdit::singleline(&mut c.cc).desired_width(f32::INFINITY));
+                    ui.end_row();
+                    ui.label("Bcc:");
+                    ui.add(egui::TextEdit::singleline(&mut c.bcc).desired_width(f32::INFINITY));
+                    ui.end_row();
+                });
+            ui.separator();
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                ui.add(
+                    egui::TextEdit::multiline(&mut c.body)
+                        .font(egui::TextStyle::Monospace)
+                        .desired_width(f32::INFINITY)
+                        .desired_rows(20),
+                );
+            });
+            ui.separator();
+            ui.horizontal(|ui| {
+                if ui.button("Send").clicked() {
+                    send_clicked = true;
+                }
+                if ui.button("Cancel").clicked() {
+                    cancel_clicked = true;
+                }
+                if !c.status.is_empty() {
+                    ui.label(c.status.as_str());
+                }
+            });
+        });
+        if cancel_clicked {
+            self.composer = None;
+        } else if send_clicked {
+            self.send_composer();
+        }
+    }
+}
+
+fn build_mime(
+    account: &Account,
+    subject: &str,
+    to: &str,
+    cc: &str,
+    bcc: &str,
+    body: &str,
+) -> Vec<u8> {
+    use mail_builder::MessageBuilder;
+    let parse = |s: &str| {
+        s.split(',')
+            .map(|p| p.trim().to_string())
+            .filter(|p| !p.is_empty())
+            .map(|addr| (String::new(), addr))
+            .collect::<Vec<_>>()
+    };
+    let mut builder = MessageBuilder::new()
+        .from((String::new(), account.email.clone()))
+        .to(parse(to))
+        .subject(subject)
+        .text_body(body);
+    let cc = parse(cc);
+    if !cc.is_empty() {
+        builder = builder.cc(cc);
+    }
+    let bcc = parse(bcc);
+    if !bcc.is_empty() {
+        builder = builder.bcc(bcc);
+    }
+    builder.write_to_vec().unwrap_or_default()
 }
