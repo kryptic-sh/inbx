@@ -12,6 +12,12 @@ patch bumps.
 
 - bump hjkl =0.0.28 — adopts canonical Buffer impl + sticky_col/iskeyword hoist
   (M6 composer migration to spec::* still pending Editor<B,H> generic at 0.1.0).
+- TUI search overlay (`/`) now persists query + results across closes; reopening
+  `/` resumes the prior session. Adds `n` / `N` from the main list to jump to
+  the next / previous match without reopening the overlay, and shows a
+  `[m/n]` match counter in the overlay header. Stash `stash@{0}` (TUI ? help
+  overlay refactor) was left untouched: it is stale relative to the post-split
+  TUI module layout (af2db79) and conflicts with current `tui/` modules.
 
 ### Added
 

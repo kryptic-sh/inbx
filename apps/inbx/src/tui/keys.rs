@@ -1,7 +1,7 @@
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use super::app::{App, IcalResponse, MovePickerState, Pane, SearchState};
+use super::app::{App, IcalResponse, MovePickerState, Pane};
 
 /// Returns true to quit the TUI.
 pub(super) async fn handle_list_key(app: &mut App, key: KeyEvent) -> Result<bool> {
@@ -63,7 +63,18 @@ pub(super) async fn handle_list_key(app: &mut App, key: KeyEvent) -> Result<bool
     }
 
     if key.code == KeyCode::Char('/') {
-        app.search = Some(SearchState::new());
+        app.open_search();
+        return Ok(false);
+    }
+
+    // n / N — jump to next / prev match from the most recent `/` search
+    // without reopening the overlay. No-op when there's no prior search.
+    if key.code == KeyCode::Char('n') && key.modifiers.is_empty() {
+        app.step_last_search(1).await?;
+        return Ok(false);
+    }
+    if key.code == KeyCode::Char('N') && key.modifiers.is_empty() {
+        app.step_last_search(-1).await?;
         return Ok(false);
     }
 
@@ -359,12 +370,15 @@ pub(super) async fn handle_search_key(app: &mut App, key: KeyEvent) -> Result<()
                 .unwrap_or(false);
             if has_results {
                 let pick = app.search.as_ref().and_then(|s| {
-                    s.state
-                        .selected()
-                        .and_then(|i| s.results.get(i))
-                        .map(|m| (m.folder.clone(), m.uid))
+                    s.state.selected().map(|i| {
+                        let row = &s.results[i];
+                        (i, row.folder.clone(), row.uid)
+                    })
                 });
-                if let Some((folder, uid)) = pick {
+                if let Some((idx, folder, uid)) = pick {
+                    if let Some(ls) = app.last_search.as_mut() {
+                        ls.cursor = idx;
+                    }
                     app.search = None;
                     app.jump_to_message(&folder, uid).await?;
                 }
@@ -390,8 +404,11 @@ pub(super) async fn handle_search_key(app: &mut App, key: KeyEvent) -> Result<()
                     && let Some(s) = app.search.as_mut()
                 {
                     let cur = s.state.selected().unwrap_or(0);
-                    s.state
-                        .select(Some(if cur == 0 { len - 1 } else { cur - 1 }));
+                    let next = if cur == 0 { len - 1 } else { cur - 1 };
+                    s.state.select(Some(next));
+                    if let Some(ls) = app.last_search.as_mut() {
+                        ls.cursor = next;
+                    }
                 }
                 return Ok(());
             }
@@ -400,7 +417,11 @@ pub(super) async fn handle_search_key(app: &mut App, key: KeyEvent) -> Result<()
                     && let Some(s) = app.search.as_mut()
                 {
                     let cur = s.state.selected().unwrap_or(0);
-                    s.state.select(Some((cur + 1) % len));
+                    let next = (cur + 1) % len;
+                    s.state.select(Some(next));
+                    if let Some(ls) = app.last_search.as_mut() {
+                        ls.cursor = next;
+                    }
                 }
                 return Ok(());
             }

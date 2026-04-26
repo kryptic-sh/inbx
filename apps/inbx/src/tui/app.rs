@@ -36,6 +36,10 @@ pub(super) struct App {
     pub(super) account_picker: Option<AccountPickerState>,
     pub(super) contacts: Option<ContactsState>,
     pub(super) ical: Option<IcalState>,
+    /// Last completed search. Persists across closes of the `/` overlay so
+    /// that `n` / `N` from the main list jumps through results without
+    /// retyping the query, and reopening `/` restores the prior session.
+    pub(super) last_search: Option<LastSearch>,
 }
 
 #[derive(Clone, Copy)]
@@ -105,6 +109,47 @@ pub(super) struct SearchState {
     pub(super) state: ListState,
 }
 
+/// Snapshot of the most recent `/` search retained after the overlay closes.
+/// Used for `n` / `N` cursor-jump on the main list and for restoring the
+/// overlay state when the user reopens `/`.
+#[derive(Clone)]
+pub(super) struct LastSearch {
+    pub(super) query: String,
+    pub(super) results: Vec<MessageRow>,
+    /// Index into `results` of the most recently visited match.
+    pub(super) cursor: usize,
+}
+
+/// Pure cursor-step helper for n/N navigation. Returns the next index after
+/// stepping `delta` (+1 for `n`, -1 for `N`) with wraparound. Returns `None`
+/// when there are no results.
+pub(super) fn search_step(len: usize, cursor: usize, delta: i32) -> Option<usize> {
+    if len == 0 {
+        return None;
+    }
+    let len_i = len as i32;
+    let next = (cursor as i32 + delta).rem_euclid(len_i);
+    Some(next as usize)
+}
+
+/// Build a fresh `SearchState` for the `/` overlay, restoring from the
+/// caller-supplied prior session when available. Pure so the open-search
+/// behavior can be unit tested without a `Store`.
+pub(super) fn build_search_state(prior: Option<&LastSearch>) -> SearchState {
+    let Some(ls) = prior else {
+        return SearchState::new();
+    };
+    let mut state = ListState::default();
+    if !ls.results.is_empty() {
+        state.select(Some(ls.cursor.min(ls.results.len() - 1)));
+    }
+    SearchState {
+        query: ls.query.clone(),
+        results: ls.results.clone(),
+        state,
+    }
+}
+
 pub(super) struct ThreadState {
     pub(super) messages: Vec<MessageRow>,
     pub(super) state: ListState,
@@ -161,6 +206,7 @@ impl App {
             account_picker: None,
             contacts: None,
             ical: None,
+            last_search: None,
         };
         app.reload_messages().await?;
         Ok(app)
@@ -657,12 +703,21 @@ impl App {
             Ok(rows) => {
                 let n = rows.len();
                 if let Some(s) = self.search.as_mut() {
-                    s.results = rows;
+                    s.results = rows.clone();
                     if s.results.is_empty() {
                         s.state.select(None);
                     } else {
                         s.state.select(Some(0));
                     }
+                }
+                if rows.is_empty() {
+                    self.last_search = None;
+                } else {
+                    self.last_search = Some(LastSearch {
+                        query: q,
+                        results: rows,
+                        cursor: 0,
+                    });
                 }
                 self.status = format!("search: {n} results");
             }
@@ -674,6 +729,38 @@ impl App {
                 self.status = format!("search failed: {e}");
             }
         }
+        Ok(())
+    }
+
+    /// Open the `/` overlay, restoring state from `last_search` when present
+    /// so the user can refine an existing query without retyping.
+    pub(super) fn open_search(&mut self) {
+        self.search = Some(build_search_state(self.last_search.as_ref()));
+    }
+
+    /// Step through `last_search` results. `delta = 1` advances (`n`), `-1`
+    /// retreats (`N`). Wraps at boundaries. No-op when there are no results.
+    pub(super) async fn step_last_search(&mut self, delta: i32) -> Result<()> {
+        let Some(ls) = self.last_search.as_ref() else {
+            self.status = "no prior search — press / to search".into();
+            return Ok(());
+        };
+        let len = ls.results.len();
+        let Some(next) = search_step(len, ls.cursor, delta) else {
+            self.status = "no search results".into();
+            return Ok(());
+        };
+        let target = ls.results[next].clone();
+        if let Some(ls) = self.last_search.as_mut() {
+            ls.cursor = next;
+        }
+        self.jump_to_message(&target.folder, target.uid).await?;
+        let q = self
+            .last_search
+            .as_ref()
+            .map(|s| s.query.clone())
+            .unwrap_or_default();
+        self.status = format!("/{q}  match {}/{}", next + 1, len);
         Ok(())
     }
 
@@ -1084,4 +1171,111 @@ fn open_url(url: &str) -> std::io::Result<()> {
         .stderr(Stdio::null())
         .spawn()
         .map(|_| ())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn search_step_wraps_forward_at_end() {
+        // Cursor at last index, +1 wraps back to 0.
+        assert_eq!(search_step(3, 2, 1), Some(0));
+    }
+
+    #[test]
+    fn search_step_wraps_backward_at_start() {
+        // Cursor at 0, -1 wraps to last index.
+        assert_eq!(search_step(3, 0, -1), Some(2));
+    }
+
+    #[test]
+    fn search_step_advances_within_range() {
+        assert_eq!(search_step(5, 2, 1), Some(3));
+        assert_eq!(search_step(5, 2, -1), Some(1));
+    }
+
+    #[test]
+    fn search_step_empty_returns_none() {
+        // No results — n/N must be a no-op.
+        assert_eq!(search_step(0, 0, 1), None);
+        assert_eq!(search_step(0, 0, -1), None);
+    }
+
+    #[test]
+    fn search_step_single_result_stays_put() {
+        // One result — wraparound returns the same index either direction.
+        assert_eq!(search_step(1, 0, 1), Some(0));
+        assert_eq!(search_step(1, 0, -1), Some(0));
+    }
+
+    fn fake_msg(folder: &str, uid: i64) -> MessageRow {
+        MessageRow {
+            folder: folder.to_string(),
+            uid,
+            uidvalidity: 1,
+            message_id: None,
+            subject: Some(format!("subj-{uid}")),
+            from_addr: Some("a@b".into()),
+            to_addrs: None,
+            date_unix: None,
+            flags: String::new(),
+            maildir_path: None,
+            headers_only: 1,
+            fetched_at_unix: 0,
+            in_reply_to: None,
+            refs: None,
+            thread_id: None,
+        }
+    }
+
+    #[test]
+    fn build_search_state_empty_when_no_prior() {
+        let s = build_search_state(None);
+        assert!(s.query.is_empty());
+        assert!(s.results.is_empty());
+        assert_eq!(s.state.selected(), None);
+    }
+
+    #[test]
+    fn build_search_state_restores_query_results_and_cursor() {
+        let prior = LastSearch {
+            query: "alpha".into(),
+            results: vec![
+                fake_msg("INBOX", 1),
+                fake_msg("INBOX", 2),
+                fake_msg("INBOX", 3),
+            ],
+            cursor: 1,
+        };
+        let s = build_search_state(Some(&prior));
+        assert_eq!(s.query, "alpha");
+        assert_eq!(s.results.len(), 3);
+        assert_eq!(s.state.selected(), Some(1));
+    }
+
+    #[test]
+    fn build_search_state_clamps_stale_cursor() {
+        // last_search.cursor exceeds new result length (defensive — currently
+        // unreachable, but cheap to guard against).
+        let prior = LastSearch {
+            query: "x".into(),
+            results: vec![fake_msg("INBOX", 7)],
+            cursor: 99,
+        };
+        let s = build_search_state(Some(&prior));
+        assert_eq!(s.state.selected(), Some(0));
+    }
+
+    #[test]
+    fn build_search_state_no_selection_when_results_empty() {
+        let prior = LastSearch {
+            query: "noresults".into(),
+            results: vec![],
+            cursor: 0,
+        };
+        let s = build_search_state(Some(&prior));
+        assert_eq!(s.state.selected(), None);
+        assert_eq!(s.query, "noresults");
+    }
 }

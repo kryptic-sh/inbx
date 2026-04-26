@@ -93,6 +93,7 @@ fn draw_help(f: &mut ratatui::Frame, area: Rect) {
         "",
         "  overlays",
         "    /           — search (FTS)",
+        "    n / N       — next / prev search match",
         "    a           — switch account",
         "    C           — contacts",
         "    O           — outbox panel",
@@ -433,7 +434,13 @@ fn draw_search(f: &mut ratatui::Frame, app: &App, area: Rect) {
         .constraints([Constraint::Length(3), Constraint::Min(1)])
         .split(popup);
 
-    let query_para = Paragraph::new(format!("/{}", s.query))
+    let counter = if s.results.is_empty() {
+        String::new()
+    } else {
+        let cur = s.state.selected().map(|i| i + 1).unwrap_or(0);
+        format!("  [{cur}/{}]", s.results.len())
+    };
+    let query_para = Paragraph::new(format!("/{}{counter}", s.query))
         .block(pane_block("search (Enter run/jump · j/k · Esc)", true));
     f.render_widget(query_para, layout[0]);
 
