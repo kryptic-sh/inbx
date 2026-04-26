@@ -1,5 +1,51 @@
 mod tui;
 
+use tracing_subscriber::layer::SubscriberExt as _;
+use tracing_subscriber::util::SubscriberInitExt as _;
+
+/// Tee tracing output to stderr (pretty) and a daily-rotated file under
+/// `$XDG_STATE_HOME/inbx/log/inbx.YYYY-MM-DD`. Returns the worker guard
+/// that must outlive the process so buffered records are flushed at exit.
+fn init_logging() -> Option<tracing_appender::non_blocking::WorkerGuard> {
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+
+    let stderr_layer = tracing_subscriber::fmt::layer().with_writer(std::io::stderr);
+
+    let dirs = directories::ProjectDirs::from("sh", "kryptic", "inbx");
+    let state_dir = dirs.as_ref().map(|d| d.data_local_dir().join("log"));
+
+    let (file_layer, guard) = match state_dir {
+        Some(path) => {
+            if std::fs::create_dir_all(&path).is_ok() {
+                let appender = tracing_appender::rolling::daily(&path, "inbx");
+                let (nb, guard) = tracing_appender::non_blocking(appender);
+                (
+                    Some(
+                        tracing_subscriber::fmt::layer()
+                            .with_writer(nb)
+                            .with_ansi(false),
+                    ),
+                    Some(guard),
+                )
+            } else {
+                (None, None)
+            }
+        }
+        None => (None, None),
+    };
+
+    let subscriber = tracing_subscriber::registry()
+        .with(env_filter)
+        .with(stderr_layer);
+    if let Some(file_layer) = file_layer {
+        subscriber.with(file_layer).init();
+    } else {
+        subscriber.init();
+    }
+    guard
+}
+
 use std::io::{BufRead, Write};
 
 use anyhow::{Context, Result, bail};
@@ -634,13 +680,7 @@ enum AccountCmd {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
-
+    let _log_guard = init_logging();
     let cli = Cli::parse();
     match cli.command {
         Cmd::Config => cmd_config(),
@@ -2140,12 +2180,40 @@ fn cmd_accounts_add(oauth: Option<String>) -> Result<()> {
     }
     let email = prompt(&mut lock, &mut stdout, "email: ")?;
 
-    // Provider-aware host defaults when Oauth is selected.
-    let (default_imap_host, default_smtp_host) = match oauth.as_deref() {
-        Some("gmail") => ("imap.gmail.com", "smtp.gmail.com"),
-        Some("microsoft") => ("outlook.office365.com", "smtp.office365.com"),
-        _ => ("", ""),
-    };
+    // Provider lookup via the autoconfig table. Falls back to a generic
+    // imap.<domain> / smtp.<domain> guess when the domain isn't known.
+    let suggestion = inbx_config::autoconfig::suggest(&email);
+    if let Some(s) = &suggestion {
+        match &s.source {
+            inbx_config::autoconfig::SuggestionSource::BuiltIn { name } => {
+                println!("autoconfig: {name} provider detected");
+            }
+            inbx_config::autoconfig::SuggestionSource::DomainGuess => {
+                println!(
+                    "autoconfig: unknown provider — guessing imap.{{domain}} / smtp.{{domain}}"
+                );
+            }
+        }
+    }
+    let default_imap_host = suggestion
+        .as_ref()
+        .map(|s| s.imap_host.as_str())
+        .unwrap_or("");
+    let default_smtp_host = suggestion
+        .as_ref()
+        .map(|s| s.smtp_host.as_str())
+        .unwrap_or("");
+    let suggested_imap_security = suggestion
+        .as_ref()
+        .map(|s| s.imap_security)
+        .unwrap_or(TlsMode::Tls);
+    let suggested_smtp_security = suggestion
+        .as_ref()
+        .map(|s| s.smtp_security)
+        .unwrap_or(TlsMode::Tls);
+    let suggested_imap_port = suggestion.as_ref().map(|s| s.imap_port).unwrap_or(993);
+    let suggested_smtp_port = suggestion.as_ref().map(|s| s.smtp_port).unwrap_or(465);
+
     let imap_host_msg = if default_imap_host.is_empty() {
         "imap host: ".to_string()
     } else {
@@ -2155,16 +2223,21 @@ fn cmd_accounts_add(oauth: Option<String>) -> Result<()> {
     if imap_host.is_empty() {
         imap_host = default_imap_host.to_string();
     }
-    let imap_security = prompt_tls(&mut lock, &mut stdout, "imap security [tls/starttls]: ")?;
-    let imap_port_default = match imap_security {
-        TlsMode::Tls => 993,
-        TlsMode::Starttls => 143,
+    let sec_default = match suggested_imap_security {
+        TlsMode::Tls => "tls",
+        TlsMode::Starttls => "starttls",
     };
+    let imap_security = prompt_tls_with_default(
+        &mut lock,
+        &mut stdout,
+        &format!("imap security [{sec_default}]: "),
+        suggested_imap_security,
+    )?;
     let imap_port = prompt_port(
         &mut lock,
         &mut stdout,
-        &format!("imap port [{imap_port_default}]: "),
-        imap_port_default,
+        &format!("imap port [{suggested_imap_port}]: "),
+        suggested_imap_port,
     )?;
     let smtp_host_msg = if default_smtp_host.is_empty() {
         "smtp host: ".to_string()
@@ -2175,7 +2248,17 @@ fn cmd_accounts_add(oauth: Option<String>) -> Result<()> {
     if smtp_host.is_empty() {
         smtp_host = default_smtp_host.to_string();
     }
-    let smtp_security = prompt_tls(&mut lock, &mut stdout, "smtp security [tls/starttls]: ")?;
+    let smtp_sec_default = match suggested_smtp_security {
+        TlsMode::Tls => "tls",
+        TlsMode::Starttls => "starttls",
+    };
+    let smtp_security = prompt_tls_with_default(
+        &mut lock,
+        &mut stdout,
+        &format!("smtp security [{smtp_sec_default}]: "),
+        suggested_smtp_security,
+    )?;
+    let _ = suggested_smtp_port;
     let smtp_port_default = match smtp_security {
         TlsMode::Tls => 465,
         TlsMode::Starttls => 587,
@@ -2779,10 +2862,16 @@ fn prompt(stdin: &mut impl BufRead, stdout: &mut impl Write, msg: &str) -> Resul
     Ok(s.trim().to_string())
 }
 
-fn prompt_tls(stdin: &mut impl BufRead, stdout: &mut impl Write, msg: &str) -> Result<TlsMode> {
+fn prompt_tls_with_default(
+    stdin: &mut impl BufRead,
+    stdout: &mut impl Write,
+    msg: &str,
+    default: TlsMode,
+) -> Result<TlsMode> {
     let raw = prompt(stdin, stdout, msg)?;
     match raw.to_ascii_lowercase().as_str() {
-        "" | "tls" => Ok(TlsMode::Tls),
+        "" => Ok(default),
+        "tls" => Ok(TlsMode::Tls),
         "starttls" => Ok(TlsMode::Starttls),
         other => bail!("invalid tls mode: {other}"),
     }
