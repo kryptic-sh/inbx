@@ -97,15 +97,6 @@ hjkl-engine = { version = "=0.1.0", features = ["crossterm"] }
 
 mail-builder = "0.4"
 
-# Local-dev override: point hjkl-* crates at the in-tree checkout so
-# we can iterate against unreleased changes without waiting on the
-# crates.io publish rate limit. Comment out once the matching tag
-# publishes and the release-watcher routine has caught up.
-[patch.crates-io]
-hjkl-buffer = { path = "../hjkl/crates/hjkl-buffer" }
-hjkl-engine = { path = "../hjkl/crates/hjkl-engine" }
-hjkl-editor = { path = "../hjkl/crates/hjkl-editor" }
-
 [profile.release]
 lto = "thin"
 codegen-units = 1
