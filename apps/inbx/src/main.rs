@@ -78,6 +78,9 @@ enum Cmd {
         /// Sync every selectable folder instead of just one.
         #[arg(long)]
         all: bool,
+        /// Only sync messages newer than this many days (0 = all).
+        #[arg(long, default_value_t = 0)]
+        since: u32,
         /// Also download message bodies for the most recent messages.
         #[arg(long)]
         bodies: bool,
@@ -716,14 +719,15 @@ async fn main() -> Result<()> {
             account,
             folder,
             all,
+            since,
             bodies,
             body_limit,
             notify,
         } => {
             if all {
-                cmd_fetch_all(account, bodies, body_limit, notify).await
+                cmd_fetch_all(account, since, bodies, body_limit, notify).await
             } else {
-                cmd_fetch(account, folder, bodies, body_limit, notify).await
+                cmd_fetch(account, folder, since, bodies, body_limit, notify).await
             }
         }
         Cmd::List {
@@ -1002,7 +1006,15 @@ async fn cmd_watch(account: Option<String>, folder: String, bodies: bool) -> Res
         if let Err(e) = drain_outbox_silent(&acct_name).await {
             tracing::warn!(%e, "outbox drain failed; will retry next cycle");
         }
-        if let Err(e) = cmd_fetch(Some(acct_name.clone()), folder.clone(), bodies, 200, true).await
+        if let Err(e) = cmd_fetch(
+            Some(acct_name.clone()),
+            folder.clone(),
+            0,
+            bodies,
+            200,
+            true,
+        )
+        .await
         {
             tracing::warn!(%e, "fetch failed; backing off 30s");
             tokio::time::sleep(std::time::Duration::from_secs(30)).await;
@@ -2459,6 +2471,7 @@ async fn cmd_accounts_folders(account: Option<String>) -> Result<()> {
 
 async fn cmd_fetch_all(
     account: Option<String>,
+    since: u32,
     bodies: bool,
     body_limit: u32,
     notify: bool,
@@ -2477,6 +2490,7 @@ async fn cmd_fetch_all(
         match cmd_fetch(
             Some(acct_name.clone()),
             f.name.clone(),
+            since,
             bodies,
             body_limit,
             notify,
@@ -2496,6 +2510,7 @@ async fn cmd_fetch_all(
 async fn cmd_fetch(
     account: Option<String>,
     folder: String,
+    since: u32,
     fetch_bodies: bool,
     body_limit: u32,
     notify: bool,
@@ -2528,8 +2543,13 @@ async fn cmd_fetch(
     }
     println!("folders: {}", folders.len());
 
-    tracing::info!(folder = %folder, "fetching headers");
-    let (uidvalidity, rows) = inbx_net::fetch_headers(&mut session, &folder).await?;
+    tracing::info!(folder = %folder, since, "fetching headers");
+    let (uidvalidity, rows) = if since > 0 {
+        let uids = inbx_net::search_since(&mut session, &folder, since).await?;
+        inbx_net::fetch_headers_uids(&mut session, &folder, Some(&uids)).await?
+    } else {
+        inbx_net::fetch_headers(&mut session, &folder).await?
+    };
     let prev = store.folder_uidvalidity(&folder).await?;
     if let Some(prev) = prev
         && prev as u32 != uidvalidity

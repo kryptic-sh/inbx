@@ -215,6 +215,109 @@ pub struct HeaderRow {
     pub fetched_at_unix: i64,
 }
 
+/// UID SEARCH SINCE <date>. `days_ago` of 0 means no filter (all messages).
+/// Date is formatted as IMAP-style `DD-Mon-YYYY` (e.g. `1-Jan-2026`).
+pub async fn search_since(
+    session: &mut ImapSession,
+    folder: &str,
+    days_ago: u32,
+) -> Result<Vec<u32>> {
+    session.select(folder).await?;
+    if days_ago == 0 {
+        // Return everything — caller will fetch_headers without a filter.
+        return Ok(Vec::new());
+    }
+    let cutoff = days_ago_to_imap_date(days_ago);
+    let uids = session.uid_search(format!("SINCE {cutoff}")).await?;
+    Ok(uids.into_iter().collect())
+}
+
+fn days_ago_to_imap_date(days: u32) -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let target = now - (days as i64) * 86_400;
+    // civil_from_days
+    let days_total = target / 86_400;
+    let z = days_total + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if m <= 2 { y + 1 } else { y };
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    format!("{d}-{}-{year:04}", MONTHS[(m - 1) as usize])
+}
+
+/// Select a folder and fetch envelope + flags for the UID set. When
+/// `uids_filter` is None, fetches the entire mailbox (1:*). Returns
+/// (uidvalidity, rows). Body fetched lazily by `fetch_bodies`.
+pub async fn fetch_headers_uids(
+    session: &mut ImapSession,
+    folder: &str,
+    uids_filter: Option<&[u32]>,
+) -> Result<(u32, Vec<HeaderRow>)> {
+    let mailbox = session.select(folder).await?;
+    let uidvalidity = mailbox.uid_validity.unwrap_or(0);
+    if mailbox.exists == 0 {
+        return Ok((uidvalidity, Vec::new()));
+    }
+    let set = match uids_filter {
+        Some([]) => return Ok((uidvalidity, Vec::new())),
+        Some(uids) => uids
+            .iter()
+            .map(|u| u.to_string())
+            .collect::<Vec<_>>()
+            .join(","),
+        None => "1:*".to_string(),
+    };
+    let stream = session
+        .uid_fetch(set, "(UID FLAGS ENVELOPE INTERNALDATE)")
+        .await?;
+    let fetches: Vec<async_imap::types::Fetch> =
+        stream.filter_map(|r| async move { r.ok() }).collect().await;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let mut out = Vec::with_capacity(fetches.len());
+    for f in fetches {
+        let Some(uid) = f.uid else { continue };
+        let env = f.envelope();
+        let subject = env
+            .and_then(|e| e.subject.as_ref())
+            .map(|b| String::from_utf8_lossy(b).into_owned());
+        let message_id = env
+            .and_then(|e| e.message_id.as_ref())
+            .map(|b| String::from_utf8_lossy(b).into_owned());
+        let from_addr = env.and_then(|e| e.from.as_ref()).map(|v| format_addrs(v));
+        let to_addrs = env.and_then(|e| e.to.as_ref()).map(|v| format_addrs(v));
+        let date_unix = f.internal_date().map(|d| d.timestamp());
+        let flags: Vec<String> = f.flags().map(|fl| format!("{fl:?}")).collect();
+        let flags = flags.join(" ");
+        out.push(HeaderRow {
+            uid,
+            uidvalidity,
+            message_id,
+            subject,
+            from_addr,
+            to_addrs,
+            date_unix,
+            flags,
+            fetched_at_unix: now,
+        });
+    }
+    Ok((uidvalidity, out))
+}
+
 /// Select a folder and fetch envelope + flags for all messages, UID-keyed.
 /// Returns (uidvalidity, rows). Body fetched lazily by `fetch_bodies`.
 pub async fn fetch_headers(
