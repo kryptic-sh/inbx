@@ -1,6 +1,7 @@
 use anyhow::Result;
 use inbx_composer::{Composer, Identity};
 use inbx_config::Account;
+use inbx_contacts::{Contact, ContactsStore};
 use inbx_store::{FolderRow, MessageRow, OutboxRow, Store};
 use ratatui::widgets::ListState;
 
@@ -33,6 +34,27 @@ pub(super) struct App {
     pub(super) search: Option<SearchState>,
     pub(super) thread: Option<ThreadState>,
     pub(super) account_picker: Option<AccountPickerState>,
+    pub(super) contacts: Option<ContactsState>,
+}
+
+pub(super) struct ContactsState {
+    pub(super) all: Vec<Contact>,
+    pub(super) filter: String,
+    pub(super) state: ListState,
+}
+
+impl ContactsState {
+    pub(super) fn new(all: Vec<Contact>) -> Self {
+        let mut state = ListState::default();
+        if !all.is_empty() {
+            state.select(Some(0));
+        }
+        Self {
+            all,
+            filter: String::new(),
+            state,
+        }
+    }
 }
 
 pub(super) struct AccountPickerState {
@@ -120,6 +142,7 @@ impl App {
             search: None,
             thread: None,
             account_picker: None,
+            contacts: None,
         };
         app.reload_messages().await?;
         Ok(app)
@@ -128,6 +151,43 @@ impl App {
     pub(super) fn open_blank(&mut self) {
         self.composer = Some(Composer::new_blank(Identity::from_account(&self.account)));
         self.status = "compose: new draft".into();
+    }
+
+    pub(super) async fn open_contacts(&mut self) -> Result<()> {
+        let store = ContactsStore::open(&self.account.name).await?;
+        let all = store.list(u32::MAX).await?;
+        let n = all.len();
+        self.contacts = Some(ContactsState::new(all));
+        self.status = format!("contacts: {n}");
+        Ok(())
+    }
+
+    pub(super) fn contacts_filtered(&self) -> Vec<Contact> {
+        let Some(c) = self.contacts.as_ref() else {
+            return Vec::new();
+        };
+        let needle = c.filter.to_ascii_lowercase();
+        if needle.is_empty() {
+            return c.all.clone();
+        }
+        c.all
+            .iter()
+            .filter(|x| {
+                x.email.to_ascii_lowercase().contains(&needle)
+                    || x.name
+                        .as_deref()
+                        .map(|n| n.to_ascii_lowercase().contains(&needle))
+                        .unwrap_or(false)
+            })
+            .cloned()
+            .collect()
+    }
+
+    pub(super) fn compose_to_contact(&mut self, email: &str) {
+        let mut composer = Composer::new_blank(Identity::from_account(&self.account));
+        composer.to.set_content(email);
+        self.composer = Some(composer);
+        self.status = format!("compose: to {email}");
     }
 
     pub(super) async fn open_reply(&mut self, all: bool) -> Result<()> {

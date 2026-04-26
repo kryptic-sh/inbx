@@ -48,6 +48,9 @@ pub(super) fn draw(f: &mut ratatui::Frame, app: &App) {
     if app.account_picker.is_some() {
         draw_account_picker(f, app, outer[0]);
     }
+    if app.contacts.is_some() {
+        draw_contacts(f, app, outer[0]);
+    }
     if app.show_help {
         draw_help(f, outer[0]);
     }
@@ -544,6 +547,52 @@ fn draw_account_picker(f: &mut ratatui::Frame, app: &App, area: Rect) {
         .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
         .highlight_symbol("> ");
     f.render_stateful_widget(list, layout[1], &mut picker.state.clone());
+}
+
+fn draw_contacts(f: &mut ratatui::Frame, app: &App, area: Rect) {
+    let Some(state) = app.contacts.as_ref() else {
+        return;
+    };
+    let filtered = app.contacts_filtered();
+    let height = (filtered.len() as u16 + 4).min(area.height).max(6);
+    let width = 70u16.min(area.width);
+    let x = area.x + area.width.saturating_sub(width) / 2;
+    let y = area.y + area.height.saturating_sub(height) / 2;
+    let popup = Rect {
+        x,
+        y,
+        width,
+        height,
+    };
+    f.render_widget(Clear, popup);
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(3), Constraint::Min(1)])
+        .split(popup);
+
+    let filter_para = Paragraph::new(format!("/{}", state.filter)).block(pane_block(
+        "contacts (Esc cancel · Enter compose · j/k)",
+        true,
+    ));
+    f.render_widget(filter_para, layout[0]);
+
+    let items: Vec<ListItem> = filtered
+        .iter()
+        .map(|c| {
+            let name = c.name.as_deref().unwrap_or("");
+            let line = if name.is_empty() {
+                c.email.clone()
+            } else {
+                format!("{}  <{}>", truncate(name, 28), c.email)
+            };
+            ListItem::new(line)
+        })
+        .collect();
+    let list = List::new(items)
+        .block(pane_block("entries", true))
+        .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
+        .highlight_symbol("> ");
+    f.render_stateful_widget(list, layout[1], &mut state.state.clone());
 }
 
 fn draw_move_picker(f: &mut ratatui::Frame, app: &App, area: Rect) {

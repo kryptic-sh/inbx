@@ -90,6 +90,10 @@ async fn event_loop(term: &mut Term, app: &mut App) -> Result<()> {
                 keys::handle_account_picker_key(app, key).await?;
                 continue;
             }
+            if app.contacts.is_some() {
+                keys::handle_contacts_key(app, key).await?;
+                continue;
+            }
             if keys::handle_list_key(app, key).await? {
                 break;
             }

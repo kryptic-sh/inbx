@@ -67,6 +67,11 @@ pub(super) async fn handle_list_key(app: &mut App, key: KeyEvent) -> Result<bool
         return Ok(false);
     }
 
+    if key.code == KeyCode::Char('C') {
+        app.open_contacts().await?;
+        return Ok(false);
+    }
+
     if app.pane == Pane::Messages {
         match key.code {
             KeyCode::Char('s') => {
@@ -455,6 +460,46 @@ pub(super) async fn handle_account_picker_key(app: &mut App, key: KeyEvent) -> R
                 let cur = p.state.selected().unwrap_or(0);
                 p.state.select(Some((cur + 1) % len));
             }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+pub(super) async fn handle_contacts_key(app: &mut App, key: KeyEvent) -> Result<()> {
+    let filtered = app.contacts_filtered();
+    let len = filtered.len();
+    let Some(state) = app.contacts.as_mut() else {
+        return Ok(());
+    };
+    match key.code {
+        KeyCode::Esc => {
+            app.contacts = None;
+        }
+        KeyCode::Enter => {
+            let idx = state.state.selected().unwrap_or(0);
+            if let Some(c) = filtered.get(idx).cloned() {
+                app.contacts = None;
+                app.compose_to_contact(&c.email);
+            }
+        }
+        KeyCode::Up | KeyCode::Char('k') if key.modifiers.is_empty() && len > 0 => {
+            let cur = state.state.selected().unwrap_or(0);
+            state
+                .state
+                .select(Some(if cur == 0 { len - 1 } else { cur - 1 }));
+        }
+        KeyCode::Down | KeyCode::Char('j') if key.modifiers.is_empty() && len > 0 => {
+            let cur = state.state.selected().unwrap_or(0);
+            state.state.select(Some((cur + 1) % len));
+        }
+        KeyCode::Backspace => {
+            state.filter.pop();
+            state.state.select(Some(0));
+        }
+        KeyCode::Char(c) => {
+            state.filter.push(c);
+            state.state.select(Some(0));
         }
         _ => {}
     }
