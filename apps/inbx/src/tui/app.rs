@@ -26,6 +26,7 @@ pub(super) enum Pane {
 pub(super) enum Mode {
     Normal,
     Insert,
+    #[allow(dead_code)]
     Visual,
     Search,
 }

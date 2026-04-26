@@ -10,9 +10,8 @@ patch bumps.
 
 ### Changed
 
-- bump hjkl =0.0.28 — adopts canonical Buffer impl + sticky_col/iskeyword hoist
-  (M6 composer migration to spec::\* still pending Editor<B,H> generic at
-  0.1.0).
+- bump hjkl =0.0.29 — adopts Patch B Host wiring (composer migration to spec::\*
+  still pending Editor<B,H> generic at 0.1.0).
 - TUI search overlay (`/`) now persists query + results across closes; reopening
   `/` resumes the prior session. Adds `n` / `N` from the main list to jump to
   the next / previous match without reopening the overlay, and shows a `[m/n]`
