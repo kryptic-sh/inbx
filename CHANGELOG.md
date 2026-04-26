@@ -10,8 +10,10 @@ patch bumps.
 
 ### Changed
 
-- bump hjkl =0.0.29 — adopts Patch B Host wiring (composer migration to spec::\*
-  still pending Editor<B,H> generic at 0.1.0).
+- bump hjkl =0.0.30 — adopts Patch C-α (motion vocabulary relocated from
+  `hjkl_buffer::Buffer` inherent methods into `hjkl_engine::motions` module);
+  consumer-side change is pin bump only. Composer migration to spec::\* still
+  pending Editor<B,H> generic at 0.1.0.
 - TUI search overlay (`/`) now persists query + results across closes; reopening
   `/` resumes the prior session. Adds `n` / `N` from the main list to jump to
   the next / previous match without reopening the overlay, and shows a `[m/n]`
