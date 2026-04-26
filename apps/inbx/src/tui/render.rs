@@ -36,6 +36,9 @@ pub(super) fn draw(f: &mut ratatui::Frame, app: &App) {
     if app.move_picker.is_some() {
         draw_move_picker(f, app, outer[0]);
     }
+    if app.outbox.is_some() {
+        draw_outbox(f, app, outer[0]);
+    }
     if app.show_help {
         draw_help(f, outer[0]);
     }
@@ -334,6 +337,55 @@ pub(super) fn render_path(path: &str) -> String {
             String::from_utf8_lossy(&raw)
         ),
     }
+}
+
+fn draw_outbox(f: &mut ratatui::Frame, app: &App, area: Rect) {
+    let Some(ob) = app.outbox.as_ref() else {
+        return;
+    };
+    let height = (ob.entries.len() as u16 + 4).min(area.height).max(6);
+    let width = 80u16.min(area.width);
+    let x = area.x + area.width.saturating_sub(width) / 2;
+    let y = area.y + area.height.saturating_sub(height) / 2;
+    let popup = Rect {
+        x,
+        y,
+        width,
+        height,
+    };
+    f.render_widget(Clear, popup);
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(3), Constraint::Min(1)])
+        .split(popup);
+
+    let header = Paragraph::new(format!("{} queued", ob.entries.len())).block(pane_block(
+        "outbox (D drain all · d drain one · x delete · j/k · Esc)",
+        true,
+    ));
+    f.render_widget(header, layout[0]);
+
+    let items: Vec<ListItem> = ob
+        .entries
+        .iter()
+        .map(|r| {
+            let err = r
+                .last_error
+                .as_deref()
+                .map(|s| truncate(s, 32))
+                .unwrap_or_else(|| truncate("", 32));
+            let line = format!(
+                "id={:<5} att={:<3} q={:<11} err={}",
+                r.id, r.attempts, r.enqueued_unix, err
+            );
+            ListItem::new(line)
+        })
+        .collect();
+    let list = List::new(items)
+        .block(pane_block("entries", true))
+        .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
+        .highlight_symbol("> ");
+    f.render_stateful_widget(list, layout[1], &mut ob.state.clone());
 }
 
 fn draw_move_picker(f: &mut ratatui::Frame, app: &App, area: Rect) {

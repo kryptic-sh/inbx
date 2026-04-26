@@ -70,6 +70,10 @@ async fn event_loop(term: &mut Term, app: &mut App) -> Result<()> {
                 }
                 continue;
             }
+            if app.outbox.is_some() {
+                keys::handle_outbox_key(app, key).await?;
+                continue;
+            }
             if app.move_picker.is_some() {
                 keys::handle_move_picker_key(app, key).await?;
                 continue;

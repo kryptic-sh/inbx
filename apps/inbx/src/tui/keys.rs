@@ -52,6 +52,11 @@ pub(super) async fn handle_list_key(app: &mut App, key: KeyEvent) -> Result<bool
         return Ok(false);
     }
 
+    if key.code == KeyCode::Char('O') {
+        app.open_outbox().await?;
+        return Ok(false);
+    }
+
     if app.pane == Pane::Messages {
         match key.code {
             KeyCode::Char('s') => {
@@ -233,6 +238,43 @@ pub(super) async fn handle_composer_key(app: &mut App, key: KeyEvent) -> Result<
         c.focused_editor().handle_key(key);
     }
     Ok(false)
+}
+
+pub(super) async fn handle_outbox_key(app: &mut App, key: KeyEvent) -> Result<()> {
+    let len = app.outbox.as_ref().map(|o| o.entries.len()).unwrap_or(0);
+    match key.code {
+        KeyCode::Esc => {
+            app.outbox = None;
+        }
+        KeyCode::Char('D') => {
+            app.drain_outbox().await?;
+        }
+        KeyCode::Char('d') => {
+            app.drain_outbox_one().await?;
+        }
+        KeyCode::Char('x') => {
+            app.delete_outbox_one().await?;
+        }
+        KeyCode::Up | KeyCode::Char('k') if key.modifiers.is_empty() => {
+            if len > 0
+                && let Some(ob) = app.outbox.as_mut()
+            {
+                let cur = ob.state.selected().unwrap_or(0);
+                ob.state
+                    .select(Some(if cur == 0 { len - 1 } else { cur - 1 }));
+            }
+        }
+        KeyCode::Down | KeyCode::Char('j') if key.modifiers.is_empty() => {
+            if len > 0
+                && let Some(ob) = app.outbox.as_mut()
+            {
+                let cur = ob.state.selected().unwrap_or(0);
+                ob.state.select(Some((cur + 1) % len));
+            }
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 pub(super) async fn handle_move_picker_key(app: &mut App, key: KeyEvent) -> Result<()> {

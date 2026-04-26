@@ -1,7 +1,7 @@
 use anyhow::Result;
 use inbx_composer::{Composer, Identity};
 use inbx_config::Account;
-use inbx_store::{FolderRow, MessageRow, Store};
+use inbx_store::{FolderRow, MessageRow, OutboxRow, Store};
 use ratatui::widgets::ListState;
 
 use super::ACTIVE_THEME;
@@ -29,10 +29,16 @@ pub(super) struct App {
     pub(super) composer: Option<Composer>,
     pub(super) show_help: bool,
     pub(super) move_picker: Option<MovePickerState>,
+    pub(super) outbox: Option<OutboxState>,
 }
 
 pub(super) struct MovePickerState {
     pub(super) filter: String,
+    pub(super) state: ListState,
+}
+
+pub(super) struct OutboxState {
+    pub(super) entries: Vec<OutboxRow>,
     pub(super) state: ListState,
 }
 
@@ -71,6 +77,7 @@ impl App {
             composer: None,
             show_help: false,
             move_picker: None,
+            outbox: None,
         };
         app.reload_messages().await?;
         Ok(app)
@@ -403,6 +410,92 @@ impl App {
         self.store.delete_messages(&source, &[msg.uid]).await?;
         self.reload_messages().await?;
         self.status = format!("moved uid {} → {target}", msg.uid);
+        Ok(())
+    }
+
+    pub(super) async fn open_outbox(&mut self) -> Result<()> {
+        let entries = self.store.outbox_list().await?;
+        let mut state = ListState::default();
+        if !entries.is_empty() {
+            state.select(Some(0));
+        }
+        let n = entries.len();
+        self.outbox = Some(OutboxState { entries, state });
+        self.status = format!("outbox: {n} queued");
+        Ok(())
+    }
+
+    pub(super) async fn drain_outbox(&mut self) -> Result<()> {
+        let entries = self.store.outbox_list().await?;
+        let total = entries.len();
+        let mut sent = 0usize;
+        let mut failed = 0usize;
+        for row in entries {
+            match inbx_net::send_message(&self.account, &row.raw).await {
+                Ok(()) => {
+                    self.store.outbox_delete(row.id).await?;
+                    sent += 1;
+                }
+                Err(e) => {
+                    self.store
+                        .outbox_record_failure(row.id, &e.to_string())
+                        .await?;
+                    failed += 1;
+                }
+            }
+        }
+        self.reload_outbox().await?;
+        self.status = format!("outbox drain: {sent}/{total} sent, {failed} failed");
+        Ok(())
+    }
+
+    pub(super) async fn drain_outbox_one(&mut self) -> Result<()> {
+        let Some(row) = self.selected_outbox_entry().cloned() else {
+            return Ok(());
+        };
+        match inbx_net::send_message(&self.account, &row.raw).await {
+            Ok(()) => {
+                self.store.outbox_delete(row.id).await?;
+                self.status = format!("outbox: sent id={}", row.id);
+            }
+            Err(e) => {
+                self.store
+                    .outbox_record_failure(row.id, &e.to_string())
+                    .await?;
+                self.status = format!("outbox: id={} failed: {e}", row.id);
+            }
+        }
+        self.reload_outbox().await?;
+        Ok(())
+    }
+
+    pub(super) async fn delete_outbox_one(&mut self) -> Result<()> {
+        let Some(row) = self.selected_outbox_entry().cloned() else {
+            return Ok(());
+        };
+        self.store.outbox_delete(row.id).await?;
+        self.reload_outbox().await?;
+        self.status = format!("outbox: deleted id={}", row.id);
+        Ok(())
+    }
+
+    fn selected_outbox_entry(&self) -> Option<&OutboxRow> {
+        let ob = self.outbox.as_ref()?;
+        ob.state.selected().and_then(|i| ob.entries.get(i))
+    }
+
+    async fn reload_outbox(&mut self) -> Result<()> {
+        let entries = self.store.outbox_list().await?;
+        if let Some(ob) = self.outbox.as_mut() {
+            let prior = ob.state.selected();
+            ob.entries = entries;
+            if ob.entries.is_empty() {
+                ob.state.select(None);
+            } else {
+                let next = prior.map(|i| i.min(ob.entries.len() - 1)).unwrap_or(0);
+                ob.state.select(Some(next));
+            }
+        }
         Ok(())
     }
 
