@@ -10,8 +10,8 @@ patch bumps.
 
 ### Changed
 
-- bump hjkl =0.0.26 (spec trait declarations available; M6 composer migration
-  remains gated on generic Editor wiring).
+- bump hjkl =0.0.28 — adopts canonical Buffer impl + sticky_col/iskeyword hoist
+  (M6 composer migration to spec::* still pending Editor<B,H> generic at 0.1.0).
 
 ### Added
 
