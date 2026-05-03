@@ -7,8 +7,8 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    #[error("xdg dirs unavailable")]
-    NoXdg,
+    #[error("xdg dirs unavailable: {0}")]
+    NoXdg(#[from] hjkl_config::ConfigError),
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
     #[error("toml parse: {0}")]
@@ -115,16 +115,18 @@ fn default_smtp_port() -> u16 {
     465
 }
 
-pub fn project_dirs() -> Result<directories::ProjectDirs> {
-    directories::ProjectDirs::from("sh", "kryptic", "inbx").ok_or(Error::NoXdg)
+/// `$XDG_CONFIG_HOME/inbx/` (or `~/.config/inbx/` fallback).
+pub fn config_dir() -> Result<PathBuf> {
+    Ok(hjkl_config::config_dir("inbx")?)
 }
 
 pub fn config_path() -> Result<PathBuf> {
-    Ok(project_dirs()?.config_dir().join("config.toml"))
+    Ok(config_dir()?.join("config.toml"))
 }
 
+/// `$XDG_DATA_HOME/inbx/` (or `~/.local/share/inbx/` fallback).
 pub fn data_dir() -> Result<PathBuf> {
-    Ok(project_dirs()?.data_dir().to_path_buf())
+    Ok(hjkl_config::data_dir("inbx")?)
 }
 
 pub fn load() -> Result<Config> {

@@ -73,7 +73,7 @@ fn default_highlight() -> Rgb {
 }
 
 pub fn theme_path() -> super::Result<PathBuf> {
-    Ok(super::project_dirs()?.config_dir().join("theme.toml"))
+    Ok(super::config_dir()?.join("theme.toml"))
 }
 
 pub fn load_theme() -> super::Result<Theme> {

@@ -8,6 +8,23 @@ patch bumps.
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-05-03
+
+### Changed
+
+- **Path resolution migrated to `hjkl-config` 0.2 (XDG-everywhere).**
+  `inbx_config::config_path()` / `config_dir()` / `data_dir()` now route through
+  `hjkl_config::config_dir("inbx")` / `data_dir("inbx")` instead of
+  `directories::ProjectDirs::from("sh", "kryptic", "inbx")`. macOS users move
+  from `~/Library/Application Support/sh.kryptic.inbx/` and
+  `~/Library/Preferences/sh.kryptic.inbx/` to `~/.config/inbx/` +
+  `~/.local/share/inbx/`. Windows users move from `%APPDATA%\kryptic\inbx\` to
+  `~/.config/inbx/` + `~/.local/share/inbx/`. Linux paths unchanged. Replaced
+  `directories` workspace dep with `hjkl-config = "0.2"`.
+- `pub fn project_dirs()` removed from the `inbx-config` API; replaced with
+  `pub fn config_dir()`. The `Error::NoXdg` variant now wraps
+  `hjkl_config::ConfigError` (was a unit variant).
+
 ### Added
 
 - `inbx --help` now renders an ASCII-art banner (figlet "ANSI Regular" font)
@@ -80,3 +97,6 @@ patch bumps.
 - Release tooling: release-plz workspace config, Keep a Changelog format, GitHub
   Actions release-plz workflow (publish gated off until first dry-run pass
   clears).
+
+[Unreleased]: https://github.com/kryptic-sh/inbx/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/kryptic-sh/inbx/releases/tag/v0.1.0
