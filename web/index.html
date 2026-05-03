@@ -1,0 +1,995 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <meta name="theme-color" content="#f7768e" />
+    <title>inbx — modal-vim email client in Rust</title>
+    <meta
+      name="description"
+      content="inbx — modal-vim email client. Multi-provider: IMAP/SMTP, Gmail XOAUTH2, Microsoft Graph, JMAP. Maildir + SQLite + tantivy. hjkl-powered composer."
+    />
+    <meta
+      name="keywords"
+      content="inbx, vim email, modal email client, rust email, mutt alternative, neomutt, IMAP, JMAP, gmail XOAUTH2, microsoft graph, maildir, ratatui, kryptic"
+    />
+    <link rel="canonical" href="https://inbx.kryptic.sh/" />
+    <meta name="robots" content="index, follow" />
+    <meta property="og:title" content="inbx — modal-vim email client" />
+    <meta
+      property="og:description"
+      content="Modal-vim email client. IMAP, Gmail, Outlook, JMAP. Rust workspace. Maildir + SQLite + tantivy."
+    />
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://inbx.kryptic.sh/" />
+    <meta property="og:site_name" content="inbx" />
+    <meta property="og:image" content="https://inbx.kryptic.sh/og-image.png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta
+      property="og:image:alt"
+      content="inbx — modal-vim email client. IMAP, Gmail, Outlook, JMAP. Rust workspace."
+    />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="inbx — modal-vim email client" />
+    <meta
+      name="twitter:description"
+      content="Modal-vim email client. IMAP, Gmail, Outlook, JMAP. Rust workspace."
+    />
+    <meta name="twitter:image" content="https://inbx.kryptic.sh/og-image.png" />
+    <link rel="icon" type="image/svg+xml" href="favicon.svg" />
+    <link rel="alternate icon" type="image/x-icon" href="favicon.ico" />
+    <link rel="apple-touch-icon" href="apple-touch-icon.png" />
+    <link rel="manifest" href="manifest.json" />
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "SoftwareApplication",
+        "name": "inbx",
+        "description": "Modal-vim email client. IMAP, Gmail, Outlook, JMAP. Rust workspace.",
+        "url": "https://inbx.kryptic.sh/",
+        "applicationCategory": "CommunicationApplication",
+        "operatingSystem": "Linux, macOS, Windows",
+        "programmingLanguage": "Rust",
+        "license": "https://opensource.org/licenses/MIT",
+        "codeRepository": "https://github.com/kryptic-sh/inbx",
+        "offers": {
+          "@type": "Offer",
+          "price": "0",
+          "priceCurrency": "USD"
+        }
+      }
+    </script>
+    <!-- Google tag (gtag.js) -->
+    <script>
+      (function () {
+        var loaded = false;
+        function loadGA() {
+          if (loaded) return;
+          loaded = true;
+          var s = document.createElement('script');
+          s.async = true;
+          s.src = 'https://www.googletagmanager.com/gtag/js?id=G-DT67H34032';
+          document.head.appendChild(s);
+          window.dataLayer = window.dataLayer || [];
+          function gtag() {
+            dataLayer.push(arguments);
+          }
+          gtag('js', new Date());
+          gtag('config', 'G-DT67H34032');
+        }
+        ['pointerdown', 'keydown', 'scroll', 'touchstart'].forEach(
+          function (e) {
+            window.addEventListener(e, loadGA, { once: true, passive: true });
+          }
+        );
+        setTimeout(loadGA, 8000);
+      })();
+    </script>
+    <style>
+      :root {
+        --bg: #0b0d10;
+        --bg-alt: #11141a;
+        --panel: #141820;
+        --border: #1f2530;
+        --border-strong: #2a3240;
+        --fg: #e5e9f0;
+        --fg-dim: #8b95a7;
+        --fg-muted: #8a93a4;
+        --accent: #f7768e;
+        --accent-dim: #6e2a3a;
+        --green: #7ee787;
+        --orange: #ff9e64;
+        --purple: #bb9af7;
+        --blue: #7aa2f7;
+        --mono:
+          'Hack', 'JetBrains Mono', 'DejaVu Sans Mono', 'Liberation Mono',
+          monospace;
+        --sans:
+          'Hack', 'JetBrains Mono', 'DejaVu Sans Mono', 'Liberation Mono',
+          monospace;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+      }
+      body {
+        background: var(--bg);
+        color: var(--fg);
+        font-family: var(--sans);
+        font-size: 16px;
+        line-height: 1.6;
+        -webkit-font-smoothing: antialiased;
+        background-image:
+          radial-gradient(
+            circle at 20% 0%,
+            rgba(247, 118, 142, 0.08),
+            transparent 40%
+          ),
+          radial-gradient(
+            circle at 80% 20%,
+            rgba(187, 154, 247, 0.05),
+            transparent 45%
+          );
+      }
+      @media (min-width: 900px) {
+        body {
+          background-attachment: fixed;
+        }
+      }
+      a {
+        color: var(--accent);
+        text-decoration: none;
+      }
+      a:hover {
+        text-decoration: underline;
+      }
+      code,
+      pre,
+      .mono {
+        font-family: var(--mono);
+        line-height: 1.5;
+      }
+
+      .wrap {
+        max-width: 1040px;
+        margin: 0 auto;
+        padding: 0 24px;
+      }
+
+      .siblings {
+        border-bottom: 1px solid var(--border);
+        background: rgba(0, 0, 0, 0.2);
+      }
+      .siblings-inner {
+        max-width: 1040px;
+        margin: 0 auto;
+        padding: 8px 24px;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px 12px;
+        font-family: var(--mono);
+        font-size: 12px;
+        color: var(--fg-muted);
+        align-items: center;
+      }
+      .siblings-inner a {
+        color: var(--fg-muted);
+      }
+      .siblings-inner a:hover {
+        color: var(--accent);
+        text-decoration: none;
+      }
+      .siblings-inner .current {
+        color: var(--accent);
+      }
+      .siblings-inner .sep {
+        color: var(--border-strong);
+      }
+      @media (max-width: 560px) {
+        .siblings-inner {
+          gap: 6px 14px;
+          justify-content: center;
+        }
+        .siblings-inner .sep {
+          display: none;
+        }
+      }
+
+      nav.top {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 20px 24px;
+        max-width: 1040px;
+        margin: 0 auto;
+      }
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        font-family: var(--mono);
+        font-weight: 700;
+        font-size: 18px;
+        line-height: 1;
+      }
+      .brand .prompt {
+        color: var(--accent);
+      }
+      .brand .cursor {
+        display: inline-block;
+        width: 8px;
+        height: 16px;
+        background: var(--accent);
+        vertical-align: middle;
+        margin-left: 2px;
+        animation: blink 1s steps(1) infinite;
+      }
+      @keyframes blink {
+        50% {
+          opacity: 0;
+        }
+      }
+      nav.top .links {
+        display: flex;
+        gap: 22px;
+        font-size: 14px;
+        color: var(--fg-dim);
+        font-family: var(--mono);
+      }
+      nav.top .links a {
+        color: var(--fg-dim);
+      }
+      nav.top .links a:hover {
+        color: var(--accent);
+        text-decoration: none;
+      }
+      @media (max-width: 560px) {
+        nav.top {
+          flex-wrap: wrap;
+          gap: 12px 16px;
+          padding: 16px 20px;
+          justify-content: center;
+        }
+        nav.top .brand {
+          width: 100%;
+          justify-content: center;
+        }
+        nav.top .links {
+          gap: 14px;
+          flex-wrap: wrap;
+          justify-content: center;
+          width: 100%;
+        }
+      }
+
+      header.hero {
+        padding: 24px 0 40px;
+      }
+      h1 {
+        font-size: clamp(40px, 6vw, 68px);
+        line-height: 1.05;
+        margin: 0 0 20px;
+        font-weight: 700;
+        letter-spacing: -0.02em;
+      }
+      h1 .grad {
+        background: linear-gradient(
+          120deg,
+          var(--accent) 0%,
+          var(--purple) 60%,
+          var(--blue) 100%
+        );
+        -webkit-background-clip: text;
+        background-clip: text;
+        color: transparent;
+      }
+      .tagline {
+        font-size: 20px;
+        line-height: 1.4;
+        color: var(--fg-dim);
+        margin: 0 0 14px;
+        max-width: 640px;
+      }
+      .badges {
+        margin-top: 16px;
+        margin-bottom: 20px;
+        display: flex;
+        gap: 10px;
+        flex-wrap: wrap;
+      }
+      .badge {
+        font-family: var(--mono);
+        font-size: 12px;
+        line-height: 1;
+        padding: 9px 10px;
+        border: 1px solid var(--border-strong);
+        border-radius: 4px;
+        color: var(--fg-dim);
+        background: var(--bg-alt);
+      }
+      .badge.live {
+        color: var(--accent);
+        border-color: var(--accent-dim);
+      }
+      .badge.warn {
+        color: var(--orange);
+        border-color: #7a4a2a;
+      }
+
+      .cta {
+        margin-top: 30px;
+        display: flex;
+        gap: 12px;
+        flex-wrap: wrap;
+      }
+      .btn {
+        font-family: var(--mono);
+        font-size: 14px;
+        font-weight: 500;
+        padding: 11px 18px;
+        border-radius: 6px;
+        border: 1px solid var(--border-strong);
+        color: var(--fg);
+        background: var(--bg-alt);
+        cursor: pointer;
+        transition: all 0.15s;
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+      }
+      .btn:hover {
+        border-color: var(--accent);
+        color: var(--accent);
+        text-decoration: none;
+        transform: translateY(-1px);
+      }
+      .btn.primary {
+        background: var(--accent);
+        color: #2a0a14;
+        border-color: var(--accent);
+        font-weight: 700;
+      }
+      .btn.primary:hover {
+        background: #fa9aae;
+        color: #2a0a14;
+        border-color: #fa9aae;
+      }
+
+      /* terminal mock */
+      .term {
+        background: var(--panel);
+        border: 1px solid var(--border-strong);
+        border-radius: 8px;
+        overflow: hidden;
+        box-shadow:
+          0 10px 40px rgba(0, 0, 0, 0.4),
+          0 0 0 1px rgba(255, 255, 255, 0.02) inset;
+        margin: 40px 0 0;
+      }
+      .term .chrome {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 10px 14px;
+        background: #0d1016;
+        border-bottom: 1px solid var(--border);
+      }
+      .term .chrome .dot {
+        width: 12px;
+        height: 12px;
+        border-radius: 50%;
+      }
+      .term .chrome .dot.r {
+        background: #ff5f56;
+      }
+      .term .chrome .dot.y {
+        background: #ffbd2e;
+      }
+      .term .chrome .dot.g {
+        background: #27c93f;
+      }
+      .term .chrome .title {
+        flex: 1;
+        text-align: center;
+        font-family: var(--mono);
+        font-size: 12px;
+        color: var(--fg-muted);
+      }
+      .term .body {
+        font-family: var(--mono);
+        font-size: 13px;
+        line-height: 1.55;
+        background: #0d1016;
+        padding: 0;
+        min-height: 300px;
+      }
+      .term .folders {
+        display: flex;
+        gap: 14px;
+        padding: 8px 14px;
+        background: #11141a;
+        border-bottom: 1px solid var(--border);
+        color: var(--fg-muted);
+        font-size: 12px;
+        flex-wrap: wrap;
+      }
+      .term .folders .f {
+        color: var(--fg-muted);
+      }
+      .term .folders .f.active {
+        color: var(--accent);
+        border-bottom: 1px solid var(--accent);
+        padding-bottom: 4px;
+        margin-bottom: -5px;
+      }
+      .term .folders .f .count {
+        color: var(--orange);
+      }
+      .mlist {
+        list-style: none;
+        margin: 0;
+        padding: 6px 0;
+      }
+      .mlist li {
+        display: grid;
+        grid-template-columns: 28px 24px 14ch 1fr 70px;
+        gap: 10px;
+        padding: 4px 14px;
+        align-items: baseline;
+      }
+      .mlist li.sel {
+        background: #1a2138;
+      }
+      .mlist .hint {
+        display: inline-block;
+        background: var(--orange);
+        color: #2a1a0a;
+        font-family: var(--mono);
+        font-weight: 700;
+        font-size: 11px;
+        padding: 1px 6px;
+        border-radius: 3px;
+        line-height: 1.4;
+        text-align: center;
+      }
+      .mlist .flag {
+        color: var(--fg-muted);
+        text-align: center;
+      }
+      .mlist .flag.unread {
+        color: var(--accent);
+      }
+      .mlist .flag.star {
+        color: var(--orange);
+      }
+      .mlist .from {
+        color: var(--fg);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .mlist .from.unread {
+        color: var(--fg);
+        font-weight: 700;
+      }
+      .mlist .subj {
+        color: var(--fg-dim);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .mlist .subj .tag {
+        background: var(--accent-dim);
+        color: var(--accent);
+        font-size: 11px;
+        padding: 0 5px;
+        border-radius: 3px;
+        margin-right: 6px;
+      }
+      .mlist .subj .tag.gh {
+        background: #1a2538;
+        color: #8aa9d6;
+      }
+      .mlist .subj .tag.work {
+        background: #3a2a1a;
+        color: var(--orange);
+      }
+      .mlist .when {
+        color: var(--fg-muted);
+        font-size: 12px;
+        text-align: right;
+      }
+      .term .cmdline {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 6px 14px;
+        background: #0d1016;
+        border-top: 1px solid var(--border);
+        color: var(--fg-dim);
+      }
+      .mode-badge {
+        background: var(--accent);
+        color: #2a0a14;
+        font-weight: 700;
+        padding: 5px 14px;
+        font-size: 12px;
+        letter-spacing: 0.08em;
+      }
+      .mode-badge.hint {
+        background: var(--orange);
+        color: #2a1a0a;
+      }
+      .cmdline .info {
+        flex: 1;
+        font-size: 12px;
+      }
+      .cmdline .acct {
+        color: var(--green);
+        font-size: 12px;
+      }
+
+      section {
+        padding: 64px 0;
+        border-top: 1px solid var(--border);
+        content-visibility: auto;
+        contain-intrinsic-size: 1px 800px;
+      }
+      section h2 {
+        font-family: var(--mono);
+        font-size: 14px;
+        text-transform: uppercase;
+        letter-spacing: 0.15em;
+        color: var(--fg-muted);
+        margin: 0 0 8px;
+        font-weight: 500;
+      }
+      section h2::before {
+        content: '## ';
+        color: var(--accent);
+      }
+      section h3 {
+        font-size: 28px;
+        line-height: 1.25;
+        margin: 0 0 28px;
+        font-weight: 700;
+        letter-spacing: -0.01em;
+      }
+
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+        gap: 1px;
+        background: var(--border);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        overflow: hidden;
+      }
+      .feat {
+        background: var(--bg-alt);
+        padding: 24px;
+      }
+      .feat .icon {
+        font-family: var(--mono);
+        font-size: 11px;
+        color: var(--accent);
+        margin-bottom: 10px;
+        letter-spacing: 0.1em;
+      }
+      .feat h4 {
+        margin: 0 0 6px;
+        font-size: 17px;
+        font-weight: 600;
+      }
+      .feat p {
+        margin: 0;
+        color: var(--fg-dim);
+        font-size: 14.5px;
+        line-height: 1.55;
+      }
+
+      .providers {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+        gap: 12px;
+      }
+      .prov {
+        background: var(--bg-alt);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 16px 18px;
+      }
+      .prov .name {
+        font-family: var(--mono);
+        font-size: 14px;
+        color: var(--accent);
+        font-weight: 700;
+        margin-bottom: 4px;
+      }
+      .prov .how {
+        font-size: 13px;
+        color: var(--fg-dim);
+      }
+
+      .keys {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+        gap: 12px;
+      }
+      .key-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 10px 14px;
+        background: var(--bg-alt);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        font-size: 14px;
+      }
+      .key-row span {
+        color: var(--fg-dim);
+      }
+      kbd {
+        font-family: var(--mono);
+        font-size: 12px;
+        padding: 2px 7px;
+        background: var(--panel);
+        border: 1px solid var(--border-strong);
+        border-bottom-width: 2px;
+        border-radius: 4px;
+        color: var(--accent);
+      }
+
+      .status-card {
+        background: var(--panel);
+        border: 1px solid var(--border-strong);
+        border-left: 3px solid var(--orange);
+        border-radius: 6px;
+        padding: 18px 22px;
+        color: var(--fg-dim);
+      }
+      .status-card strong {
+        color: var(--orange);
+        font-family: var(--mono);
+      }
+
+      footer {
+        padding: 40px 0 60px;
+        border-top: 1px solid var(--border);
+        color: var(--fg-muted);
+        font-family: var(--mono);
+        font-size: 13px;
+      }
+      .footer-inner {
+        display: flex;
+        justify-content: space-between;
+        flex-wrap: wrap;
+        gap: 16px;
+      }
+      footer a {
+        color: var(--fg-dim);
+      }
+
+      ::selection {
+        background: var(--accent);
+        color: #2a0a14;
+      }
+
+      @media (max-width: 640px) {
+        .mlist li {
+          grid-template-columns: 28px 22px 1fr 60px;
+        }
+        .mlist .subj {
+          display: none;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <nav class="siblings">
+      <div class="siblings-inner">
+        <a href="https://www.kryptic.sh/">kryptic</a>
+        <span class="sep">·</span>
+        <a href="https://sqeel.kryptic.sh/">sqeel</a>
+        <span class="sep">·</span>
+        <a href="https://buffr.kryptic.sh/">buffr</a>
+        <span class="sep">·</span>
+        <a href="https://hjkl.kryptic.sh/">hjkl</a>
+        <span class="sep">·</span>
+        <span class="current">inbx</span>
+        <span class="sep">·</span>
+        <a href="https://hodl.kryptic.sh/">hodl</a>
+      </div>
+    </nav>
+
+    <nav class="top">
+      <div class="brand">
+        <span class="prompt">$</span> inbx<span class="cursor"></span>
+      </div>
+      <div class="links">
+        <a href="#why">why</a>
+        <a href="#providers">providers</a>
+        <a href="#keys">keys</a>
+        <a href="#status">status</a>
+        <a
+          href="https://github.com/kryptic-sh/inbx"
+          target="_blank"
+          rel="noopener"
+          >github ↗</a
+        >
+      </div>
+    </nav>
+
+    <main class="wrap">
+      <header class="hero">
+        <div class="badges">
+          <span class="badge live">● __VERSION__ · beta</span>
+          <span class="badge">MIT</span>
+          <span class="badge">Rust TUI + GUI</span>
+        </div>
+        <h1>
+          Modal-vim<br />
+          <span class="grad">email.</span>
+        </h1>
+        <p class="tagline">
+          IMAP, SMTP, Gmail, Outlook, JMAP. One client, every inbox.
+        </p>
+        <p class="tagline" style="color: var(--fg-muted); font-size: 16px">
+          Maildir on disk. SQLite index. tantivy search. hjkl-powered composer.
+        </p>
+
+        <div class="cta">
+          <a
+            class="btn primary"
+            href="https://github.com/kryptic-sh/inbx"
+            target="_blank"
+            rel="noopener"
+            >view on github →</a
+          >
+          <a class="btn" href="#why">why inbx ↓</a>
+        </div>
+
+        <div class="term">
+          <div class="chrome">
+            <span class="dot r"></span><span class="dot y"></span
+            ><span class="dot g"></span>
+            <span class="title">inbx — me@fastmail.com</span>
+          </div>
+          <div class="body">
+            <div class="folders">
+              <span class="f active">INBOX <span class="count">12</span></span>
+              <span class="f">Sent</span>
+              <span class="f">Drafts <span class="count">2</span></span>
+              <span class="f">Archive</span>
+              <span class="f">Spam</span>
+              <span class="f">[Gmail]/All</span>
+            </div>
+            <ul class="mlist">
+              <li class="sel">
+                <span class="hint">a</span>
+                <span class="flag unread">●</span>
+                <span class="from unread">GitHub</span>
+                <span class="subj"
+                  ><span class="tag gh">PR</span>kryptic-sh/inbx #42 — wire IMAP
+                  IDLE socket</span
+                >
+                <span class="when">2m</span>
+              </li>
+              <li>
+                <span class="hint">s</span>
+                <span class="flag star">★</span>
+                <span class="from unread">Linus T.</span>
+                <span class="subj"
+                  >Re: Maildir layout — looks fine, ship it</span
+                >
+                <span class="when">14m</span>
+              </li>
+              <li>
+                <span class="hint">d</span>
+                <span class="flag unread">●</span>
+                <span class="from unread">Fastmail</span>
+                <span class="subj"
+                  ><span class="tag">JMAP</span>You have 3 new messages</span
+                >
+                <span class="when">1h</span>
+              </li>
+              <li>
+                <span class="hint">f</span>
+                <span class="flag">·</span>
+                <span class="from">cron daemon</span>
+                <span class="subj"
+                  >[backup] nightly snapshot complete (124 GB)</span
+                >
+                <span class="when">3h</span>
+              </li>
+              <li>
+                <span class="hint">g</span>
+                <span class="flag">·</span>
+                <span class="from">Stripe</span>
+                <span class="subj"
+                  ><span class="tag work">work</span>Receipt for invoice
+                  #INV-2026-0418</span
+                >
+                <span class="when">yest</span>
+              </li>
+              <li>
+                <span class="hint">h</span>
+                <span class="flag">·</span>
+                <span class="from">rust-announce</span>
+                <span class="subj"
+                  >Rust 1.95.0 released — let-chains stabilized</span
+                >
+                <span class="when">2d</span>
+              </li>
+            </ul>
+          </div>
+          <div class="cmdline">
+            <span class="mode-badge hint">HINT</span>
+            <span class="info">press a letter to open · esc to cancel</span>
+            <span class="acct">● fastmail (idle)</span>
+          </div>
+        </div>
+      </header>
+
+      <section id="why">
+        <h2>why</h2>
+        <h3>An email client shaped like vim, not Outlook.</h3>
+        <div class="grid">
+          <div class="feat">
+            <div class="icon">01 — INPUT</div>
+            <h4>Modal everything</h4>
+            <p>
+              Normal/insert/visual modes in the message list, the reader, and
+              the composer. Real motions, real text objects, real ex commands.
+            </p>
+          </div>
+          <div class="feat">
+            <div class="icon">02 — SELECT</div>
+            <h4>Hint mode</h4>
+            <p>
+              Press <kbd>f</kbd>, every visible message gets a label. Type the
+              label, you're in the thread. No j-spamming.
+            </p>
+          </div>
+          <div class="feat">
+            <div class="icon">03 — PROVIDERS</div>
+            <h4>Multi-provider, one client</h4>
+            <p>
+              IMAP/SMTP, Gmail XOAUTH2, Microsoft Graph, JMAP. One config, every
+              account. Provider abstracted behind a trait.
+            </p>
+          </div>
+          <div class="feat">
+            <div class="icon">04 — STORAGE</div>
+            <h4>Maildir + SQLite</h4>
+            <p>
+              On-disk Maildir per account. SQLite index for threading and
+              metadata. tantivy for full-text. Offline-first.
+            </p>
+          </div>
+          <div class="feat">
+            <div class="icon">05 — COMPOSE</div>
+            <h4>hjkl-powered composer</h4>
+            <p>
+              Composer embeds <a href="https://hjkl.kryptic.sh/">hjkl</a> — the
+              same modal editor. Headers and body share one FSM. MIME built with
+              mail-builder.
+            </p>
+          </div>
+          <div class="feat">
+            <div class="icon">06 — SECURITY</div>
+            <h4>TLS or nothing</h4>
+            <p>
+              Implicit TLS or STARTTLS only. Never falls through to plaintext.
+              Remote content blocked by default. HTML sanitized via ammonia.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <section id="providers">
+        <h2>providers</h2>
+        <h3>Whatever you use, inbx talks to it.</h3>
+        <div class="providers">
+          <div class="prov">
+            <div class="name">IMAP + SMTP</div>
+            <div class="how">
+              Fastmail, Proton Bridge, dovecot, iCloud, Yahoo, Yandex. IMAP IDLE
+              for push.
+            </div>
+          </div>
+          <div class="prov">
+            <div class="name">Gmail / Workspace</div>
+            <div class="how">
+              IMAP + SMTP via XOAUTH2. Auth-code flow with refresh tokens in the
+              OS keyring.
+            </div>
+          </div>
+          <div class="prov">
+            <div class="name">Outlook / M365</div>
+            <div class="how">
+              OAuth2 today, Microsoft Graph (<code>/me/messages</code>,
+              <code>/me/sendMail</code>) tomorrow. Tenant-aware.
+            </div>
+          </div>
+          <div class="prov">
+            <div class="name">JMAP</div>
+            <div class="how">
+              Fastmail, Stalwart. Fewer round-trips, push native. Preferred when
+              the server speaks it.
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="keys">
+        <h2>keys</h2>
+        <h3>The map you already know.</h3>
+        <div class="keys">
+          <div class="key-row">
+            <span>Next / prev message</span><kbd>j / k</kbd>
+          </div>
+          <div class="key-row"><span>Open thread</span><kbd>Enter</kbd></div>
+          <div class="key-row"><span>Hint mode</span><kbd>f</kbd></div>
+          <div class="key-row"><span>Compose</span><kbd>c</kbd></div>
+          <div class="key-row">
+            <span>Reply / reply-all</span><kbd>r / R</kbd>
+          </div>
+          <div class="key-row"><span>Forward</span><kbd>F</kbd></div>
+          <div class="key-row"><span>Archive</span><kbd>e</kbd></div>
+          <div class="key-row"><span>Delete</span><kbd>d</kbd></div>
+          <div class="key-row"><span>Mark unread</span><kbd>U</kbd></div>
+          <div class="key-row"><span>Star / flag</span><kbd>s</kbd></div>
+          <div class="key-row"><span>Inbox / Sent</span><kbd>gi / gs</kbd></div>
+          <div class="key-row"><span>Search</span><kbd>/</kbd></div>
+          <div class="key-row"><span>Switch account</span><kbd>:acct</kbd></div>
+          <div class="key-row"><span>Send draft</span><kbd>:send</kbd></div>
+          <div class="key-row"><span>Sync now</span><kbd>:sync</kbd></div>
+          <div class="key-row"><span>Quit</span><kbd>:q</kbd></div>
+        </div>
+      </section>
+
+      <section id="status">
+        <h2>status</h2>
+        <h3>Beta. Working CLI + TUI + GUI. Real-account dogfood pending.</h3>
+        <div class="status-card">
+          <p style="margin: 0 0 8px">
+            <strong>Status:</strong> beta. All 24 milestones landed, plus
+            extras. CLI, TUI (ratatui), and GUI (egui) all run. Composer on
+            <a href="https://hjkl.kryptic.sh/">hjkl</a>-editor with attachments,
+            cursor + overlay. Drafts sync via UIDPLUS APPEND. Gmail XOAUTH2 + MS
+            Graph delta + JMAP (incl. EventSource SSE push). CardDAV
+            auto-discovery + write-back. ManageSieve + vacation responder.
+            DKIM/SPF/DMARC + phishing badge. mbox/.eml import-export. PGP/S-MIME
+            detection. Per-account templates. inbx-sync headless daemon.
+          </p>
+          <p style="margin: 0">
+            Star
+            <a href="https://github.com/kryptic-sh/inbx"
+              >github.com/kryptic-sh/inbx</a
+            >
+            for releases. Sibling to
+            <a href="https://sqeel.kryptic.sh/">sqeel</a>,
+            <a href="https://buffr.kryptic.sh/">buffr</a>,
+            <a href="https://hjkl.kryptic.sh/">hjkl</a>,
+            <a href="https://hodl.kryptic.sh/">hodl</a>.
+          </p>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <div class="wrap footer-inner">
+        <div>inbx · MIT · built in Rust</div>
+        <div>
+          <a href="https://github.com/kryptic-sh/inbx">github</a>
+        </div>
+      </div>
+    </footer>
+  </body>
+</html>
