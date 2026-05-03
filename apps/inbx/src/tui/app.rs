@@ -96,6 +96,8 @@ pub(super) struct App {
     pub(super) last_sync_unix: Option<i64>,
     /// Active hjkl-picker overlay. `None` when no picker is open.
     pub(super) active_picker: Option<ActivePicker>,
+    /// Active account-creation wizard. `None` when not open.
+    pub(super) active_wizard: Option<super::wizard::AccountWizard>,
 }
 
 #[derive(Clone, Copy)]
@@ -276,6 +278,7 @@ impl App {
             last_search: None,
             last_sync_unix: None,
             active_picker: None,
+            active_wizard: None,
         };
         app.reload_messages().await?;
         Ok(app)

@@ -1,3 +1,4 @@
+use hjkl_form::{Field as FormField, FormMode};
 use inbx_composer::{Composer, Field as ComposerField};
 use inbx_config::theme::{Rgb, Theme};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -56,6 +57,9 @@ pub(super) fn draw(f: &mut ratatui::Frame, app: &App) {
     }
     if app.active_picker.is_some() {
         draw_active_picker(f, app, outer[0]);
+    }
+    if app.active_wizard.is_some() {
+        draw_active_wizard(f, app, outer[0]);
     }
     if app.show_help {
         draw_help(f, outer[0]);
@@ -787,6 +791,84 @@ fn draw_active_picker(f: &mut ratatui::Frame, app: &App, area: Rect) {
         .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
         .highlight_symbol("> ");
     f.render_stateful_widget(list, layout[1], &mut list_state);
+}
+
+fn draw_active_wizard(f: &mut ratatui::Frame, app: &App, area: Rect) {
+    let Some(wizard) = app.active_wizard.as_ref() else {
+        return;
+    };
+    let n = wizard.form.fields.len();
+    // Each field row = 3 lines (bordered), plus 2 for outer border.
+    let height = ((n as u16 * 3) + 2).min(area.height).max(14);
+    let width = 70u16.min(area.width);
+    let x = area.x + area.width.saturating_sub(width) / 2;
+    let y = area.y + area.height.saturating_sub(height) / 2;
+    let popup = Rect {
+        x,
+        y,
+        width,
+        height,
+    };
+    f.render_widget(Clear, popup);
+
+    // Outer block.
+    let title = "new account wizard (<Space>s save · Esc cancel)";
+    let block = pane_block(title, true);
+    let inner = block.inner(popup);
+    f.render_widget(block, popup);
+
+    // Each field gets a 3-line row (border + 1 content + border).
+    let constraints: Vec<Constraint> = wizard
+        .form
+        .fields
+        .iter()
+        .map(|_| Constraint::Length(3))
+        .collect();
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(constraints)
+        .split(inner);
+
+    let focused_idx = wizard.form.focused();
+    let in_insert = wizard.form.mode == FormMode::Insert;
+
+    for (i, field) in wizard.form.fields.iter().enumerate() {
+        let Some(&row_area) = rows.get(i) else {
+            break;
+        };
+        let is_focused = i == focused_idx;
+        match field {
+            FormField::SingleLineText(tf) => {
+                let text = tf.text();
+                let label = &tf.meta.label;
+                let required_star = if tf.meta.required { "*" } else { " " };
+                let display = format!("{required_star}{label}: {text}");
+                let style = if is_focused {
+                    Style::default().add_modifier(Modifier::REVERSED)
+                } else {
+                    Style::default()
+                };
+                let para = Paragraph::new(display)
+                    .block(Block::default().borders(Borders::ALL))
+                    .style(style);
+                f.render_widget(para, row_area);
+
+                // Place cursor when this field is focused and in insert mode.
+                if is_focused && in_insert {
+                    let (_, col) = tf.cursor();
+                    let prefix_len = required_star.len() + label.len() + 2; // ": "
+                    let cursor_col = (prefix_len + col) as u16;
+                    let inner_w = row_area.width.saturating_sub(2);
+                    if cursor_col < inner_w {
+                        f.set_cursor_position((row_area.x + 1 + cursor_col, row_area.y + 1));
+                    }
+                }
+            }
+            _ => {
+                // Other field types are not used in this wizard.
+            }
+        }
+    }
 }
 
 #[cfg(test)]

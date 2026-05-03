@@ -1,10 +1,12 @@
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use hjkl_engine::{Input as EngineInput, Key as EngineKey};
+use hjkl_form::FormMode;
 use hjkl_picker::PickerEvent;
 use inbx_composer::FocusedEditor;
 
 use super::app::{ActivePicker, App, IcalResponse, LeaderState, MovePickerState, Pane};
+use super::wizard::AccountWizard;
 
 /// Returns true to quit the TUI.
 pub(super) async fn handle_list_key(app: &mut App, key: KeyEvent) -> Result<bool> {
@@ -46,6 +48,11 @@ pub(super) async fn handle_list_key(app: &mut App, key: KeyEvent) -> Result<bool
             }
             KeyCode::Char('a') => {
                 app.open_attachment_picker();
+                return Ok(false);
+            }
+            KeyCode::Char('n') => {
+                app.active_wizard = Some(AccountWizard::new());
+                app.status = "wizard: new account — <Space>s save · Esc cancel".into();
                 return Ok(false);
             }
             _ => {
@@ -671,6 +678,81 @@ pub(super) async fn handle_thread_key(app: &mut App, key: KeyEvent) -> Result<()
         _ => {}
     }
     Ok(())
+}
+
+/// Route key events when the account-creation wizard is open.
+pub(super) async fn handle_wizard_key(app: &mut App, key: KeyEvent) -> Result<()> {
+    let Some(wizard) = app.active_wizard.as_mut() else {
+        return Ok(());
+    };
+
+    // In Normal mode, <Space>s = save, Esc = cancel.
+    if wizard.form.mode == FormMode::Normal {
+        if key.code == KeyCode::Esc {
+            app.active_wizard = None;
+            app.status = "wizard: cancelled".into();
+            return Ok(());
+        }
+        // Leader chord for save: <Space>s.
+        // We repurpose `pending_leader` already in App for this.
+        if app.pending_leader == Some(super::app::LeaderState::Pending) {
+            app.pending_leader = None;
+            if key.code == KeyCode::Char('s') {
+                // Take the wizard out so we can consume it.
+                let wizard = app.active_wizard.take().unwrap();
+                match wizard.build_account() {
+                    Ok((acct, password)) => match save_wizard_account(acct, &password) {
+                        Ok(name) => {
+                            app.status = format!("added account {name}");
+                        }
+                        Err(e) => {
+                            app.status = format!("wizard save failed: {e}");
+                        }
+                    },
+                    Err(e) => {
+                        app.status = format!("wizard validation: {e}");
+                        // Put a fresh wizard back so the user can correct it.
+                        // (Simple: just discard state and warn.)
+                    }
+                }
+                return Ok(());
+            }
+            // Any other <Space>X: put leader back as unrecognised and fall through.
+        }
+        if key.code == KeyCode::Char(' ') && key.modifiers.is_empty() {
+            app.pending_leader = Some(super::app::LeaderState::Pending);
+            return Ok(());
+        }
+    }
+
+    let Some(wizard) = app.active_wizard.as_mut() else {
+        return Ok(());
+    };
+
+    let prev_focus = wizard.form.focused();
+    wizard.form.handle_input(crossterm_key_to_engine_input(key));
+    let new_focus = wizard.form.focused();
+
+    // Email-blur autoconfig hook.
+    if prev_focus == 1 && new_focus != 1 && !wizard.suggestion_applied {
+        wizard.maybe_apply_autoconfig();
+    }
+    wizard.last_focused = new_focus;
+
+    // Update status with focused field name.
+    let label = wizard.focused_label().to_string();
+    app.status = format!("wizard: {label} — <Space>s save · Esc cancel");
+
+    Ok(())
+}
+
+fn save_wizard_account(acct: inbx_config::Account, password: &str) -> Result<String> {
+    let name = acct.name.clone();
+    let mut cfg = inbx_config::load()?;
+    cfg.accounts.push(acct);
+    inbx_config::store_password(&name, password)?;
+    inbx_config::save(&cfg)?;
+    Ok(name)
 }
 
 /// Route key events when an `active_picker` overlay is open.

@@ -17,6 +17,7 @@ mod app;
 mod keys;
 mod picker;
 mod render;
+mod wizard;
 
 use app::App;
 
@@ -101,6 +102,10 @@ async fn event_loop(term: &mut Term, app: &mut App) -> Result<()> {
             }
             if app.ical.is_some() {
                 keys::handle_ical_key(app, key).await?;
+                continue;
+            }
+            if app.active_wizard.is_some() {
+                keys::handle_wizard_key(app, key).await?;
                 continue;
             }
             if keys::handle_list_key(app, key).await? {
