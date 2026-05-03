@@ -91,6 +91,7 @@ inbx-composer = { path = "crates/inbx-composer" }
 hjkl-editor = "0.3"
 hjkl-buffer = { version = "0.3", features = ["ratatui"] }
 hjkl-engine = { version = "0.3", features = ["crossterm"] }
+hjkl-clipboard = "0.5"
 
 mail-builder = "0.4"
 

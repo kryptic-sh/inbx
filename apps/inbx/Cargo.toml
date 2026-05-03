@@ -24,6 +24,7 @@ inbx-ical.workspace = true
 inbx-composer.workspace = true
 hjkl-editor.workspace = true
 hjkl-engine.workspace = true
+hjkl-clipboard.workspace = true
 mail-parser.workspace = true
 mail-builder.workspace = true
 notify-rust.workspace = true

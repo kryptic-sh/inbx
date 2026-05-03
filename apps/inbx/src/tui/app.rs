@@ -1,4 +1,5 @@
 use anyhow::Result;
+use hjkl_clipboard::{Clipboard, MimeType as ClipMime, Selection};
 use inbx_composer::{Composer, Identity};
 use inbx_config::Account;
 use inbx_contacts::{Contact, ContactsStore};
@@ -7,6 +8,14 @@ use ratatui::widgets::ListState;
 
 use super::ACTIVE_THEME;
 use super::render::render_path;
+
+/// Tracks the leader-key (`<Space>`) prefix state. Reset to `None` after any
+/// second key is consumed or on an unrecognised chord.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum LeaderState {
+    /// `<Space>` was pressed; waiting for the chord key.
+    Pending,
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Pane {
@@ -51,6 +60,9 @@ pub(super) struct App {
     pub(super) msg_state: ListState,
     pub(super) pane: Pane,
     pub(super) pending_g: bool,
+    /// Leader-key (`<Space>`) prefix state. `Some(Pending)` after the first
+    /// `<Space>` press; cleared after the chord is consumed or cancelled.
+    pub(super) pending_leader: Option<LeaderState>,
     pub(super) body: String,
     pub(super) body_scroll: u16,
     pub(super) status: String,
@@ -235,6 +247,7 @@ impl App {
             msg_state: ListState::default(),
             pane: Pane::Folders,
             pending_g: false,
+            pending_leader: None,
             body: String::new(),
             body_scroll: 0,
             status: String::new(),
@@ -532,6 +545,44 @@ impl App {
     pub(super) fn close_composer(&mut self) {
         self.composer = None;
         self.status = "draft discarded".into();
+    }
+
+    /// Copy the focused editor's full text to the system clipboard (`<leader>y`).
+    pub(super) fn yank_to_clipboard(&mut self) {
+        let Some(composer) = self.composer.as_mut() else {
+            self.status = "yank: no composer open".into();
+            return;
+        };
+        let text = composer.focused_editor().content();
+        match Clipboard::new() {
+            Ok(cb) => match cb.set(Selection::Clipboard, ClipMime::Text, text.as_bytes()) {
+                Ok(()) => self.status = format!("yanked {} bytes to clipboard", text.len()),
+                Err(e) => self.status = format!("yank failed: {e}"),
+            },
+            Err(e) => self.status = format!("clipboard unavailable: {e}"),
+        }
+    }
+
+    /// Replace the focused editor's text with the system clipboard contents (`<leader>p`).
+    pub(super) fn put_from_clipboard(&mut self) {
+        let Some(composer) = self.composer.as_mut() else {
+            self.status = "put: no composer open".into();
+            return;
+        };
+        match Clipboard::new() {
+            Ok(cb) => match cb.get(Selection::Clipboard, ClipMime::Text) {
+                Ok(bytes) => match String::from_utf8(bytes) {
+                    Ok(text) => {
+                        let len = text.len();
+                        composer.focused_editor().set_content(&text);
+                        self.status = format!("put {len} bytes from clipboard");
+                    }
+                    Err(_) => self.status = "put: clipboard data is not valid UTF-8".into(),
+                },
+                Err(e) => self.status = format!("put failed: {e}"),
+            },
+            Err(e) => self.status = format!("clipboard unavailable: {e}"),
+        }
     }
 
     pub(super) async fn toggle_seen(&mut self) -> Result<()> {

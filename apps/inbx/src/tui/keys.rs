@@ -1,7 +1,7 @@
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use super::app::{App, IcalResponse, MovePickerState, Pane};
+use super::app::{App, IcalResponse, LeaderState, MovePickerState, Pane};
 
 /// Returns true to quit the TUI.
 pub(super) async fn handle_list_key(app: &mut App, key: KeyEvent) -> Result<bool> {
@@ -268,6 +268,31 @@ pub(super) async fn handle_composer_key(app: &mut App, key: KeyEvent) -> Result<
         }
         return Ok(false);
     }
+
+    // Leader-key chord: <Space> arms the prefix; a second key dispatches.
+    // <Space>y — yank focused editor text to system clipboard.
+    // <Space>p — replace focused editor text from system clipboard.
+    if app.pending_leader == Some(LeaderState::Pending) {
+        app.pending_leader = None;
+        match key.code {
+            KeyCode::Char('y') => {
+                app.yank_to_clipboard();
+                return Ok(false);
+            }
+            KeyCode::Char('p') => {
+                app.put_from_clipboard();
+                return Ok(false);
+            }
+            _ => {
+                // Unrecognised chord — fall through and forward the key to the editor.
+            }
+        }
+    }
+    if key.code == KeyCode::Char(' ') && key.modifiers.is_empty() {
+        app.pending_leader = Some(LeaderState::Pending);
+        return Ok(false);
+    }
+
     if let Some(c) = app.composer.as_mut() {
         c.focused_editor().handle_key(key);
     }

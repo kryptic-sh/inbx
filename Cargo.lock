@@ -2067,6 +2067,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "hjkl-clipboard"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9f1815bcd2fb306c7a2be2e8af6eed1d1c9ab01a6ba1ed092e4dda5ca2fa9f09"
+dependencies = [
+ "async-trait",
+ "bitflags 2.11.1",
+ "libc",
+ "miniz_oxide",
+]
+
+[[package]]
 name = "hjkl-config"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2457,6 +2469,7 @@ dependencies = [
  "crossterm 0.29.0",
  "directories",
  "futures-util",
+ "hjkl-clipboard",
  "hjkl-editor",
  "hjkl-engine",
  "inbx-composer",
@@ -2483,6 +2496,7 @@ name = "inbx-composer"
 version = "0.1.2"
 dependencies = [
  "hjkl-buffer",
+ "hjkl-clipboard",
  "hjkl-editor",
  "inbx-config",
  "inbx-core",

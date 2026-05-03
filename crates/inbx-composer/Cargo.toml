@@ -18,3 +18,4 @@ mail-parser.workspace = true
 mail-builder.workspace = true
 hjkl-editor.workspace = true
 hjkl-buffer.workspace = true
+hjkl-clipboard.workspace = true
