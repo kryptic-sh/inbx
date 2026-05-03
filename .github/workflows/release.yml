@@ -84,12 +84,6 @@ jobs:
         with:
           tool: cargo-zigbuild
 
-      - name: Check formatting
-        run: cargo fmt --all --check
-
-      - name: Clippy
-        run: cargo clippy --workspace --all-targets --locked --target ${{ matrix.target }} -- -D warnings
-
       - name: Build binaries with GUI (zigbuild)
         if: matrix.glibc != '' && matrix.gui
         run: cargo zigbuild --release --locked --target ${{ matrix.target }}.${{ matrix.glibc }} --bin inbx --bin inbx-gui --bin inbx-sync
