@@ -1,5 +1,7 @@
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use hjkl_engine::{Input as EngineInput, Key as EngineKey};
+use inbx_composer::FocusedEditor;
 
 use super::app::{App, IcalResponse, LeaderState, MovePickerState, Pane};
 
@@ -294,9 +296,42 @@ pub(super) async fn handle_composer_key(app: &mut App, key: KeyEvent) -> Result<
     }
 
     if let Some(c) = app.composer.as_mut() {
-        c.focused_editor().handle_key(key);
+        match c.focused_editor() {
+            FocusedEditor::Body(ed) => {
+                ed.handle_key(key);
+            }
+            FocusedEditor::Header(f) => {
+                f.handle_input(crossterm_key_to_engine_input(key));
+            }
+        }
     }
     Ok(false)
+}
+
+/// Convert a crossterm `KeyEvent` to an `hjkl_engine::Input`.
+/// Mirrors the `From<KeyEvent> for Input` impl in hjkl-engine (crossterm feature).
+fn crossterm_key_to_engine_input(key: KeyEvent) -> EngineInput {
+    let k = match key.code {
+        KeyCode::Char(c) => EngineKey::Char(c),
+        KeyCode::Backspace => EngineKey::Backspace,
+        KeyCode::Delete => EngineKey::Delete,
+        KeyCode::Enter => EngineKey::Enter,
+        KeyCode::Left => EngineKey::Left,
+        KeyCode::Right => EngineKey::Right,
+        KeyCode::Up => EngineKey::Up,
+        KeyCode::Down => EngineKey::Down,
+        KeyCode::Home => EngineKey::Home,
+        KeyCode::End => EngineKey::End,
+        KeyCode::Tab => EngineKey::Tab,
+        KeyCode::Esc => EngineKey::Esc,
+        _ => EngineKey::Null,
+    };
+    EngineInput {
+        key: k,
+        ctrl: key.modifiers.contains(KeyModifiers::CONTROL),
+        alt: key.modifiers.contains(KeyModifiers::ALT),
+        shift: key.modifiers.contains(KeyModifiers::SHIFT),
+    }
 }
 
 pub(super) async fn handle_outbox_key(app: &mut App, key: KeyEvent) -> Result<()> {

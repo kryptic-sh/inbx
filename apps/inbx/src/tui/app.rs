@@ -1,6 +1,6 @@
 use anyhow::Result;
 use hjkl_clipboard::{Clipboard, MimeType as ClipMime, Selection};
-use inbx_composer::{Composer, Identity};
+use inbx_composer::{Composer, FocusedEditor, Identity};
 use inbx_config::Account;
 use inbx_contacts::{Contact, ContactsStore};
 use inbx_store::{FolderRow, MessageRow, OutboxRow, Store};
@@ -304,7 +304,7 @@ impl App {
 
     pub(super) fn compose_to_contact(&mut self, email: &str) {
         let mut composer = Composer::new_blank(Identity::from_account(&self.account));
-        composer.to.set_content(email);
+        composer.set_to(email);
         self.composer = Some(composer);
         self.status = format!("compose: to {email}");
     }
@@ -553,7 +553,10 @@ impl App {
             self.status = "yank: no composer open".into();
             return;
         };
-        let text = composer.focused_editor().content();
+        let text = match composer.focused_editor() {
+            FocusedEditor::Body(ed) => ed.content(),
+            FocusedEditor::Header(f) => f.text(),
+        };
         match Clipboard::new() {
             Ok(cb) => match cb.set(Selection::Clipboard, ClipMime::Text, text.as_bytes()) {
                 Ok(()) => self.status = format!("yanked {} bytes to clipboard", text.len()),
@@ -574,7 +577,10 @@ impl App {
                 Ok(bytes) => match String::from_utf8(bytes) {
                     Ok(text) => {
                         let len = text.len();
-                        composer.focused_editor().set_content(&text);
+                        match composer.focused_editor() {
+                            FocusedEditor::Body(ed) => ed.set_content(&text),
+                            FocusedEditor::Header(f) => f.set_text(&text),
+                        }
                         self.status = format!("put {len} bytes from clipboard");
                     }
                     Err(_) => self.status = "put: clipboard data is not valid UTF-8".into(),

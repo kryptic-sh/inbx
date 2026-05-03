@@ -2117,6 +2117,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "hjkl-form"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "05640cecfd86b4baeb16d2423d3d23ea4f8ed30bd74a3a9e29e65e2d285ca621"
+dependencies = [
+ "hjkl-buffer",
+ "hjkl-engine",
+]
+
+[[package]]
 name = "hkdf"
 version = "0.12.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2498,6 +2508,7 @@ dependencies = [
  "hjkl-buffer",
  "hjkl-clipboard",
  "hjkl-editor",
+ "hjkl-form",
  "inbx-config",
  "inbx-core",
  "mail-builder",

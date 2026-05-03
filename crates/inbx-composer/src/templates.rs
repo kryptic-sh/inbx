@@ -105,7 +105,7 @@ pub fn from_template(identity: Identity, account: &str, name: &str) -> Result<Co
     let mut composer = Composer::new_blank(identity);
 
     if let Some(s) = parsed.subject() {
-        composer.subject.set_content(s);
+        composer.set_subject(s);
     }
     if let Some(group) = parsed.to() {
         let joined = group
@@ -114,7 +114,7 @@ pub fn from_template(identity: Identity, account: &str, name: &str) -> Result<Co
             .collect::<Vec<_>>()
             .join(", ");
         if !joined.is_empty() {
-            composer.to.set_content(&joined);
+            composer.set_to(&joined);
         }
     }
     if let Some(group) = parsed.cc() {
@@ -124,7 +124,7 @@ pub fn from_template(identity: Identity, account: &str, name: &str) -> Result<Co
             .collect::<Vec<_>>()
             .join(", ");
         if !joined.is_empty() {
-            composer.cc.set_content(&joined);
+            composer.set_cc(&joined);
         }
     }
     if let Some(group) = parsed.bcc() {
@@ -134,7 +134,7 @@ pub fn from_template(identity: Identity, account: &str, name: &str) -> Result<Co
             .collect::<Vec<_>>()
             .join(", ");
         if !joined.is_empty() {
-            composer.bcc.set_content(&joined);
+            composer.set_bcc(&joined);
         }
     }
     if let Some(body) = parsed.body_text(0) {

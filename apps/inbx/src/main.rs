@@ -1006,7 +1006,7 @@ fn rebuild_with_attachments(
     let mut composer =
         inbx_composer::Composer::new_blank(inbx_composer::Identity::from_account(account));
     if let Some(s) = parsed.subject() {
-        composer.subject.set_content(s);
+        composer.set_subject(s);
     }
     if let Some(g) = parsed.to() {
         let s = g
@@ -1015,7 +1015,7 @@ fn rebuild_with_attachments(
             .collect::<Vec<_>>()
             .join(", ");
         if !s.is_empty() {
-            composer.to.set_content(&s);
+            composer.set_to(&s);
         }
     }
     if let Some(g) = parsed.cc() {
@@ -1025,7 +1025,7 @@ fn rebuild_with_attachments(
             .collect::<Vec<_>>()
             .join(", ");
         if !s.is_empty() {
-            composer.cc.set_content(&s);
+            composer.set_cc(&s);
         }
     }
     if let Some(g) = parsed.bcc() {
@@ -1035,7 +1035,7 @@ fn rebuild_with_attachments(
             .collect::<Vec<_>>()
             .join(", ");
         if !s.is_empty() {
-            composer.bcc.set_content(&s);
+            composer.set_bcc(&s);
         }
     }
     if let Some(b) = parsed.body_text(0) {

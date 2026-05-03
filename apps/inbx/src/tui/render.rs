@@ -332,14 +332,10 @@ fn draw_composer(f: &mut ratatui::Frame, composer: &Composer, status: &str, area
 }
 
 fn place_cursor(f: &mut ratatui::Frame, composer: &Composer, field: ComposerField, area: Rect) {
-    let editor = match field {
-        ComposerField::Subject => &composer.subject,
-        ComposerField::To => &composer.to,
-        ComposerField::Cc => &composer.cc,
-        ComposerField::Bcc => &composer.bcc,
-        ComposerField::Body => &composer.body,
+    let (row, col) = match field {
+        ComposerField::Body => composer.body.cursor(),
+        header => composer.header_cursor(header),
     };
-    let (row, col) = editor.cursor();
     // Account for the surrounding border (1px) on every side.
     let inner_w = area.width.saturating_sub(2);
     let inner_h = area.height.saturating_sub(2);
@@ -353,16 +349,12 @@ fn place_cursor(f: &mut ratatui::Frame, composer: &Composer, field: ComposerFiel
 
 fn composer_field_text(c: &Composer, f: ComposerField) -> String {
     match f {
-        ComposerField::Subject => c.subject_text(),
-        ComposerField::To => c.to_text(),
-        ComposerField::Cc => editor_text_ref(&c.cc),
-        ComposerField::Bcc => editor_text_ref(&c.bcc),
+        ComposerField::Subject => c.subject(),
+        ComposerField::To => c.to(),
+        ComposerField::Cc => c.cc(),
+        ComposerField::Bcc => c.bcc(),
         ComposerField::Body => c.body_text(),
     }
-}
-
-fn editor_text_ref(ed: &hjkl_editor::runtime::Editor) -> String {
-    ed.content().trim_end_matches('\n').to_string()
 }
 
 fn draw_field(f: &mut ratatui::Frame, label: &str, value: String, focused: bool, area: Rect) {

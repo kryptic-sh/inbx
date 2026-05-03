@@ -1,10 +1,12 @@
 //! Message composer wrapping hjkl-editor's modal vim runtime.
 //!
-//! Separate Editor instances back the body and each single-line header
-//! so the user gets full vim motions everywhere. MIME assembly happens
-//! at send time via mail-builder. Identities + signatures travel with
-//! the composer instance; threading metadata for replies is captured
-//! from the original message and emitted on the outgoing headers.
+//! Header fields (Subject / To / Cc / Bcc) are backed by a
+//! [`hjkl_form::Form`] of `SingleLineText` fields. The body stays as a
+//! standalone `hjkl_editor::runtime::Editor` (multi-line, not a form field).
+//! MIME assembly happens at send time via mail-builder. Identities +
+//! signatures travel with the composer instance; threading metadata for
+//! replies is captured from the original message and emitted on the
+//! outgoing headers.
 
 pub mod identity;
 pub mod templates;
@@ -12,10 +14,17 @@ pub mod templates;
 use hjkl_clipboard::{Clipboard, MimeType as ClipMime, Selection};
 use hjkl_editor::buffer::Buffer as EditorBuffer;
 use hjkl_editor::runtime::{DefaultHost, Editor, KeybindingMode, Options};
+use hjkl_form::{Field as FormField, FieldMeta, Form, TextFieldEditor};
 use mail_builder::MessageBuilder;
 use mail_parser::{HeaderValue, MessageParser};
 
 pub use identity::Identity;
+
+/// Field indices inside `headers: Form`. Fixed at construction.
+const SUBJECT_IDX: usize = 0;
+const TO_IDX: usize = 1;
+const CC_IDX: usize = 2;
+const BCC_IDX: usize = 3;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -70,15 +79,22 @@ impl Field {
     }
 }
 
-/// One message in flight. Header fields use a single-line vim editor;
-/// the body uses a multi-line editor with the identity's signature
-/// pre-populated below the cursor.
+/// A discriminated reference to the currently-focused editable surface.
+/// Callers that previously used a bare `&mut Editor` now match on this.
+pub enum FocusedEditor<'a> {
+    /// A header field backed by a [`TextFieldEditor`] inside the form.
+    Header(&'a mut TextFieldEditor),
+    /// The multi-line body editor.
+    Body(&'a mut Editor),
+}
+
+/// One message in flight. Header fields live inside a [`Form`] so the
+/// existing hjkl-form FSM drives focus and validation.  The body stays
+/// as a standalone multi-line `hjkl_editor::runtime::Editor`.
 pub struct Composer {
     pub identity: Identity,
-    pub subject: Editor,
-    pub to: Editor,
-    pub cc: Editor,
-    pub bcc: Editor,
+    /// Subject / To / Cc / Bcc as `SingleLineText` fields in order.
+    pub headers: Form,
     pub body: Editor,
     pub focus: Field,
     pub in_reply_to: Option<String>,
@@ -93,18 +109,61 @@ pub struct Attachment {
     pub bytes: Vec<u8>,
 }
 
+// ── helpers to borrow a named field out of the Form ──────────────────────────
+
+fn header_text(form: &Form, idx: usize) -> String {
+    match form.fields.get(idx) {
+        Some(FormField::SingleLineText(f)) => f.text().trim_end_matches('\n').to_string(),
+        _ => String::new(),
+    }
+}
+
+fn set_header_text(form: &mut Form, idx: usize, text: &str) {
+    if let Some(FormField::SingleLineText(f)) = form.fields.get_mut(idx) {
+        f.set_text(text);
+    }
+}
+
+fn header_cursor(form: &Form, idx: usize) -> (usize, usize) {
+    match form.fields.get(idx) {
+        Some(FormField::SingleLineText(f)) => f.cursor(),
+        _ => (0, 0),
+    }
+}
+
+/// Build the four-field header form (Subject/To/Cc/Bcc).
+fn new_header_form() -> Form {
+    Form::new()
+        .with_field(FormField::SingleLineText(TextFieldEditor::with_meta(
+            FieldMeta::new("subject"),
+            1,
+        )))
+        .with_field(FormField::SingleLineText(TextFieldEditor::with_meta(
+            FieldMeta::new("to"),
+            1,
+        )))
+        .with_field(FormField::SingleLineText(TextFieldEditor::with_meta(
+            FieldMeta::new("cc"),
+            1,
+        )))
+        .with_field(FormField::SingleLineText(TextFieldEditor::with_meta(
+            FieldMeta::new("bcc"),
+            1,
+        )))
+}
+
 impl Composer {
     pub fn new_blank(identity: Identity) -> Self {
         let mut body = new_vim_editor();
         if let Some(sig) = identity.signature_block() {
             body.set_content(&sig);
         }
+        let mut headers = new_header_form();
+        // Default focus is To (index 1).
+        headers.set_focus(TO_IDX);
         Self {
             identity,
-            subject: new_vim_editor(),
-            to: new_vim_editor(),
-            cc: new_vim_editor(),
-            bcc: new_vim_editor(),
+            headers,
             body,
             focus: Field::To,
             in_reply_to: None,
@@ -131,9 +190,7 @@ impl Composer {
 
         // Subject.
         let subject = parsed.subject().unwrap_or_default();
-        composer
-            .subject
-            .set_content(&prefix_subject(subject, "Re: "));
+        composer.set_subject(&prefix_subject(subject, "Re: "));
 
         // Recipients.
         let from_addr = parsed
@@ -142,7 +199,7 @@ impl Composer {
             .and_then(|a| a.address())
             .map(|s| s.to_string())
             .unwrap_or_default();
-        composer.to.set_content(&from_addr);
+        composer.set_to(&from_addr);
         if reply_all {
             let mut cc: Vec<String> = Vec::new();
             for group in [parsed.to(), parsed.cc()].into_iter().flatten() {
@@ -156,7 +213,7 @@ impl Composer {
                     }
                 }
             }
-            composer.cc.set_content(&cc.join(", "));
+            composer.set_cc(&cc.join(", "));
         }
 
         // Quoted body.
@@ -189,9 +246,7 @@ impl Composer {
         let mut composer = Self::new_blank(identity);
 
         let subject = parsed.subject().unwrap_or_default();
-        composer
-            .subject
-            .set_content(&prefix_subject(subject, "Fwd: "));
+        composer.set_subject(&prefix_subject(subject, "Fwd: "));
 
         let from_addr = parsed
             .from()
@@ -221,30 +276,50 @@ impl Composer {
         Ok(composer)
     }
 
-    pub fn focus_next(&mut self) {
-        self.focus = self.focus.next();
+    // ── header accessors ─────────────────────────────────────────────────────
+
+    pub fn subject(&self) -> String {
+        header_text(&self.headers, SUBJECT_IDX)
     }
 
-    pub fn focus_prev(&mut self) {
-        self.focus = self.focus.prev();
+    pub fn to(&self) -> String {
+        header_text(&self.headers, TO_IDX)
     }
 
-    pub fn editor_for(&mut self, field: Field) -> &mut Editor {
-        match field {
-            Field::Subject => &mut self.subject,
-            Field::To => &mut self.to,
-            Field::Cc => &mut self.cc,
-            Field::Bcc => &mut self.bcc,
-            Field::Body => &mut self.body,
-        }
+    pub fn cc(&self) -> String {
+        header_text(&self.headers, CC_IDX)
     }
 
-    pub fn focused_editor(&mut self) -> &mut Editor {
-        self.editor_for(self.focus)
+    pub fn bcc(&self) -> String {
+        header_text(&self.headers, BCC_IDX)
     }
+
+    pub fn set_subject(&mut self, s: &str) {
+        set_header_text(&mut self.headers, SUBJECT_IDX, s);
+    }
+
+    pub fn set_to(&mut self, s: &str) {
+        set_header_text(&mut self.headers, TO_IDX, s);
+    }
+
+    pub fn set_cc(&mut self, s: &str) {
+        set_header_text(&mut self.headers, CC_IDX, s);
+    }
+
+    pub fn set_bcc(&mut self, s: &str) {
+        set_header_text(&mut self.headers, BCC_IDX, s);
+    }
+
+    /// Cursor position for a header field. Used by the render layer.
+    pub fn header_cursor(&self, field: Field) -> (usize, usize) {
+        let idx = field_to_header_idx(field);
+        header_cursor(&self.headers, idx)
+    }
+
+    // ── legacy text helpers (used by send/draft paths) ────────────────────────
 
     pub fn subject_text(&self) -> String {
-        editor_text(&self.subject)
+        self.subject()
     }
 
     pub fn body_text(&self) -> String {
@@ -252,7 +327,40 @@ impl Composer {
     }
 
     pub fn to_text(&self) -> String {
-        editor_text(&self.to)
+        self.to()
+    }
+
+    // ── focus helpers ─────────────────────────────────────────────────────────
+
+    pub fn focus_next(&mut self) {
+        self.focus = self.focus.next();
+        self.sync_form_focus();
+    }
+
+    pub fn focus_prev(&mut self) {
+        self.focus = self.focus.prev();
+        self.sync_form_focus();
+    }
+
+    /// Keep `headers.focused` in sync with `self.focus` for header fields.
+    fn sync_form_focus(&mut self) {
+        if let Some(idx) = field_to_header_idx_opt(self.focus) {
+            self.headers.set_focus(idx);
+        }
+    }
+
+    /// Return a mutable reference to the currently-focused editing surface.
+    pub fn focused_editor(&mut self) -> FocusedEditor<'_> {
+        match self.focus {
+            Field::Body => FocusedEditor::Body(&mut self.body),
+            header => {
+                let idx = field_to_header_idx(header);
+                match self.headers.fields.get_mut(idx) {
+                    Some(FormField::SingleLineText(f)) => FocusedEditor::Header(f),
+                    _ => FocusedEditor::Body(&mut self.body),
+                }
+            }
+        }
     }
 
     /// Attach a file from disk. Content-type sniffed from extension.
@@ -317,16 +425,16 @@ impl Composer {
             _ => self.identity.email.clone(),
         };
         out.push_str(&format!("From: {from}\n"));
-        out.push_str(&format!("To: {}\n", editor_text(&self.to)));
-        let cc = editor_text(&self.cc);
+        out.push_str(&format!("To: {}\n", self.to()));
+        let cc = self.cc();
         if !cc.is_empty() {
             out.push_str(&format!("Cc: {cc}\n"));
         }
-        let bcc = editor_text(&self.bcc);
+        let bcc = self.bcc();
         if !bcc.is_empty() {
             out.push_str(&format!("Bcc: {bcc}\n"));
         }
-        out.push_str(&format!("Subject: {}\n", editor_text(&self.subject)));
+        out.push_str(&format!("Subject: {}\n", self.subject()));
         if let Some(mid) = &self.in_reply_to {
             out.push_str(&format!("In-Reply-To: <{mid}>\n"));
         }
@@ -350,7 +458,7 @@ impl Composer {
     /// Assemble an RFC 5322 wire form via mail-builder. Returns the raw
     /// bytes the SMTP/Graph/JMAP send paths can dispatch as-is.
     pub fn to_mime(&self) -> Result<Vec<u8>> {
-        let to = parse_addresses(&editor_text(&self.to));
+        let to = parse_addresses(&self.to());
         if to.is_empty() {
             return Err(Error::Missing("To"));
         }
@@ -360,14 +468,14 @@ impl Composer {
         let mut builder = MessageBuilder::new()
             .from(from)
             .to(to)
-            .subject(editor_text(&self.subject))
+            .subject(self.subject())
             .text_body(editor_text(&self.body));
 
-        let cc = parse_addresses(&editor_text(&self.cc));
+        let cc = parse_addresses(&self.cc());
         if !cc.is_empty() {
             builder = builder.cc(cc);
         }
-        let bcc = parse_addresses(&editor_text(&self.bcc));
+        let bcc = parse_addresses(&self.bcc());
         if !bcc.is_empty() {
             builder = builder.bcc(bcc);
         }
@@ -390,6 +498,29 @@ impl Composer {
             .write_to_vec()
             .map_err(|_| Error::Missing("write"))?;
         Ok(bytes)
+    }
+}
+
+/// Map a `Field` variant for a header field to its index in `headers.fields`.
+/// Panics on `Field::Body` (not a form field).
+fn field_to_header_idx(field: Field) -> usize {
+    match field {
+        Field::Subject => SUBJECT_IDX,
+        Field::To => TO_IDX,
+        Field::Cc => CC_IDX,
+        Field::Bcc => BCC_IDX,
+        Field::Body => panic!("Body is not a header form field"),
+    }
+}
+
+/// Returns `Some(idx)` for header fields, `None` for `Body`.
+fn field_to_header_idx_opt(field: Field) -> Option<usize> {
+    match field {
+        Field::Subject => Some(SUBJECT_IDX),
+        Field::To => Some(TO_IDX),
+        Field::Cc => Some(CC_IDX),
+        Field::Bcc => Some(BCC_IDX),
+        Field::Body => None,
     }
 }
 
@@ -545,8 +676,8 @@ mod tests {
     #[test]
     fn to_mime_round_trip() {
         let mut c = Composer::new_blank(id());
-        c.subject.set_content("Hello");
-        c.to.set_content("bob@x.com");
+        c.set_subject("Hello");
+        c.set_to("bob@x.com");
         c.body.set_content("hi there");
         let raw = c.to_mime().unwrap();
         let s = std::str::from_utf8(&raw).unwrap();
@@ -626,5 +757,49 @@ mod tests {
         assert_eq!(c.attachments[0].content_type, "text/plain");
         assert_eq!(c.attachments[0].filename, "clipboard-0.txt");
         assert_eq!(c.attachments[0].bytes, b"hello world");
+    }
+
+    #[test]
+    fn header_form_has_four_fields() {
+        let c = Composer::new_blank(id());
+        assert_eq!(c.headers.fields.len(), 4);
+    }
+
+    #[test]
+    fn set_and_get_headers_round_trip() {
+        let mut c = Composer::new_blank(id());
+        c.set_subject("Test Subject");
+        c.set_to("alice@example.com");
+        c.set_cc("bob@example.com");
+        c.set_bcc("carol@example.com");
+        assert_eq!(c.subject(), "Test Subject");
+        assert_eq!(c.to(), "alice@example.com");
+        assert_eq!(c.cc(), "bob@example.com");
+        assert_eq!(c.bcc(), "carol@example.com");
+    }
+
+    #[test]
+    fn focus_next_syncs_form_focus() {
+        let mut c = Composer::new_blank(id());
+        // Default focus is To (idx 1).
+        assert_eq!(c.focus, Field::To);
+        assert_eq!(c.headers.focused(), TO_IDX);
+        c.focus_next();
+        assert_eq!(c.focus, Field::Cc);
+        assert_eq!(c.headers.focused(), CC_IDX);
+    }
+
+    #[test]
+    fn focused_editor_returns_body_when_body_focused() {
+        let mut c = Composer::new_blank(id());
+        c.focus = Field::Body;
+        matches!(c.focused_editor(), FocusedEditor::Body(_));
+    }
+
+    #[test]
+    fn focused_editor_returns_header_when_header_focused() {
+        let mut c = Composer::new_blank(id());
+        c.focus = Field::Subject;
+        matches!(c.focused_editor(), FocusedEditor::Header(_));
     }
 }
