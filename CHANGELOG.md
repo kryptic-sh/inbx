@@ -8,6 +8,17 @@ patch bumps.
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-05-03
+
+### Fixed
+
+- Release workflow now adds the matrix target std explicitly via
+  `rustup target add` after the `dtolnay/rust-toolchain` step. The action's
+  `targets:` input was not actually adding `x86_64-apple-darwin` std on the
+  arm64 macOS runner — `rustup toolchain install` saw the toolchain as
+  already-installed and skipped the target. The Intel-mac binary failed to build
+  in 0.1.0 and 0.1.1 as a result.
+
 ## [0.1.1] - 2026-05-03
 
 ### Fixed
@@ -108,6 +119,7 @@ patch bumps.
   Actions release-plz workflow (publish gated off until first dry-run pass
   clears).
 
-[Unreleased]: https://github.com/kryptic-sh/inbx/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/kryptic-sh/inbx/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/kryptic-sh/inbx/releases/tag/v0.1.2
 [0.1.1]: https://github.com/kryptic-sh/inbx/releases/tag/v0.1.1
 [0.1.0]: https://github.com/kryptic-sh/inbx/releases/tag/v0.1.0
