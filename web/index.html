@@ -403,6 +403,13 @@
         color: var(--fg-muted);
         pointer-events: none;
       }
+      .term pre .ok {
+        color: var(--accent);
+      }
+      .term pre .cm {
+        color: var(--fg-muted);
+        font-style: italic;
+      }
       .term .body {
         font-family: var(--mono);
         font-size: 13px;
@@ -717,6 +724,7 @@
       <div class="links">
         <a href="#why">why</a>
         <a href="#providers">providers</a>
+        <a href="#install">install</a>
         <a
           href="https://github.com/kryptic-sh/inbx/blob/main/CHANGELOG.md"
           target="_blank"
@@ -931,6 +939,54 @@
               the server speaks it.
             </div>
           </div>
+        </div>
+      </section>
+
+      <section id="install">
+        <h2>install</h2>
+        <h3>Prebuilt binaries on every tagged release.</h3>
+        <p style="color: var(--fg-muted); margin: 0 0 20px">
+          Linux (x86_64) — .tar.gz. macOS (Apple Silicon) — .tar.gz. Windows
+          (x64) — .zip. SHA-256 sidecars on every artifact. More targets land as
+          the workspace stabilises.
+        </p>
+        <div class="cta">
+          <a
+            class="btn primary"
+            href="https://github.com/kryptic-sh/inbx/releases/latest"
+            target="_blank"
+            rel="noopener"
+            >latest release →</a
+          >
+          <a
+            class="btn"
+            href="https://github.com/kryptic-sh/inbx/releases"
+            target="_blank"
+            rel="noopener"
+            >all releases ↗</a
+          >
+        </div>
+        <div class="term" style="margin-top: 20px">
+          <div class="chrome">
+            <span class="dot r"></span><span class="dot y"></span
+            ><span class="dot g"></span>
+            <span class="title">inbx — from source</span>
+          </div>
+          <pre
+            style="
+              margin: 0;
+              padding: 14px 16px;
+              font-size: 13px;
+              line-height: 1.6;
+              overflow-x: auto;
+              color: var(--fg);
+              font-family: var(--mono);
+            "
+          ><span class="ok">$</span> git clone https://github.com/kryptic-sh/inbx
+<span class="ok">$</span> cd inbx
+<span class="ok">$</span> cargo build --release
+
+<span class="cm"># binaries in target/release/{inbx,inbx-gui,inbx-sync}</span></pre>
         </div>
       </section>
     </main>
