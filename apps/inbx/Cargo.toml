@@ -27,6 +27,7 @@ hjkl-engine.workspace = true
 hjkl-clipboard.workspace = true
 hjkl-form.workspace = true
 hjkl-picker.workspace = true
+hjkl-ratatui.workspace = true
 mail-parser.workspace = true
 mail-builder.workspace = true
 notify-rust.workspace = true

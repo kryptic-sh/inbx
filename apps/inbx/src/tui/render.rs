@@ -1,4 +1,5 @@
 use hjkl_form::{Field as FormField, FormMode};
+use hjkl_ratatui::spinner;
 use inbx_composer::{Composer, Field as ComposerField};
 use inbx_config::theme::{Rgb, Theme};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -220,6 +221,7 @@ fn draw_status(f: &mut ratatui::Frame, app: &App, area: Rect) {
         last_sync_unix: app.last_sync_unix,
         now_unix: now,
         message: app.status.as_str(),
+        busy: app.busy,
     };
     let text = format_status_line(&ctx);
     let t = theme();
@@ -239,6 +241,8 @@ pub(super) struct StatusCtx<'a> {
     pub(super) last_sync_unix: Option<i64>,
     pub(super) now_unix: i64,
     pub(super) message: &'a str,
+    /// When true, prefix the message with an animated spinner glyph.
+    pub(super) busy: bool,
 }
 
 /// Build the persistent status-line string. Format is
@@ -265,6 +269,8 @@ pub(super) fn format_status_line(ctx: &StatusCtx<'_>) -> String {
     };
     let trailing = if ctx.message.is_empty() {
         String::new()
+    } else if ctx.busy {
+        format!("  {} {}", spinner::frame(), ctx.message)
     } else {
         format!("  {}", ctx.message)
     };
@@ -885,6 +891,7 @@ mod tests {
             last_sync_unix: None,
             now_unix: 1_000,
             message: "",
+            busy: false,
         }
     }
 

@@ -2183,6 +2183,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "hjkl-ratatui"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e68aec168ae29d9b8cf3ff9d13057e9d608223d7ce190b24b864f24b43d2e14f"
+dependencies = [
+ "crossterm 0.29.0",
+ "hjkl-engine",
+ "hjkl-form",
+ "ratatui 0.30.0",
+]
+
+[[package]]
 name = "hkdf"
 version = "0.12.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2556,6 +2568,7 @@ dependencies = [
  "hjkl-engine",
  "hjkl-form",
  "hjkl-picker",
+ "hjkl-ratatui",
  "inbx-composer",
  "inbx-config",
  "inbx-contacts",

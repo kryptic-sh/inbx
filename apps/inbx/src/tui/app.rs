@@ -98,6 +98,10 @@ pub(super) struct App {
     pub(super) active_picker: Option<ActivePicker>,
     /// Active account-creation wizard. `None` when not open.
     pub(super) active_wizard: Option<super::wizard::AccountWizard>,
+    /// True while an async operation (manual sync, fetch, outbox drain) is
+    /// in flight. The event loop forces redraws at 120 ms while busy so the
+    /// spinner in the status line animates.
+    pub(super) busy: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -279,6 +283,7 @@ impl App {
             last_sync_unix: None,
             active_picker: None,
             active_wizard: None,
+            busy: false,
         };
         app.reload_messages().await?;
         Ok(app)
@@ -653,6 +658,7 @@ impl App {
             return Ok(());
         };
         self.status = format!("syncing {folder_name}…");
+        self.busy = true;
         let mut session = inbx_net::connect_imap(&self.account).await?;
         let (uidvalidity, rows) = inbx_net::fetch_headers(&mut session, &folder_name).await?;
         let prev = self.store.folder_uidvalidity(&folder_name).await?;
@@ -709,6 +715,7 @@ impl App {
         let _ = session.logout().await;
         self.reload_messages().await?;
         self.last_sync_unix = Some(now);
+        self.busy = false;
         self.status = format!(
             "synced {folder_name} ({} msgs, {new_count} new)",
             rows.len()
@@ -750,9 +757,11 @@ impl App {
             return Ok(());
         };
         self.status = format!("fetching body for uid {}…", msg.uid);
+        self.busy = true;
         let mut session = inbx_net::connect_imap(&self.account).await?;
         let bodies = inbx_net::fetch_bodies(&mut session, &folder_name, &[msg.uid as u32]).await?;
         let _ = session.logout().await;
+        self.busy = false;
         if let Some((uid, raw)) = bodies.into_iter().next() {
             let path = self.store.write_maildir(&folder_name, &raw, &msg.flags)?;
             self.store
@@ -1104,6 +1113,7 @@ impl App {
         let total = entries.len();
         let mut sent = 0usize;
         let mut failed = 0usize;
+        self.busy = true;
         for row in entries {
             match inbx_net::send_message(&self.account, &row.raw).await {
                 Ok(()) => {
@@ -1118,6 +1128,7 @@ impl App {
                 }
             }
         }
+        self.busy = false;
         self.reload_outbox().await?;
         self.status = format!("outbox drain: {sent}/{total} sent, {failed} failed");
         Ok(())

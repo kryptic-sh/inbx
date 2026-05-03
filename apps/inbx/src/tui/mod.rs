@@ -1,4 +1,5 @@
 use std::io::{Stdout, stdout};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use crossterm::event::{DisableMouseCapture, EnableMouseCapture, Event, EventStream};
@@ -12,6 +13,7 @@ use inbx_config::theme::Theme;
 use inbx_store::Store;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
+use tokio::time::timeout;
 
 mod app;
 mod keys;
@@ -61,7 +63,20 @@ async fn event_loop(term: &mut Term, app: &mut App) -> Result<()> {
     let mut events = EventStream::new();
     loop {
         term.draw(|f| render::draw(f, app))?;
-        let Some(ev) = events.next().await else {
+
+        // While an async operation is in flight, time-out at 120 ms so the
+        // spinner frame advances smoothly. Outside of busy state, block until
+        // the next event with no artificial wake-ups.
+        let maybe_ev = if app.busy {
+            match timeout(Duration::from_millis(120), events.next()).await {
+                Ok(inner) => inner,
+                Err(_) => continue, // timeout — redraw for spinner tick
+            }
+        } else {
+            events.next().await
+        };
+
+        let Some(ev) = maybe_ev else {
             break;
         };
         let ev = ev?;

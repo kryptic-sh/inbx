@@ -348,6 +348,14 @@ pub(super) async fn handle_composer_key(app: &mut App, key: KeyEvent) -> Result<
 
 /// Convert a crossterm `KeyEvent` to an `hjkl_engine::Input`.
 /// Mirrors the `From<KeyEvent> for Input` impl in hjkl-engine (crossterm feature).
+///
+/// # TODO
+/// `hjkl_ratatui::crossterm_bridge::crossterm_key_event_to_input` returns
+/// `hjkl_engine::PlannedInput` (the SPEC variant), while `hjkl_form` and
+/// `hjkl_editor` currently consume `hjkl_engine::Input` (the legacy runtime
+/// variant). No `From<PlannedInput> for Input` conversion exists in
+/// `hjkl-engine 0.3.3`. Replace this bespoke helper with the bridge function
+/// once `Input` and `PlannedInput` unify upstream.
 fn crossterm_key_to_engine_input(key: KeyEvent) -> EngineInput {
     let k = match key.code {
         KeyCode::Char(c) => EngineKey::Char(c),
