@@ -1,5 +1,8 @@
+use std::sync::{Arc, Mutex};
+
 use anyhow::Result;
 use hjkl_clipboard::{Clipboard, MimeType as ClipMime, Selection};
+use hjkl_picker::Picker;
 use inbx_composer::{Composer, FocusedEditor, Identity};
 use inbx_config::Account;
 use inbx_contacts::{Contact, ContactsStore};
@@ -15,6 +18,14 @@ use super::render::render_path;
 pub(super) enum LeaderState {
     /// `<Space>` was pressed; waiting for the chord key.
     Pending,
+}
+
+/// Which hjkl-picker overlay is currently open.
+pub(super) enum ActivePicker {
+    Folder(Picker, Arc<Mutex<Option<String>>>),
+    Account(Picker, Arc<Mutex<Option<String>>>),
+    Message(Picker, Arc<Mutex<Option<i64>>>),
+    Attachment(Picker, Arc<Mutex<Option<usize>>>, Vec<(String, Vec<u8>)>),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -83,6 +94,8 @@ pub(super) struct App {
     /// when no sync has run yet this session. Surfaced in the status line
     /// as a relative age (`12s`, `3m`, `1h`).
     pub(super) last_sync_unix: Option<i64>,
+    /// Active hjkl-picker overlay. `None` when no picker is open.
+    pub(super) active_picker: Option<ActivePicker>,
 }
 
 #[derive(Clone, Copy)]
@@ -262,6 +275,7 @@ impl App {
             ical: None,
             last_search: None,
             last_sync_unix: None,
+            active_picker: None,
         };
         app.reload_messages().await?;
         Ok(app)
@@ -936,6 +950,60 @@ impl App {
         Ok(())
     }
 
+    /// Open hjkl-picker folder overlay (`<Space>f`).
+    pub(super) fn open_folder_picker(&mut self) {
+        let (p, slot) = super::picker::folder_picker(self.folders.clone());
+        self.active_picker = Some(ActivePicker::Folder(p, slot));
+        self.status = "<Space>f folders: Enter pick · Esc cancel".into();
+    }
+
+    /// Open hjkl-picker account overlay (`<Space>b`).
+    pub(super) fn open_hjkl_account_picker(&mut self) -> Result<()> {
+        let cfg = inbx_config::load()?;
+        if cfg.accounts.is_empty() {
+            self.status = "no accounts configured".into();
+            return Ok(());
+        }
+        let (p, slot) = super::picker::account_picker(&cfg.accounts);
+        self.active_picker = Some(ActivePicker::Account(p, slot));
+        self.status = "<Space>b accounts: Enter pick · Esc cancel".into();
+        Ok(())
+    }
+
+    /// Open hjkl-picker message-jump overlay (`<Space>m`).
+    pub(super) fn open_message_picker(&mut self) {
+        let (p, slot) = super::picker::message_picker(self.messages.clone());
+        self.active_picker = Some(ActivePicker::Message(p, slot));
+        self.status = "<Space>m messages: Enter jump · Esc cancel".into();
+    }
+
+    /// Open hjkl-picker attachment overlay (`<Space>a`).
+    pub(super) fn open_attachment_picker(&mut self) {
+        let Some(msg) = self.current_message().cloned() else {
+            self.status = "no message selected".into();
+            return;
+        };
+        let Some(path) = msg.maildir_path else {
+            self.status = "no body fetched — press Enter or F first".into();
+            return;
+        };
+        let raw = match std::fs::read(&path) {
+            Ok(b) => b,
+            Err(e) => {
+                self.status = format!("read error: {e}");
+                return;
+            }
+        };
+        let parts = super::picker::extract_attachments(&raw);
+        if parts.is_empty() {
+            self.status = "no attachments in this message".into();
+            return;
+        }
+        let (p, slot) = super::picker::attachment_picker(&parts);
+        self.active_picker = Some(ActivePicker::Attachment(p, slot, parts));
+        self.status = "<Space>a attachments: Enter save · Esc cancel".into();
+    }
+
     pub(super) async fn switch_account(&mut self, target: Account) -> Result<()> {
         if target.name == self.account.name {
             self.status = format!("already on {}", target.name);
@@ -955,6 +1023,64 @@ impl App {
         self.reload_messages().await?;
         self.pane = Pane::Folders;
         self.status = format!("switched to {}", self.account.name);
+        Ok(())
+    }
+
+    /// Switch the active folder by name (called from `<Space>f` picker).
+    pub(super) async fn switch_folder(&mut self, folder: String) -> Result<()> {
+        let Some(idx) = self.folders.iter().position(|f| f.name == folder) else {
+            self.status = format!("folder {folder} not found");
+            return Ok(());
+        };
+        self.folder_state.select(Some(idx));
+        self.reload_messages().await?;
+        self.pane = Pane::Messages;
+        self.status = format!("switched to {folder} ({} msgs)", self.messages.len());
+        Ok(())
+    }
+
+    /// Switch account by name string (called from `<Space>b` picker).
+    pub(super) async fn switch_account_by_name(&mut self, name: String) -> Result<()> {
+        let cfg = inbx_config::load()?;
+        let Some(target) = cfg.accounts.into_iter().find(|a| a.name == name) else {
+            self.status = format!("account {name} not found in config");
+            return Ok(());
+        };
+        self.switch_account(target).await
+    }
+
+    /// Move the message-list cursor to the row matching `uid`.
+    pub(super) fn jump_to_uid(&mut self, uid: i64) {
+        if let Some(idx) = self.messages.iter().position(|m| m.uid == uid) {
+            self.msg_state.select(Some(idx));
+            self.refresh_body();
+            self.pane = Pane::Messages;
+            self.status = format!("jumped to uid {uid}");
+        } else {
+            self.status = format!("uid {uid} not in current message list");
+        }
+    }
+
+    /// Save attachment at `idx` from `parts` to `~/Downloads/<filename>`.
+    pub(super) async fn save_attachment(
+        &mut self,
+        parts: &[(String, Vec<u8>)],
+        idx: usize,
+    ) -> Result<()> {
+        let Some((name, data)) = parts.get(idx) else {
+            self.status = "attachment index out of range".into();
+            return Ok(());
+        };
+        let downloads = directories::UserDirs::new()
+            .and_then(|d| d.download_dir().map(|p| p.to_path_buf()))
+            .unwrap_or_else(|| {
+                let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+                std::path::PathBuf::from(home).join("Downloads")
+            });
+        std::fs::create_dir_all(&downloads)?;
+        let dest = downloads.join(name);
+        std::fs::write(&dest, data)?;
+        self.status = format!("saved {} bytes → {}", data.len(), dest.display());
         Ok(())
     }
 

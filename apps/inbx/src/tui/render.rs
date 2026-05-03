@@ -6,7 +6,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 
 use super::ACTIVE_THEME;
-use super::app::{App, Mode, Pane};
+use super::app::{ActivePicker, App, Mode, Pane};
 
 pub(super) fn draw(f: &mut ratatui::Frame, app: &App) {
     let area = f.area();
@@ -53,6 +53,9 @@ pub(super) fn draw(f: &mut ratatui::Frame, app: &App) {
     }
     if app.ical.is_some() {
         draw_ical(f, app, outer[0]);
+    }
+    if app.active_picker.is_some() {
+        draw_active_picker(f, app, outer[0]);
     }
     if app.show_help {
         draw_help(f, outer[0]);
@@ -740,6 +743,50 @@ fn draw_move_picker(f: &mut ratatui::Frame, app: &App, area: Rect) {
         .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
         .highlight_symbol("> ");
     f.render_stateful_widget(list, layout[1], &mut picker.state.clone());
+}
+
+fn draw_active_picker(f: &mut ratatui::Frame, app: &App, area: Rect) {
+    let Some(ap) = app.active_picker.as_ref() else {
+        return;
+    };
+    let (picker, title) = match ap {
+        ActivePicker::Folder(p, _) => (p, "folder picker (Enter pick · Esc cancel)"),
+        ActivePicker::Account(p, _) => (p, "account switcher (Enter pick · Esc cancel)"),
+        ActivePicker::Message(p, _) => (p, "message jump (Enter jump · Esc cancel)"),
+        ActivePicker::Attachment(p, _, _) => (p, "attachments (Enter save · Esc cancel)"),
+    };
+    let entries = picker.visible_entries();
+    let height = (entries.len() as u16 + 5).min(area.height).max(8);
+    let width = 80u16.min(area.width);
+    let x = area.x + area.width.saturating_sub(width) / 2;
+    let y = area.y + area.height.saturating_sub(height) / 2;
+    let popup = Rect {
+        x,
+        y,
+        width,
+        height,
+    };
+    f.render_widget(Clear, popup);
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(3), Constraint::Min(1)])
+        .split(popup);
+    let query_para = Paragraph::new(picker.query.text()).block(pane_block(title, true));
+    f.render_widget(query_para, layout[0]);
+    let mut list_state = ratatui::widgets::ListState::default();
+    if !entries.is_empty() {
+        list_state.select(Some(picker.selected));
+    }
+    let items: Vec<ListItem> = entries
+        .into_iter()
+        .map(|(label, _)| ListItem::new(label))
+        .collect();
+    let count_title = format!("{}/{}", picker.matched(), picker.total());
+    let list = List::new(items)
+        .block(pane_block(&count_title, true))
+        .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
+        .highlight_symbol("> ");
+    f.render_stateful_widget(list, layout[1], &mut list_state);
 }
 
 #[cfg(test)]

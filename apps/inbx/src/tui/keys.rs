@@ -1,9 +1,10 @@
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use hjkl_engine::{Input as EngineInput, Key as EngineKey};
+use hjkl_picker::PickerEvent;
 use inbx_composer::FocusedEditor;
 
-use super::app::{App, IcalResponse, LeaderState, MovePickerState, Pane};
+use super::app::{ActivePicker, App, IcalResponse, LeaderState, MovePickerState, Pane};
 
 /// Returns true to quit the TUI.
 pub(super) async fn handle_list_key(app: &mut App, key: KeyEvent) -> Result<bool> {
@@ -24,6 +25,36 @@ pub(super) async fn handle_list_key(app: &mut App, key: KeyEvent) -> Result<bool
 
     if key.code == KeyCode::Char('a') {
         app.open_account_picker()?;
+        return Ok(false);
+    }
+
+    // List-pane leader: <Space> arms the prefix; second key opens a picker.
+    if app.pending_leader == Some(LeaderState::Pending) {
+        app.pending_leader = None;
+        match key.code {
+            KeyCode::Char('f') => {
+                app.open_folder_picker();
+                return Ok(false);
+            }
+            KeyCode::Char('b') => {
+                app.open_hjkl_account_picker()?;
+                return Ok(false);
+            }
+            KeyCode::Char('m') => {
+                app.open_message_picker();
+                return Ok(false);
+            }
+            KeyCode::Char('a') => {
+                app.open_attachment_picker();
+                return Ok(false);
+            }
+            _ => {
+                // Unrecognised chord — fall through.
+            }
+        }
+    }
+    if key.code == KeyCode::Char(' ') && key.modifiers.is_empty() {
+        app.pending_leader = Some(LeaderState::Pending);
         return Ok(false);
     }
 
@@ -638,6 +669,73 @@ pub(super) async fn handle_thread_key(app: &mut App, key: KeyEvent) -> Result<()
             }
         }
         _ => {}
+    }
+    Ok(())
+}
+
+/// Route key events when an `active_picker` overlay is open.
+/// Returns `true` if the picker was closed (either cancelled or accepted).
+pub(super) async fn handle_active_picker_key(app: &mut App, key: KeyEvent) -> Result<()> {
+    // Pull the picker out temporarily to avoid borrow-checker trouble.
+    let Some(mut picker_state) = app.active_picker.take() else {
+        return Ok(());
+    };
+
+    let event = match &mut picker_state {
+        ActivePicker::Folder(p, _) => p.handle_key(key),
+        ActivePicker::Account(p, _) => p.handle_key(key),
+        ActivePicker::Message(p, _) => p.handle_key(key),
+        ActivePicker::Attachment(p, _, _) => p.handle_key(key),
+    };
+
+    match event {
+        PickerEvent::Cancel => {
+            // picker_state dropped — overlay closed.
+            app.status = "picker cancelled".into();
+        }
+        PickerEvent::Select(_) => {
+            // Drain the stashed slot and dispatch the inbx action.
+            match picker_state {
+                ActivePicker::Folder(_, slot) => {
+                    if let Some(folder) = slot.lock().ok().and_then(|mut g| g.take()) {
+                        app.switch_folder(folder).await?;
+                    }
+                }
+                ActivePicker::Account(_, slot) => {
+                    if let Some(name) = slot.lock().ok().and_then(|mut g| g.take()) {
+                        app.switch_account_by_name(name).await?;
+                    }
+                }
+                ActivePicker::Message(_, slot) => {
+                    if let Some(uid) = slot.lock().ok().and_then(|mut g| g.take()) {
+                        app.jump_to_uid(uid);
+                    }
+                }
+                ActivePicker::Attachment(_, slot, parts) => {
+                    if let Some(idx) = slot.lock().ok().and_then(|mut g| g.take()) {
+                        app.save_attachment(&parts, idx).await?;
+                    }
+                }
+            }
+        }
+        PickerEvent::None => {
+            // Refresh the picker filter then put it back.
+            match &mut picker_state {
+                ActivePicker::Folder(p, _) => {
+                    p.refresh();
+                }
+                ActivePicker::Account(p, _) => {
+                    p.refresh();
+                }
+                ActivePicker::Message(p, _) => {
+                    p.refresh();
+                }
+                ActivePicker::Attachment(p, _, _) => {
+                    p.refresh();
+                }
+            }
+            app.active_picker = Some(picker_state);
+        }
     }
     Ok(())
 }

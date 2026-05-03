@@ -15,6 +15,7 @@ use ratatui::backend::CrosstermBackend;
 
 mod app;
 mod keys;
+mod picker;
 mod render;
 
 use app::App;
@@ -64,6 +65,10 @@ async fn event_loop(term: &mut Term, app: &mut App) -> Result<()> {
         };
         let ev = ev?;
         if let Event::Key(key) = ev {
+            if app.active_picker.is_some() {
+                keys::handle_active_picker_key(app, key).await?;
+                continue;
+            }
             if app.composer.is_some() {
                 if keys::handle_composer_key(app, key).await? {
                     break;
