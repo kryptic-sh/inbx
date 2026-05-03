@@ -8,6 +8,15 @@ patch bumps.
 
 ## [Unreleased]
 
+### Added
+
+- `inbx --help` now renders an ASCII-art banner (figlet "ANSI Regular" font)
+  with the package version inline. Banner lives in `apps/inbx/src/art.txt`,
+  embedded via `include_str!`. Regenerate with
+  `figlet -f "ANSI Regular" inbx > apps/inbx/src/art.txt`.
+- CLI smoke tests: `--version` returns `CARGO_PKG_VERSION`, long-form help
+  contains the embedded art block and the version string.
+
 ### Changed
 
 - bump hjkl =0.0.39 — adopts Query::dirty_gen; consumer-side change is pin bump

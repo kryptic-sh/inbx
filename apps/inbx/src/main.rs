@@ -52,8 +52,25 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use inbx_config::{Account, Config, TlsMode};
 
+/// ASCII-art banner. Regenerate with:
+///
+/// ```sh
+/// figlet -f "ANSI Regular" inbx > apps/inbx/src/art.txt
+/// ```
+const LONG_ABOUT: &str = concat!(
+    "\n",
+    include_str!("art.txt"),
+    "\nmodal-vim email client · v",
+    env!("CARGO_PKG_VERSION"),
+);
+
 #[derive(Parser)]
-#[command(name = "inbx", version, about = "modal-vim email client")]
+#[command(
+    name = "inbx",
+    version,
+    about = "modal-vim email client",
+    long_about = LONG_ABOUT,
+)]
 struct Cli {
     #[command(subcommand)]
     command: Cmd,
@@ -3213,4 +3230,40 @@ fn format_unix_relative(ts: i64) -> String {
         return s;
     }
     format_unix(ts).get(0..4).unwrap_or("").to_string()
+}
+
+#[cfg(test)]
+mod cli_tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    #[test]
+    fn version_flag_returns_pkg_version() {
+        let cmd = Cli::command();
+        let version = cmd.render_version();
+        assert!(
+            version.contains(env!("CARGO_PKG_VERSION")),
+            "render_version output {version:?} missing CARGO_PKG_VERSION"
+        );
+    }
+
+    #[test]
+    fn long_help_contains_ascii_art() {
+        let mut cmd = Cli::command();
+        let help = cmd.render_long_help().to_string();
+        assert!(
+            help.contains(include_str!("art.txt")),
+            "long_help missing embedded art.txt block; got:\n{help}"
+        );
+    }
+
+    #[test]
+    fn long_help_contains_pkg_version() {
+        let mut cmd = Cli::command();
+        let help = cmd.render_long_help().to_string();
+        assert!(
+            help.contains(env!("CARGO_PKG_VERSION")),
+            "long_help missing CARGO_PKG_VERSION; got:\n{help}"
+        );
+    }
 }
