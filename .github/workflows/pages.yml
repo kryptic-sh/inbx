@@ -2,22 +2,18 @@ name: pages
 
 # GitHub Pages deploy for the inbx marketing site at
 # https://inbx.kryptic.sh/. Source lives in `web/`. The version badge
-# uses `__VERSION__` placeholder substituted from the latest umbrella
-# `inbx-v*` git tag at deploy time.
-#
-# Tag scheme note: inbx is multi-package, so each crate uses its own
-# prefix (`inbx-sync-v…`, `inbx-store-v…`, etc.). The umbrella version
-# this site advertises is the `inbx-v*` (no further suffix) line.
+# uses `__VERSION__` placeholder substituted from the latest `v*` git
+# tag at deploy time.
 #
 # Triggers:
-#   - tag push (inbx-v*)   → marketing version rebakes from latest tag
+#   - tag push (v*)        → marketing version rebakes from latest tag
 #   - main + web/**        → marketing copy edits redeploy with current tag
 #   - workflow_dispatch    → manual rebuild
 
 on:
   push:
     tags:
-      - 'inbx-v*'
+      - 'v*'
     branches: [main]
     paths:
       - 'web/**'
@@ -45,25 +41,15 @@ jobs:
         with:
           fetch-depth: 0 # need full history for `git describe`
 
-      - name: Resolve latest umbrella inbx tag
+      - name: Resolve latest release tag
         id: ver
         run: |
           set -euo pipefail
-          # inbx-v matches the umbrella, but `--match 'inbx-v*'` would
-          # also greedily catch `inbx-sync-v…` / `inbx-core-v…` since
-          # those also begin with `inbx-`. Filter to exactly
-          # `inbx-vN.N.N` (no extra hyphen between `inbx` and `v`).
-          tag=$(
-            git tag --list 'inbx-v*' --sort=-v:refname \
-              | grep -E '^inbx-v[0-9]+\.[0-9]+\.[0-9]+$' \
-              | head -n1 \
-              || true
-          )
-          tag="${tag:-inbx-v0.0.0}"
-          ver="${tag#inbx-v}"
+          tag=$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || echo "v0.0.0")
+          ver="${tag#v}"
           echo "tag=$tag"     >> "$GITHUB_OUTPUT"
           echo "version=$ver" >> "$GITHUB_OUTPUT"
-          echo "Latest umbrella tag: $tag (version=$ver)"
+          echo "Latest release: $tag (version=$ver)"
 
       - name: Substitute version into marketing HTML
         run: |
@@ -91,9 +77,7 @@ jobs:
   deploy:
     name: deploy to GitHub Pages
     needs: build
-    if:
-      github.ref == 'refs/heads/main' || startsWith(github.ref,
-      'refs/tags/inbx-v')
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-24.04
     environment:
       name: github-pages
