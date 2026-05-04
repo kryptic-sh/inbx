@@ -87,6 +87,10 @@ jobs:
         with:
           tool: cargo-zigbuild
 
+      - name: Install libdbus-1-dev (Linux only)
+        if: contains(matrix.target, 'linux')
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+
       - name: Build binaries (zigbuild)
         if: matrix.glibc != ''
         run: cargo zigbuild --release --locked --target ${{ matrix.target }}.${{ matrix.glibc }} -p inbx -p inbx-sync --bin inbx --bin inbx-sync
