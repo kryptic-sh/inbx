@@ -36,9 +36,6 @@ jobs:
   test:
     name: test ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
-    # Windows builds run for visibility but don't block: maildir conventions,
-    # gnupg socket paths, and several `#[cfg(unix)]` blocks aren't ported yet.
-    continue-on-error: ${{ matrix.os == 'windows-latest' }}
     strategy:
       fail-fast: false
       matrix:
