@@ -13,3 +13,6 @@ authors.workspace = true
 thiserror.workspace = true
 mail-parser.workspace = true
 icalendar.workspace = true
+reqwest.workspace = true
+tokio.workspace = true
+tracing.workspace = true

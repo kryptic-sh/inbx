@@ -198,6 +198,11 @@ enum Cmd {
         #[command(subcommand)]
         action: IcalCmd,
     },
+    /// CalDAV calendar sync (pull / discover).
+    Cal {
+        #[command(subcommand)]
+        action: CalCmd,
+    },
     /// Export messages from local index to mbox or single .eml.
     Export {
         #[arg(long)]
@@ -797,6 +802,44 @@ enum CarddavCmd {
 }
 
 #[derive(Subcommand)]
+enum CalCmd {
+    /// CalDAV calendar operations (pull / discover).
+    Caldav {
+        #[command(subcommand)]
+        action: CaldavCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum CaldavCmd {
+    /// Sync VEVENTs from a calendar URL via REPORT.
+    Pull {
+        #[arg(long)]
+        account: Option<String>,
+        /// Calendar URL. With `--discover`, treat this as a server base URL
+        /// and walk the RFC 6764 PROPFIND chain.
+        #[arg(long)]
+        url: String,
+        /// HTTP basic-auth username (defaults to account.username).
+        #[arg(long)]
+        user: Option<String>,
+        /// PROPFIND-walk current-user-principal → calendar-home-set →
+        /// resourcetype to find the calendar URL automatically.
+        #[arg(long)]
+        discover: bool,
+    },
+    /// PROPFIND-walk to enumerate calendars at a server base URL.
+    Discover {
+        #[arg(long)]
+        account: Option<String>,
+        #[arg(long)]
+        url: String,
+        #[arg(long)]
+        user: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
 enum AccountCmd {
     /// Interactive add. Stores password in OS keyring.
     Add {
@@ -932,6 +975,7 @@ async fn main() -> Result<()> {
         } => cmd_search(account, query, limit).await,
         Cmd::Thread { account, thread_id } => cmd_thread(account, thread_id).await,
         Cmd::Ical { action } => cmd_ical(action).await,
+        Cmd::Cal { action } => cmd_cal(action).await,
         Cmd::Draft { action } => cmd_draft(action).await,
         Cmd::Template { action } => cmd_template(action).await,
         Cmd::Watch {
@@ -2499,6 +2543,78 @@ async fn cmd_contacts(action: ContactsCmd) -> Result<()> {
                 }
             );
         }
+    }
+    Ok(())
+}
+
+async fn cmd_cal(action: CalCmd) -> Result<()> {
+    let cfg = inbx_config::load()?;
+    match action {
+        CalCmd::Caldav { action } => match action {
+            CaldavCmd::Pull {
+                account,
+                url,
+                user,
+                discover,
+            } => {
+                let acct = pick_account(&cfg, account.as_deref())?.clone();
+                let username = user.unwrap_or_else(|| acct.username.clone());
+                let password = inbx_config::load_password(&acct.name)
+                    .with_context(|| format!("no password in keyring for {}", acct.name))?;
+                let target_url = if discover {
+                    let cals = inbx_ical::caldav::discover(&url, &username, &password).await?;
+                    if cals.is_empty() {
+                        bail!("no calendars discovered at {url}");
+                    }
+                    let pick = &cals[0];
+                    println!(
+                        "discovered {} calendar(s); syncing {} ({})",
+                        cals.len(),
+                        pick.display_name.clone().unwrap_or_else(|| "?".into()),
+                        pick.url
+                    );
+                    pick.url.clone()
+                } else {
+                    url
+                };
+                let store_dir = inbx_config::data_dir()
+                    .map(|d| d.join(&acct.name).join("calendar"))
+                    .unwrap_or_else(|_| {
+                        std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
+                            .join(".local")
+                            .join("share")
+                            .join("inbx")
+                            .join(&acct.name)
+                            .join("calendar")
+                    });
+                let report =
+                    inbx_ical::caldav::sync(&target_url, &username, &password, &store_dir).await?;
+                println!(
+                    "caldav: {} events, {} stored to {}",
+                    report.events_seen,
+                    report.events_stored,
+                    store_dir.display()
+                );
+            }
+            CaldavCmd::Discover { account, url, user } => {
+                let acct = pick_account(&cfg, account.as_deref())?.clone();
+                let username = user.unwrap_or_else(|| acct.username.clone());
+                let password = inbx_config::load_password(&acct.name)
+                    .with_context(|| format!("no password in keyring for {}", acct.name))?;
+                let cals = inbx_ical::caldav::discover(&url, &username, &password).await?;
+                if cals.is_empty() {
+                    println!("(no calendars found)");
+                }
+                for c in cals {
+                    println!(
+                        "{:<40}  {}{}",
+                        c.display_name.unwrap_or_else(|| "?".into()),
+                        c.url,
+                        c.color.map(|col| format!("  [{col}]")).unwrap_or_default()
+                    );
+                }
+            }
+        },
     }
     Ok(())
 }

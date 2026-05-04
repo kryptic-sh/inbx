@@ -1,5 +1,7 @@
 //! Parse and reply to iCalendar (RFC 5545) invites embedded in MIME mail.
 
+pub mod caldav;
+
 use icalendar::{Calendar, CalendarComponent, Component, Event, EventLike, Property};
 use mail_parser::{MessageParser, MimeHeaders, PartType};
 

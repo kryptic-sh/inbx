@@ -2558,7 +2558,10 @@ version = "0.2.0"
 dependencies = [
  "icalendar",
  "mail-parser",
+ "reqwest",
  "thiserror 2.0.18",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

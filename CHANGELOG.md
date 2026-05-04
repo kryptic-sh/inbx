@@ -10,6 +10,12 @@ patch bumps.
 
 ### Added
 
+- **CalDAV pull (M24).** New `inbx-ical::caldav` module mirrors the CardDAV
+  shape: `discover` walks RFC 6764 (`current-user-principal` →
+  `calendar-home-set` → depth-1 PROPFIND for `<calendar/>` resourcetype); `sync`
+  issues a `calendar-query` REPORT filtered for `VEVENT` and writes each event
+  as `<uid>.ics` under `<data_dir>/inbx/<account>/calendar/`. CLI:
+  `inbx cal caldav pull|discover` (parallel to `inbx contacts carddav`).
 - **`MailProvider::create_folder` / `delete_folder` / `rename_folder` /
   `subscribe_folder`.** Four new trait methods covering folder management.
   `ImapProvider` delegates to existing `imap::create_folder` etc. free
@@ -79,10 +85,8 @@ patch bumps.
   `provider.list_folders` + `provider.fetch_headers` + `provider.fetch_body`
   flow now drives all three transports. `--since N` (days-ago) keeps its IMAP
   `UID SEARCH SINCE` fast path (`MailProvider` has no days-ago filter) and
-  warns + falls through on JMAP / Graph. Body fetch is now per-UID via
-  `provider.fetch_body` rather than IMAP's bulk `fetch_bodies` — slightly more
-  round-trips on IMAP, equivalent elsewhere; `MailProvider::fetch_bodies` is a
-  possible pass 2c.
+  warns + falls through on JMAP / Graph. Body fetch goes through
+  `provider.fetch_bodies` which IMAP overrides for bulk `UID FETCH` (see Added).
 
 ## [0.2.0] - 2026-05-04
 
