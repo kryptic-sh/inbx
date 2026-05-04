@@ -10,7 +10,6 @@ homepage.workspace = true
 authors.workspace = true
 
 [dependencies]
-inbx-core.workspace = true
 serde.workspace = true
 toml.workspace = true
 hjkl-config.workspace = true

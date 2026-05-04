@@ -14,7 +14,6 @@ name = "inbx"
 path = "src/main.rs"
 
 [dependencies]
-inbx-core.workspace = true
 inbx-config.workspace = true
 inbx-net.workspace = true
 inbx-store.workspace = true

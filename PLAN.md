@@ -36,7 +36,7 @@ host, plus the big proprietary stacks. Targets:
 - **Outlook.com personal** — same OAuth2 path as M365 with consumer endpoint.
 
 Provider abstraction lives in `inbx-net` behind a `MailProvider` trait so new
-backends slot in without touching `inbx-core`.
+backends slot in without touching the storage / config layers.
 
 ## Workspace Layout
 
@@ -51,7 +51,6 @@ inbx/
 ├── deny.toml                  # license/advisory gate (match hjkl)
 ├── release-plz.toml
 ├── crates/
-│   ├── inbx-core/             # accounts, message model, store, sync
 │   ├── inbx-net/              # IMAP / SMTP / JMAP / Graph / OAuth2
 │   ├── inbx-store/            # Maildir + SQLite index + tantivy search
 │   ├── inbx-config/           # TOML config + XDG paths + keyring
@@ -75,15 +74,12 @@ inbx/
 
 ## Crate Roles
 
-### inbx-core
-
-- Domain types: `Account`, `Identity`, `Signature`, `Folder`, `Message`,
-  `Thread`, `Draft`, `Attachment`, `Address`, `Flags`, `Uid`, `Contact`.
-- Sync engine state machine. Offline queue. Conflict resolution.
-- Initial sync windowed (last 90d default, configurable).
-- Online/offline detection; suspend sync on metered net.
-- No network, no UI. Traits for `NetTransport`, `Store`.
-- Errors: `thiserror` → `inbx_core::Error`.
+> **Note:** `inbx-core` was originally planned as a domain-types crate
+> (`Account`, `Message`, `Thread`, sync FSM, etc.) but the types ended up
+> scattered across `inbx-config` (Account / AuthMethod) and `inbx-store`
+> (FolderRow / MessageRow / OutboxRow). The empty crate was dropped at v0.1.3.
+> If a unifying domain layer becomes useful later (e.g., when the sync FSM needs
+> a home), reintroduce it then — don't hold a slot for hypothetical future code.
 
 ### inbx-net
 

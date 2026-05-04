@@ -2572,7 +2572,6 @@ dependencies = [
  "inbx-composer",
  "inbx-config",
  "inbx-contacts",
- "inbx-core",
  "inbx-ical",
  "inbx-net",
  "inbx-render",
@@ -2597,7 +2596,6 @@ dependencies = [
  "hjkl-editor",
  "hjkl-form",
  "inbx-config",
- "inbx-core",
  "mail-builder",
  "mail-parser",
  "serde",
@@ -2609,7 +2607,6 @@ name = "inbx-config"
 version = "0.1.2"
 dependencies = [
  "hjkl-config",
- "inbx-core",
  "keyring",
  "serde",
  "thiserror 2.0.18",
@@ -2622,21 +2619,11 @@ name = "inbx-contacts"
 version = "0.1.2"
 dependencies = [
  "inbx-config",
- "inbx-core",
  "mail-parser",
  "reqwest",
  "sqlx",
  "thiserror 2.0.18",
  "tokio",
- "tracing",
-]
-
-[[package]]
-name = "inbx-core"
-version = "0.1.2"
-dependencies = [
- "serde",
- "thiserror 2.0.18",
  "tracing",
 ]
 
@@ -2649,7 +2636,6 @@ dependencies = [
  "eframe",
  "egui",
  "inbx-config",
- "inbx-core",
  "inbx-net",
  "inbx-render",
  "inbx-store",
@@ -2664,7 +2650,6 @@ name = "inbx-ical"
 version = "0.1.2"
 dependencies = [
  "icalendar",
- "inbx-core",
  "mail-parser",
  "thiserror 2.0.18",
 ]
@@ -2678,7 +2663,6 @@ dependencies = [
  "bytes",
  "futures-util",
  "inbx-config",
- "inbx-core",
  "lettre",
  "mail-parser",
  "oauth2",
@@ -2700,7 +2684,6 @@ version = "0.1.2"
 dependencies = [
  "ammonia",
  "html2text",
- "inbx-core",
  "mail-parser",
  "thiserror 2.0.18",
 ]
@@ -2711,7 +2694,6 @@ version = "0.1.2"
 dependencies = [
  "gethostname 0.5.0",
  "inbx-config",
- "inbx-core",
  "sqlx",
  "thiserror 2.0.18",
  "tokio",
@@ -2728,7 +2710,6 @@ dependencies = [
  "inbx-composer",
  "inbx-config",
  "inbx-contacts",
- "inbx-core",
  "inbx-net",
  "inbx-render",
  "inbx-store",

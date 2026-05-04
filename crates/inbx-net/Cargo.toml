@@ -10,7 +10,6 @@ homepage.workspace = true
 authors.workspace = true
 
 [dependencies]
-inbx-core.workspace = true
 inbx-config.workspace = true
 thiserror.workspace = true
 tracing.workspace = true

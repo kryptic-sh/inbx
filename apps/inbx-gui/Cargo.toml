@@ -14,7 +14,6 @@ name = "inbx-gui"
 path = "src/main.rs"
 
 [dependencies]
-inbx-core.workspace = true
 inbx-config.workspace = true
 inbx-store.workspace = true
 inbx-render.workspace = true

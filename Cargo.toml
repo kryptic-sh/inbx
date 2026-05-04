@@ -1,7 +1,6 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/inbx-core",
     "crates/inbx-net",
     "crates/inbx-store",
     "crates/inbx-config",
@@ -78,7 +77,6 @@ rpassword = "7"
 gethostname = "0.5"
 notify-rust = "4"
 
-inbx-core = { path = "crates/inbx-core" }
 inbx-net = { path = "crates/inbx-net" }
 inbx-store = { path = "crates/inbx-store" }
 inbx-config = { path = "crates/inbx-config" }
