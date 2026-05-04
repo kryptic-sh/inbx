@@ -3,6 +3,7 @@ use std::thread::JoinHandle;
 
 use hjkl_picker::{PickerAction, PickerLogic, RequeryMode};
 use inbx_config::Account;
+use inbx_net::sieve::SieveScript;
 use inbx_store::{FolderRow, MessageRow};
 
 /// Generic stashed-result source. Items are populated up-front; `select`
@@ -124,6 +125,27 @@ pub(super) fn attachment_picker(
     (hjkl_picker::Picker::new(Box::new(source)), slot)
 }
 
+/// Open a Sieve script picker. Returns the picker and the shared slot (script name).
+/// Label format: `<name>` or `<name> (active)` when `script.active`.
+pub(super) fn sieve_picker(
+    scripts: Vec<SieveScript>,
+) -> (hjkl_picker::Picker, Arc<Mutex<Option<String>>>) {
+    let items: Vec<(String, String)> = scripts
+        .into_iter()
+        .map(|s| {
+            let label = if s.active {
+                format!("{} (active)", s.name)
+            } else {
+                s.name.clone()
+            };
+            (label, s.name)
+        })
+        .collect();
+    let source = StashedSource::new("sieve scripts", items);
+    let slot = Arc::clone(&source.last_picked);
+    (hjkl_picker::Picker::new(Box::new(source)), slot)
+}
+
 /// Extract attachments from a raw RFC 5322 message. Returns `(filename, bytes)` pairs.
 pub(super) fn extract_attachments(raw: &[u8]) -> Vec<(String, Vec<u8>)> {
     use mail_parser::{MessageParser, MimeHeaders, PartType};
@@ -158,6 +180,51 @@ pub(super) fn extract_attachments(raw: &[u8]) -> Vec<(String, Vec<u8>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sieve_picker_active_label() {
+        // Build the source directly to inspect labels and drive select().
+        let scripts = vec![
+            SieveScript {
+                name: "vacation".to_string(),
+                active: true,
+            },
+            SieveScript {
+                name: "spam".to_string(),
+                active: false,
+            },
+        ];
+        let items: Vec<(String, String)> = scripts
+            .into_iter()
+            .map(|s| {
+                let label = if s.active {
+                    format!("{} (active)", s.name)
+                } else {
+                    s.name.clone()
+                };
+                (label, s.name)
+            })
+            .collect();
+        let source = StashedSource::new("sieve scripts", items.clone());
+        let slot = Arc::clone(&source.last_picked);
+
+        // Check labels produced by the constructor logic.
+        let active_label = &items[0].0;
+        assert!(
+            active_label.contains("(active)"),
+            "active script should have (active) suffix: {active_label}"
+        );
+        let spam_label = &items[1].0;
+        assert!(
+            !spam_label.contains("(active)"),
+            "inactive script must not have (active) suffix: {spam_label}"
+        );
+
+        // Selecting the first entry (vacation) stashes the name, not the label.
+        source.select(0);
+        let picked = slot.lock().unwrap().clone();
+        assert_eq!(picked.as_deref(), Some("vacation"));
+    }
 
     #[test]
     fn stashed_source_select_populates_slot() {

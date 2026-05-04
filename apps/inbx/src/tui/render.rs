@@ -62,6 +62,9 @@ pub(super) fn draw(f: &mut ratatui::Frame, app: &App) {
     if app.active_wizard.is_some() {
         draw_active_wizard(f, app, outer[0]);
     }
+    if app.active_sieve_wizard.is_some() {
+        draw_sieve_wizard(f, app, outer[0]);
+    }
     if app.show_help {
         draw_help(f, outer[0]);
     }
@@ -785,6 +788,7 @@ fn draw_active_picker(f: &mut ratatui::Frame, app: &App, area: Rect) {
         ActivePicker::Account(p, _) => (p, "account switcher (Enter pick · Esc cancel)"),
         ActivePicker::Message(p, _) => (p, "message jump (Enter jump · Esc cancel)"),
         ActivePicker::Attachment(p, _, _) => (p, "attachments (Enter save · Esc cancel)"),
+        ActivePicker::Sieve(p, _) => (p, "sieve scripts (Enter edit · Esc cancel)"),
     };
     let entries = picker.visible_entries();
     let height = (entries.len() as u16 + 5).min(area.height).max(8);
@@ -894,6 +898,91 @@ fn draw_active_wizard(f: &mut ratatui::Frame, app: &App, area: Rect) {
             _ => {
                 // Other field types are not used in this wizard.
             }
+        }
+    }
+}
+
+/// Draw the Sieve-edit wizard overlay.
+fn draw_sieve_wizard(f: &mut ratatui::Frame, app: &App, area: Rect) {
+    let Some(wizard) = app.active_sieve_wizard.as_ref() else {
+        return;
+    };
+    // Name field: 3 lines. Body field: 12 lines. Total content ~15 + 2 border.
+    let height = 17u16.min(area.height).max(10);
+    let width = 80u16.min(area.width);
+    let x = area.x + area.width.saturating_sub(width) / 2;
+    let y = area.y + area.height.saturating_sub(height) / 2;
+    let popup = Rect {
+        x,
+        y,
+        width,
+        height,
+    };
+    f.render_widget(Clear, popup);
+
+    let title = "sieve editor (<Space>s save · Esc cancel)";
+    let block = pane_block(title, true);
+    let inner = block.inner(popup);
+    f.render_widget(block, popup);
+
+    let focused_idx = wizard.form.focused();
+    let in_insert = wizard.form.mode == FormMode::Insert;
+
+    // Name: 3 lines; Body: remaining.
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(3), Constraint::Min(3)])
+        .split(inner);
+
+    for (i, field) in wizard.form.fields.iter().enumerate() {
+        let Some(&row_area) = layout.get(i) else {
+            break;
+        };
+        let is_focused = i == focused_idx;
+        match field {
+            FormField::SingleLineText(tf) | FormField::MultiLineText(tf) => {
+                let text = tf.text();
+                let label = &tf.meta.label;
+                let required_star = if tf.meta.required { "*" } else { " " };
+                let display = format!("{required_star}{label}: {text}");
+                let style = if is_focused {
+                    Style::default().add_modifier(Modifier::REVERSED)
+                } else {
+                    Style::default()
+                };
+                let para = Paragraph::new(display)
+                    .block(Block::default().borders(Borders::ALL))
+                    .style(style)
+                    .wrap(Wrap { trim: false });
+                f.render_widget(para, row_area);
+
+                if is_focused && in_insert {
+                    let (row, col) = tf.cursor();
+                    let prefix_len = required_star.len() + label.len() + 2;
+                    if i == 0 {
+                        // Single-line: cursor on row 0 only.
+                        let cursor_col = (prefix_len + col) as u16;
+                        let inner_w = row_area.width.saturating_sub(2);
+                        if cursor_col < inner_w {
+                            f.set_cursor_position((row_area.x + 1 + cursor_col, row_area.y + 1));
+                        }
+                    } else {
+                        // Multi-line: account for wrapped prefix on first row.
+                        let cursor_row = row_area.y + 1 + row as u16;
+                        let cursor_col = if row == 0 {
+                            (prefix_len + col) as u16
+                        } else {
+                            col as u16
+                        };
+                        let inner_w = row_area.width.saturating_sub(2);
+                        let inner_h = row_area.height.saturating_sub(2);
+                        if cursor_col < inner_w && cursor_row < row_area.y + 1 + inner_h {
+                            f.set_cursor_position((row_area.x + 1 + cursor_col, cursor_row));
+                        }
+                    }
+                }
+            }
+            _ => {}
         }
     }
 }

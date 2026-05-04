@@ -55,6 +55,11 @@ pub(super) async fn handle_list_key(app: &mut App, key: KeyEvent) -> Result<bool
                 app.status = "wizard: new account — <Space>s save · Esc cancel".into();
                 return Ok(false);
             }
+            KeyCode::Char('S') => {
+                // Connect to ManageSieve, list scripts, open sieve picker.
+                app.open_sieve_picker().await?;
+                return Ok(false);
+            }
             _ => {
                 // Unrecognised chord — fall through.
             }
@@ -828,6 +833,7 @@ pub(super) async fn handle_active_picker_key(app: &mut App, key: KeyEvent) -> Re
         ActivePicker::Account(p, _) => p.handle_key(key),
         ActivePicker::Message(p, _) => p.handle_key(key),
         ActivePicker::Attachment(p, _, _) => p.handle_key(key),
+        ActivePicker::Sieve(p, _) => p.handle_key(key),
     };
 
     match event {
@@ -858,6 +864,11 @@ pub(super) async fn handle_active_picker_key(app: &mut App, key: KeyEvent) -> Re
                         app.save_attachment(&parts, idx).await?;
                     }
                 }
+                ActivePicker::Sieve(_, slot) => {
+                    if let Some(name) = slot.lock().ok().and_then(|mut g| g.take()) {
+                        app.open_sieve_edit(name).await?;
+                    }
+                }
             }
         }
         PickerEvent::None => {
@@ -875,10 +886,50 @@ pub(super) async fn handle_active_picker_key(app: &mut App, key: KeyEvent) -> Re
                 ActivePicker::Attachment(p, _, _) => {
                     p.refresh();
                 }
+                ActivePicker::Sieve(p, _) => {
+                    p.refresh();
+                }
             }
             app.active_picker = Some(picker_state);
         }
     }
+    Ok(())
+}
+
+/// Route key events when the Sieve-edit wizard is open.
+pub(super) async fn handle_sieve_wizard_key(app: &mut App, key: KeyEvent) -> Result<()> {
+    let Some(wizard) = app.active_sieve_wizard.as_mut() else {
+        return Ok(());
+    };
+
+    if wizard.form.mode == hjkl_form::FormMode::Normal {
+        if key.code == KeyCode::Esc {
+            app.active_sieve_wizard = None;
+            app.status = "sieve: cancelled".into();
+            return Ok(());
+        }
+        // <Space>s = save.
+        if app.pending_leader == Some(super::app::LeaderState::Pending) {
+            app.pending_leader = None;
+            if key.code == KeyCode::Char('s') {
+                app.save_sieve_wizard().await?;
+                return Ok(());
+            }
+        }
+        if key.code == KeyCode::Char(' ') && key.modifiers.is_empty() {
+            app.pending_leader = Some(super::app::LeaderState::Pending);
+            return Ok(());
+        }
+    }
+
+    let Some(wizard) = app.active_sieve_wizard.as_mut() else {
+        return Ok(());
+    };
+    wizard.form.handle_input(crossterm_key_to_engine_input(key));
+
+    // Update status with focused field name.
+    let label = wizard.focused_label().to_string();
+    app.status = format!("sieve: {label} — <Space>s save · Esc cancel");
     Ok(())
 }
 

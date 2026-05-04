@@ -123,6 +123,10 @@ async fn event_loop(term: &mut Term, app: &mut App) -> Result<()> {
                 keys::handle_wizard_key(app, key).await?;
                 continue;
             }
+            if app.active_sieve_wizard.is_some() {
+                keys::handle_sieve_wizard_key(app, key).await?;
+                continue;
+            }
             if keys::handle_list_key(app, key).await? {
                 break;
             }

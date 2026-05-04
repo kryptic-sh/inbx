@@ -203,11 +203,92 @@ fn parse_tls(s: &str) -> Option<TlsMode> {
     }
 }
 
+// ── Sieve edit wizard ─────────────────────────────────────────────────────────
+
+/// Field indices for the Sieve edit form.
+const SIEVE_IDX_NAME: usize = 0;
+const SIEVE_IDX_BODY: usize = 1;
+
+/// A two-field wizard for editing a ManageSieve script.
+///
+/// The name field is single-line (to allow renaming). The body field is
+/// multi-line via `Field::MultiLineText`, which hjkl-form 0.3 ships.
+pub(super) struct SieveEditWizard {
+    pub form: Form,
+}
+
+impl SieveEditWizard {
+    pub fn new(name: String, body: String) -> Self {
+        let form = Form::new()
+            .with_title("Sieve script editor")
+            .with_field(Field::SingleLineText(
+                TextFieldEditor::with_meta(FieldMeta::new("name").required(true), 1)
+                    .with_initial(&name),
+            ))
+            .with_field(Field::MultiLineText(
+                TextFieldEditor::with_meta(FieldMeta::new("body"), 10).with_initial(&body),
+            ));
+        Self { form }
+    }
+
+    /// Extract (name, body). Returns `Err` when name is empty.
+    pub fn build(&self) -> Result<(String, String)> {
+        let name = self.sieve_field_text(SIEVE_IDX_NAME);
+        let body = self.sieve_field_text(SIEVE_IDX_BODY);
+        if name.trim().is_empty() {
+            bail!("name is required");
+        }
+        Ok((name, body))
+    }
+
+    fn sieve_field_text(&self, idx: usize) -> String {
+        match self.form.fields.get(idx) {
+            Some(Field::SingleLineText(f)) | Some(Field::MultiLineText(f)) => f.text(),
+            _ => String::new(),
+        }
+    }
+
+    /// Label of the currently-focused field, for the status line.
+    pub fn focused_label(&self) -> &str {
+        self.form
+            .focused_field()
+            .map(|f| f.meta().label.as_str())
+            .unwrap_or("")
+    }
+}
+
 // ── tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── SieveEditWizard tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn sieve_wizard_round_trip() {
+        let mut w = SieveEditWizard::new("myscript".to_string(), "require [];".to_string());
+        // Change the body via set_field_text helper.
+        if let Some(Field::MultiLineText(f)) = w.form.fields.get_mut(SIEVE_IDX_BODY) {
+            f.set_text("require [\"vacation\"];");
+        }
+        let (name, body) = w.build().expect("should succeed");
+        assert_eq!(name, "myscript");
+        assert_eq!(body, "require [\"vacation\"];");
+    }
+
+    #[test]
+    fn sieve_wizard_validation_empty_name() {
+        let mut w = SieveEditWizard::new("".to_string(), "require [];".to_string());
+        // Ensure name field is empty.
+        if let Some(Field::SingleLineText(f)) = w.form.fields.get_mut(SIEVE_IDX_NAME) {
+            f.set_text("");
+        }
+        let err = w.build().unwrap_err();
+        assert!(err.to_string().contains("name"), "{err}");
+    }
+
+    // ── AccountWizard tests ───────────────────────────────────────────────────
 
     fn filled_wizard() -> AccountWizard {
         let mut w = AccountWizard::new();
