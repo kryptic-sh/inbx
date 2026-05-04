@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod pgp;
+pub mod phishing;
 
 use std::collections::{HashMap, HashSet};
 
@@ -36,6 +37,8 @@ pub struct Rendered {
     pub trackers: Vec<String>,
     /// Inline cid: parts mapped to their content (for webview rewrite).
     pub inline_cids: HashMap<String, Vec<u8>>,
+    /// Phishing heuristic warnings for this message.
+    pub phishing: Vec<phishing::PhishingWarning>,
 }
 
 const TRACKER_HOSTS: &[&str] = &[
@@ -94,12 +97,15 @@ pub fn render_message(raw: &[u8], policy: RemotePolicy) -> Result<Rendered> {
         String::new()
     };
 
+    let phishing_warnings = phishing::analyze(raw, sanitized_html.as_deref());
+
     Ok(Rendered {
         plain,
         html: sanitized_html,
         blocked_remote,
         trackers,
         inline_cids,
+        phishing: phishing_warnings,
     })
 }
 
