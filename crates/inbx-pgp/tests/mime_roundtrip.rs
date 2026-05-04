@@ -25,6 +25,7 @@ fn test_headers() -> OuterHeaders {
         in_reply_to: None,
         references: vec![],
         date: Some("Thu, 01 Jan 1970 00:00:00 +0000".into()),
+        autocrypt: None,
     }
 }
 

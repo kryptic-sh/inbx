@@ -74,6 +74,10 @@ pub(super) struct App {
     /// Leader-key (`<Space>`) prefix state. `Some(Pending)` after the first
     /// `<Space>` press; cleared after the chord is consumed or cancelled.
     pub(super) pending_leader: Option<LeaderState>,
+    /// `Ctrl-G` chord state (composer-only). `true` after `Ctrl-G` is pressed;
+    /// the next key (`s`/`e`) toggles `pgp.sign`/`pgp.encrypt`; any other key
+    /// cancels.  Never set outside the composer pane.
+    pub(super) pending_pgp_chord: bool,
     pub(super) body: String,
     pub(super) body_scroll: u16,
     pub(super) status: String,
@@ -267,6 +271,7 @@ impl App {
             pane: Pane::Folders,
             pending_g: false,
             pending_leader: None,
+            pending_pgp_chord: false,
             body: String::new(),
             body_scroll: 0,
             status: String::new(),
@@ -548,7 +553,110 @@ impl App {
         let Some(composer) = self.composer.as_ref() else {
             return Ok(());
         };
-        let raw = composer.to_mime()?;
+
+        let raw = if composer.pgp.sign || composer.pgp.encrypt {
+            // PGP path.
+            let pgp_cfg = match &self.account.pgp {
+                Some(cfg) => cfg.clone(),
+                None => {
+                    self.status =
+                        "pgp: account has no pgp config; run `inbx pgp keygen` first".into();
+                    return Ok(());
+                }
+            };
+            // Only the inbx-managed source is supported for the TUI PGP send path.
+            let source = match inbx_pgp::key_source_for(&pgp_cfg) {
+                Ok(s) => s,
+                Err(e) => {
+                    self.status = format!("pgp: key source error: {e}");
+                    return Ok(());
+                }
+            };
+
+            // Resolve signer key: prefer configured fingerprint, else first key.
+            let signer_key = if let Some(fpr) = &pgp_cfg.key_fingerprint {
+                inbx_pgp::KeyId(fpr.clone())
+            } else {
+                match source.list_keys().await {
+                    Ok(keys) if !keys.is_empty() => {
+                        let k = keys.into_iter().next().unwrap().0;
+                        tracing::info!(
+                            "pgp: no key_fingerprint configured; using first key {}",
+                            k.0
+                        );
+                        k
+                    }
+                    Ok(_) => {
+                        self.status = "pgp: no keys found in managed dir".into();
+                        return Ok(());
+                    }
+                    Err(e) => {
+                        self.status = format!("pgp: list keys failed: {e}");
+                        return Ok(());
+                    }
+                }
+            };
+
+            // For encrypt: load all *.pub.asc files from the managed_dir.
+            // Recipients not in the dir are silently missing — the user must
+            // manually drop their pubkeys into managed_dir.
+            let recipient_pubkeys: Vec<inbx_pgp::ArmoredKey> = if composer.pgp.encrypt {
+                let managed_dir = pgp_cfg.managed_dir.clone().unwrap_or_else(|| {
+                    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+                    std::path::PathBuf::from(home)
+                        .join(".local")
+                        .join("share")
+                        .join("inbx")
+                        .join("pgp")
+                });
+                tracing::warn!(
+                    "pgp encrypt: loading all pubkeys from {}; \
+                     drop recipient pubkeys into that dir manually for now",
+                    managed_dir.display()
+                );
+                let mut keys = Vec::new();
+                if let Ok(entries) = std::fs::read_dir(&managed_dir) {
+                    for entry in entries.flatten() {
+                        let p = entry.path();
+                        let name = p
+                            .file_name()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                            .into_owned();
+                        if name.ends_with(".pub.asc")
+                            && let Ok(raw) = std::fs::read_to_string(&p)
+                        {
+                            keys.push(inbx_pgp::ArmoredKey(raw));
+                        }
+                    }
+                }
+                if keys.is_empty() {
+                    self.status = "pgp encrypt: no recipient pubkeys found in managed_dir; \
+                                   drop *.pub.asc files there"
+                        .into();
+                    return Ok(());
+                }
+                keys
+            } else {
+                Vec::new()
+            };
+
+            let c = composer;
+            match c
+                .to_mime_with_pgp(Some(&*source), Some(&signer_key), &recipient_pubkeys)
+                .await
+            {
+                Ok(bytes) => bytes,
+                Err(e) => {
+                    self.status = format!("pgp send failed: {e}");
+                    return Ok(());
+                }
+            }
+        } else {
+            // Plain (non-PGP) path.
+            composer.to_mime()?
+        };
+
         match inbx_net::send_message(&self.account, &raw).await {
             Ok(()) => {
                 self.composer = None;

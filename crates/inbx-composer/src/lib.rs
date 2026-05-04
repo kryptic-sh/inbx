@@ -111,6 +111,16 @@ pub struct Composer {
     pub attachments: Vec<Attachment>,
     /// PGP sign/encrypt flags. Both false by default.
     pub pgp: PgpFlags,
+    /// Optional Autocrypt header material: (addr, armored_pubkey).
+    /// When set, `to_mime()` adds an `Autocrypt:` header to the outgoing mail.
+    /// Default is `None` — existing behavior unchanged.
+    ///
+    /// # Note
+    /// Skip on the gnupg key source path — exporting binary pubkeys requires
+    /// `gpg --export <fpr>` which is async. Use `set_autocrypt_pubkey` from
+    /// the caller (TUI/CLI) after loading the armored pubkey via the inbx-managed source.
+    // TODO: gnupg-source autocrypt
+    pub autocrypt_pubkey: Option<(String, inbx_pgp::ArmoredKey)>,
 }
 
 #[derive(Debug, Clone)]
@@ -181,6 +191,7 @@ impl Composer {
             references: Vec::new(),
             attachments: Vec::new(),
             pgp: PgpFlags::default(),
+            autocrypt_pubkey: None,
         }
     }
 
@@ -375,6 +386,16 @@ impl Composer {
         }
     }
 
+    /// Set the Autocrypt public key that `to_mime()` and `to_mime_with_pgp()`
+    /// will embed in the outgoing `Autocrypt:` header.
+    ///
+    /// The caller is responsible for loading the user's armored pubkey via
+    /// the inbx-managed key source (or any other means) and passing it here
+    /// before calling `to_mime*`. The `addr` should be the sender's email.
+    pub fn set_autocrypt_pubkey(&mut self, addr: String, armored: inbx_pgp::ArmoredKey) {
+        self.autocrypt_pubkey = Some((addr, armored));
+    }
+
     /// Attach a file from disk. Content-type sniffed from extension.
     pub fn attach_path(&mut self, path: &std::path::Path) -> Result<()> {
         let bytes = std::fs::read(path).map_err(|_| Error::Missing("read attachment"))?;
@@ -506,6 +527,17 @@ impl Composer {
             builder =
                 builder.attachment(a.content_type.clone(), a.filename.clone(), a.bytes.clone());
         }
+        if let Some((addr, armored)) = &self.autocrypt_pubkey {
+            match inbx_pgp::mime::autocrypt_header_value(addr, &armored.0) {
+                Ok(value) => {
+                    builder =
+                        builder.header("Autocrypt", mail_builder::headers::raw::Raw::new(value));
+                }
+                Err(e) => {
+                    tracing::warn!("autocrypt header build failed: {e}");
+                }
+            }
+        }
         let bytes = builder
             .write_to_vec()
             .map_err(|_| Error::Missing("write"))?;
@@ -603,6 +635,14 @@ impl Composer {
                 }
             })
             .collect();
+        let autocrypt = self.autocrypt_pubkey.as_ref().and_then(|(addr, armored)| {
+            inbx_pgp::mime::autocrypt_header_value(addr, &armored.0)
+                .map_err(|e| {
+                    tracing::warn!("autocrypt header build failed: {e}");
+                    e
+                })
+                .ok()
+        });
         inbx_pgp::mime::OuterHeaders {
             from,
             to,
@@ -613,6 +653,7 @@ impl Composer {
             in_reply_to: self.in_reply_to.clone(),
             references: self.references.clone(),
             date: None,
+            autocrypt,
         }
     }
 }
@@ -978,6 +1019,41 @@ mod tests {
         assert_eq!(ct.ctype(), "multipart", "outer must be multipart");
         let subtype = ct.subtype().unwrap_or_default();
         assert_eq!(subtype, "signed", "subtype must be signed");
+    }
+
+    #[tokio::test]
+    async fn to_mime_with_autocrypt_header() {
+        use inbx_pgp::KeySource;
+        use inbx_pgp::inbx_managed::{InbxManagedSource, keygen};
+        use mail_parser::MessageParser;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_path_buf();
+        let (key_id, _) = keygen(&dir, "Alice", "alice@example.com", "")
+            .await
+            .unwrap();
+        let src = InbxManagedSource::new(dir);
+        let armored = src.export_public(&key_id).await.unwrap();
+
+        let mut c = Composer::new_blank(id());
+        c.set_subject("Autocrypt test");
+        c.set_to("bob@example.com");
+        c.body.set_content("plain body");
+        c.set_autocrypt_pubkey("alice@example.com".into(), armored.clone());
+
+        let raw = c.to_mime().unwrap();
+        let parsed = MessageParser::default().parse(&raw).expect("parse");
+
+        // The Autocrypt header must be present.
+        let ac_header = parsed
+            .header("Autocrypt")
+            .expect("Autocrypt header present");
+        let ac_str = ac_header.as_text().unwrap_or_default();
+        assert!(
+            ac_str.contains("addr=alice@example.com"),
+            "addr present: {ac_str}"
+        );
+        assert!(ac_str.contains("keydata="), "keydata present: {ac_str}");
     }
 
     #[tokio::test]

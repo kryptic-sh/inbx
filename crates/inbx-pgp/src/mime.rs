@@ -19,6 +19,9 @@ pub struct OuterHeaders {
     pub references: Vec<String>,
     /// RFC 2822 formatted timestamp. `None` → use "Thu, 01 Jan 1970 00:00:00 +0000".
     pub date: Option<String>,
+    /// Pre-built Autocrypt header value (no leading "Autocrypt:" or trailing CRLF).
+    /// When `Some`, both `sign_pgp_mime` and `encrypt_pgp_mime` emit the header.
+    pub autocrypt: Option<String>,
 }
 
 /// Wrap a fully-formed RFC 5322 inner message in a multipart/signed envelope
@@ -94,6 +97,7 @@ pub async fn encrypt_pgp_mime(
             in_reply_to: None,
             references: Vec::new(),
             date: outer_headers.date.clone(),
+            autocrypt: None,
         };
         sign_pgp_mime(source, s, inner_rfc5322, &inner_headers).await?
     } else {
@@ -196,10 +200,56 @@ fn write_outer_headers(buf: &mut Vec<u8>, h: &OuterHeaders) {
     if !h.references.is_empty() {
         buf.extend_from_slice(format!("References: {}\r\n", h.references.join(" ")).as_bytes());
     }
+    if let Some(ac) = &h.autocrypt {
+        buf.extend_from_slice(format!("Autocrypt: {ac}\r\n").as_bytes());
+    }
+}
+
+/// Build the value for an `Autocrypt:` header per Autocrypt 1.1.
+///
+/// Returns the header value (no leading "Autocrypt:" or trailing CRLF).
+/// The `keydata` segment is folded at 78 cols (per RFC 5322 §2.2.3) by
+/// inserting `"\r\n "` after every 76 base64 chars.
+///
+/// # Note
+/// `prefer-encrypt=mutual` is optional in Autocrypt 1.1; this implementation
+/// omits it. The gnupg key-source path is not supported here — see the
+/// `// TODO: gnupg-source autocrypt` comment in `inbx-composer`.
+pub fn autocrypt_header_value(addr: &str, armored_pubkey: &str) -> Result<String> {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    use pgp::composed::Deserializable;
+    use std::io::BufReader;
+
+    // Parse the armored public key.
+    let (pubkey, _) = pgp::composed::SignedPublicKey::from_armor_single(BufReader::new(
+        armored_pubkey.as_bytes(),
+    ))
+    .map_err(|e| crate::Error::Rpgp(e.to_string()))?;
+
+    // Serialize as binary OpenPGP packets.
+    let mut binary = Vec::new();
+    pgp::ser::Serialize::to_writer(&pubkey, &mut binary)
+        .map_err(|e| crate::Error::Rpgp(e.to_string()))?;
+
+    // Base64-encode (no line breaks in the raw encode; we fold manually below).
+    let b64 = STANDARD.encode(&binary);
+
+    // Fold the keydata at 76 chars per line.  Per RFC 5322 §2.2.3, continuation
+    // lines start with whitespace ("\r\n " here).  The keydata begins on a new
+    // continuation line immediately after "keydata=" so that the first line
+    // ("addr=...; keydata=") itself stays ≤ 78 chars regardless of addr length.
+    let folded_keydata = b64
+        .as_bytes()
+        .chunks(76)
+        .map(|chunk| std::str::from_utf8(chunk).unwrap_or(""))
+        .collect::<Vec<_>>()
+        .join("\r\n ");
+
+    Ok(format!("addr={addr}; keydata=\r\n {folded_keydata}"))
 }
 
 /// Base64-encode binary data with 76-char line wrapping (RFC 2045 MIME style).
-fn b64_wrap(data: &[u8]) -> String {
+pub(crate) fn b64_wrap(data: &[u8]) -> String {
     use base64::{Engine, engine::general_purpose::STANDARD};
     let encoded = STANDARD.encode(data);
     let mut out = String::new();
@@ -209,4 +259,64 @@ fn b64_wrap(data: &[u8]) -> String {
         out.push_str("\r\n");
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::inbx_managed::keygen;
+
+    /// Generate a key, build the Autocrypt header value, parse the base64 back,
+    /// and assert the fingerprint matches the original key.
+    #[tokio::test]
+    async fn autocrypt_value_round_trip() {
+        use base64::{Engine, engine::general_purpose::STANDARD};
+        use pgp::composed::Deserializable;
+        use pgp::types::KeyDetails;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let (key_id, _) = keygen(tmp.path(), "Bob", "bob@example.com", "")
+            .await
+            .unwrap();
+
+        // Export the public key as armor.
+        let src = crate::inbx_managed::InbxManagedSource::new(tmp.path().to_path_buf());
+        let armored = src.export_public(&key_id).await.unwrap();
+
+        let value = autocrypt_header_value("bob@example.com", &armored.0).unwrap();
+
+        // Extract the keydata= portion (after "keydata="), strip fold whitespace.
+        let keydata_raw = value.split("keydata=").nth(1).expect("keydata= present");
+        let b64_clean: String = keydata_raw.split("\r\n ").collect::<Vec<_>>().join("");
+        let binary = STANDARD.decode(&b64_clean).expect("valid base64");
+
+        let parsed =
+            pgp::composed::SignedPublicKey::from_bytes(std::io::BufReader::new(binary.as_slice()))
+                .unwrap();
+        let parsed_fpr = parsed.primary_key.fingerprint().to_string();
+        assert_eq!(parsed_fpr.to_lowercase(), key_id.0.to_lowercase());
+    }
+
+    /// Assert no line in the Autocrypt header value exceeds 78 chars.
+    #[tokio::test]
+    async fn autocrypt_value_folds_long_keydata() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (key_id, _) = keygen(tmp.path(), "Carol", "carol@example.com", "")
+            .await
+            .unwrap();
+
+        let src = crate::inbx_managed::InbxManagedSource::new(tmp.path().to_path_buf());
+        let armored = src.export_public(&key_id).await.unwrap();
+
+        let value = autocrypt_header_value("carol@example.com", &armored.0).unwrap();
+
+        for line in value.split("\r\n") {
+            assert!(
+                line.len() <= 78,
+                "line too long ({} chars): {:?}",
+                line.len(),
+                line
+            );
+        }
+    }
 }

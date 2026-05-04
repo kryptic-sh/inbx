@@ -3,7 +3,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use hjkl_engine::{Input as EngineInput, Key as EngineKey};
 use hjkl_form::FormMode;
 use hjkl_picker::PickerEvent;
-use inbx_composer::FocusedEditor;
+use inbx_composer::{FocusedEditor, PgpFlags};
 
 use super::app::{ActivePicker, App, IcalResponse, LeaderState, MovePickerState, Pane};
 use super::wizard::AccountWizard;
@@ -278,6 +278,36 @@ pub(super) async fn handle_list_key(app: &mut App, key: KeyEvent) -> Result<bool
 }
 
 pub(super) async fn handle_composer_key(app: &mut App, key: KeyEvent) -> Result<bool> {
+    // Ctrl-G chord: arms the PGP toggle prefix. Only fires in the composer pane.
+    // `s` = toggle sign, `e` = toggle encrypt; any other key cancels.
+    if app.pending_pgp_chord {
+        app.pending_pgp_chord = false;
+        if let Some(c) = app.composer.as_mut() {
+            match key.code {
+                KeyCode::Char('s') => {
+                    c.pgp.sign = !c.pgp.sign;
+                    let label = pgp_flag_label(&c.pgp);
+                    app.status =
+                        format!("pgp sign: {}{label}", if c.pgp.sign { "on" } else { "off" });
+                    return Ok(false);
+                }
+                KeyCode::Char('e') => {
+                    c.pgp.encrypt = !c.pgp.encrypt;
+                    let label = pgp_flag_label(&c.pgp);
+                    app.status = format!(
+                        "pgp encrypt: {}{label}",
+                        if c.pgp.encrypt { "on" } else { "off" }
+                    );
+                    return Ok(false);
+                }
+                _ => {
+                    // Cancelled — fall through and process the key normally.
+                    app.status = "pgp chord cancelled".into();
+                }
+            }
+        }
+    }
+
     // Global composer commands ride above the editor's input grammar.
     if key.modifiers.contains(KeyModifiers::CONTROL) {
         match key.code {
@@ -291,6 +321,12 @@ pub(super) async fn handle_composer_key(app: &mut App, key: KeyEvent) -> Result<
             }
             KeyCode::Char('q') => {
                 app.close_composer();
+                return Ok(false);
+            }
+            // Ctrl-G arms the PGP toggle chord (composer-only).
+            KeyCode::Char('g') => {
+                app.pending_pgp_chord = true;
+                app.status = "pgp chord: s=sign e=encrypt (any other key cancels)".into();
                 return Ok(false);
             }
             _ => {}
@@ -828,4 +864,15 @@ pub(super) async fn handle_active_picker_key(app: &mut App, key: KeyEvent) -> Re
         }
     }
     Ok(())
+}
+
+/// Return the bracket label for the current PGP flag state.
+/// Used to append to status-bar messages after a Ctrl-G chord.
+fn pgp_flag_label(flags: &PgpFlags) -> &'static str {
+    match (flags.sign, flags.encrypt) {
+        (true, true) => " [sign+encrypt]",
+        (true, false) => " [sign]",
+        (false, true) => " [encrypt]",
+        (false, false) => "",
+    }
 }

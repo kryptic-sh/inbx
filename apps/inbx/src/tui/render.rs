@@ -98,6 +98,8 @@ fn draw_help(f: &mut ratatui::Frame, area: Rect) {
         "    Ctrl-S      — send",
         "    Ctrl-D      — save draft to server",
         "    Ctrl-Q      — discard",
+        "    Ctrl-G s    — toggle PGP sign",
+        "    Ctrl-G e    — toggle PGP encrypt",
         "",
         "  overlays",
         "    /           — search (FTS)",
@@ -330,8 +332,15 @@ fn draw_composer(f: &mut ratatui::Frame, composer: &Composer, status: &str, area
         }
     }
 
-    let body_title =
-        format!("body — Tab field · Ctrl-S send · Ctrl-D draft · Ctrl-Q discard · {status}");
+    let pgp_label = match (composer.pgp.sign, composer.pgp.encrypt) {
+        (true, true) => " [sign+encrypt]",
+        (true, false) => " [sign]",
+        (false, true) => " [encrypt]",
+        (false, false) => "",
+    };
+    let body_title = format!(
+        "body — Tab field · Ctrl-S send · Ctrl-D draft · Ctrl-Q discard · Ctrl-G s/e pgp{pgp_label} · {status}"
+    );
     let body_para = Paragraph::new(composer.body_text())
         .block(pane_block(
             &body_title,
