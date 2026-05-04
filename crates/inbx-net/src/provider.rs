@@ -114,6 +114,30 @@ pub trait MailProvider: Send + Sync {
     /// - Graph: no-op (returns 0) — Graph has no per-message deletion flag;
     ///   "delete" means move to DeletedItems.
     async fn expunge_folder(&mut self, folder: &str) -> Result<usize>;
+
+    /// Create a new folder / mailbox with the given name.
+    async fn create_folder(&mut self, name: &str) -> Result<()>;
+
+    /// Delete the named folder / mailbox.
+    async fn delete_folder(&mut self, name: &str) -> Result<()>;
+
+    /// Rename a folder / mailbox.
+    async fn rename_folder(&mut self, from: &str, to: &str) -> Result<()>;
+
+    /// Subscribe or unsubscribe from a folder.  `on = true` subscribes.
+    async fn subscribe_folder(&mut self, name: &str, on: bool) -> Result<()>;
+
+    /// Fetch raw RFC 5322 bodies for multiple UIDs in one round-trip.
+    ///
+    /// Default implementation loops `fetch_body` one at a time.  IMAP overrides
+    /// with a bulk `UID FETCH` for the full set.
+    async fn fetch_bodies(&mut self, folder: &str, uids: &[i64]) -> Result<Vec<(i64, Vec<u8>)>> {
+        let mut out = Vec::with_capacity(uids.len());
+        for &uid in uids {
+            out.push((uid, self.fetch_body(folder, uid).await?));
+        }
+        Ok(out)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -204,6 +228,28 @@ impl MailProvider for ImapProvider {
 
     async fn expunge_folder(&mut self, folder: &str) -> Result<usize> {
         Ok(imap::expunge_folder(&mut self.session, folder).await? as usize)
+    }
+
+    async fn create_folder(&mut self, name: &str) -> Result<()> {
+        Ok(imap::create_folder(&mut self.session, name).await?)
+    }
+
+    async fn delete_folder(&mut self, name: &str) -> Result<()> {
+        Ok(imap::delete_folder(&mut self.session, name).await?)
+    }
+
+    async fn rename_folder(&mut self, from: &str, to: &str) -> Result<()> {
+        Ok(imap::rename_folder(&mut self.session, from, to).await?)
+    }
+
+    async fn subscribe_folder(&mut self, name: &str, on: bool) -> Result<()> {
+        Ok(imap::subscribe_folder(&mut self.session, name, on).await?)
+    }
+
+    async fn fetch_bodies(&mut self, folder: &str, uids: &[i64]) -> Result<Vec<(i64, Vec<u8>)>> {
+        let u32_uids: Vec<u32> = uids.iter().map(|&u| u as u32).collect();
+        let pairs = imap::fetch_bodies(&mut self.session, folder, &u32_uids).await?;
+        Ok(pairs.into_iter().map(|(u, raw)| (u as i64, raw)).collect())
     }
 }
 
@@ -350,6 +396,22 @@ mod tests {
 
         async fn expunge_folder(&mut self, _folder: &str) -> Result<usize> {
             Ok(0)
+        }
+
+        async fn create_folder(&mut self, _name: &str) -> Result<()> {
+            Ok(())
+        }
+
+        async fn delete_folder(&mut self, _name: &str) -> Result<()> {
+            Ok(())
+        }
+
+        async fn rename_folder(&mut self, _from: &str, _to: &str) -> Result<()> {
+            Ok(())
+        }
+
+        async fn subscribe_folder(&mut self, _name: &str, _on: bool) -> Result<()> {
+            Ok(())
         }
     }
 

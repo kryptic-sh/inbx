@@ -1186,6 +1186,145 @@ impl crate::provider::MailProvider for JmapClient {
             .unwrap_or(0);
         Ok(destroyed)
     }
+
+    async fn create_folder(&mut self, name: &str) -> crate::provider::Result<()> {
+        // TODO(hierarchical): split on '/' and create with parentId for nested folders.
+        // For now pass the literal name — Fastmail accepts it as a top-level mailbox.
+        self.invoke(
+            vec![json!([
+                "Mailbox/set",
+                {
+                    "accountId": self.account_id,
+                    "create": {
+                        "new": {
+                            "name": name,
+                            "parentId": null
+                        }
+                    }
+                },
+                "c"
+            ])],
+            vec![CORE_CAPABILITY, MAIL_CAPABILITY],
+        )
+        .await
+        .map_err(crate::provider::Error::Jmap)?;
+        Ok(())
+    }
+
+    async fn delete_folder(&mut self, name: &str) -> crate::provider::Result<()> {
+        let mailboxes = self
+            .list_mailboxes()
+            .await
+            .map_err(crate::provider::Error::Jmap)?;
+        let mailbox_id = mailboxes
+            .iter()
+            .find(|m| {
+                m.name.eq_ignore_ascii_case(name)
+                    || m.role
+                        .as_deref()
+                        .map(|r| r.eq_ignore_ascii_case(name))
+                        .unwrap_or(false)
+            })
+            .map(|m| m.id.clone())
+            .ok_or_else(|| {
+                crate::provider::Error::Jmap(Error::Server {
+                    status: 0,
+                    body: format!("JMAP: no mailbox matching '{name}'"),
+                })
+            })?;
+        self.invoke(
+            vec![json!([
+                "Mailbox/set",
+                {
+                    "accountId": self.account_id,
+                    "destroy": [mailbox_id]
+                },
+                "d"
+            ])],
+            vec![CORE_CAPABILITY, MAIL_CAPABILITY],
+        )
+        .await
+        .map_err(crate::provider::Error::Jmap)?;
+        Ok(())
+    }
+
+    async fn rename_folder(&mut self, from: &str, to: &str) -> crate::provider::Result<()> {
+        let mailboxes = self
+            .list_mailboxes()
+            .await
+            .map_err(crate::provider::Error::Jmap)?;
+        let mailbox_id = mailboxes
+            .iter()
+            .find(|m| {
+                m.name.eq_ignore_ascii_case(from)
+                    || m.role
+                        .as_deref()
+                        .map(|r| r.eq_ignore_ascii_case(from))
+                        .unwrap_or(false)
+            })
+            .map(|m| m.id.clone())
+            .ok_or_else(|| {
+                crate::provider::Error::Jmap(Error::Server {
+                    status: 0,
+                    body: format!("JMAP: no mailbox matching '{from}'"),
+                })
+            })?;
+        self.invoke(
+            vec![json!([
+                "Mailbox/set",
+                {
+                    "accountId": self.account_id,
+                    "update": {
+                        mailbox_id: { "name": to }
+                    }
+                },
+                "u"
+            ])],
+            vec![CORE_CAPABILITY, MAIL_CAPABILITY],
+        )
+        .await
+        .map_err(crate::provider::Error::Jmap)?;
+        Ok(())
+    }
+
+    async fn subscribe_folder(&mut self, name: &str, on: bool) -> crate::provider::Result<()> {
+        let mailboxes = self
+            .list_mailboxes()
+            .await
+            .map_err(crate::provider::Error::Jmap)?;
+        let mailbox_id = mailboxes
+            .iter()
+            .find(|m| {
+                m.name.eq_ignore_ascii_case(name)
+                    || m.role
+                        .as_deref()
+                        .map(|r| r.eq_ignore_ascii_case(name))
+                        .unwrap_or(false)
+            })
+            .map(|m| m.id.clone())
+            .ok_or_else(|| {
+                crate::provider::Error::Jmap(Error::Server {
+                    status: 0,
+                    body: format!("JMAP: no mailbox matching '{name}'"),
+                })
+            })?;
+        self.invoke(
+            vec![json!([
+                "Mailbox/set",
+                {
+                    "accountId": self.account_id,
+                    "update": {
+                        mailbox_id: { "isSubscribed": on }
+                    }
+                },
+                "s"
+            ])],
+            vec![CORE_CAPABILITY, MAIL_CAPABILITY],
+        )
+        .await
+        .map_err(crate::provider::Error::Jmap)?;
+        Ok(())
+    }
 }
 
 impl JmapClient {

@@ -10,6 +10,18 @@ patch bumps.
 
 ### Added
 
+- **`MailProvider::create_folder` / `delete_folder` / `rename_folder` /
+  `subscribe_folder`.** Four new trait methods covering folder management.
+  `ImapProvider` delegates to existing `imap::create_folder` etc. free
+  functions. `JmapProvider` uses `Mailbox/set` (RFC 8621 §2.5) with `create`,
+  `destroy`, and `update` actions. `GraphClient` uses `/me/mailFolders` REST
+  (`POST`, `DELETE`, `PATCH`); `subscribe_folder` is a no-op with a
+  `tracing::debug!` (Graph has no subscription concept). `MockProvider` stubs
+  added to keep the dyn-compat test compiling.
+- **`MailProvider::fetch_bodies` bulk body fetch.** Default impl loops
+  `fetch_body` one at a time (JMAP, Graph). `ImapProvider` overrides with a
+  single `UID FETCH` for all UIDs in one round-trip, restoring the bulk-fetch
+  performance the IMAP path had before the unified trait landed.
 - **JMAP push in the TUI.** `App::new` spawns a long-lived `do_watch` task that
   dispatches on `account.transport`: IMAP IDLE (RFC 2177), JMAP EventSource (RFC
   8620), or a Graph poll placeholder. Push events post
@@ -34,6 +46,15 @@ patch bumps.
 
 ### Changed
 
+- **`inbx folder` CLI routes through `MailProvider`.** `cmd_folder` previously
+  called `connect_imap` directly, breaking on JMAP and Graph accounts. Now uses
+  `connect_provider` for all four sub-commands (create / delete / rename /
+  subscribe), so the correct backend is invoked automatically.
+- **`cmd_fetch` uses bulk `fetch_bodies`.** The per-UID body loop in `cmd_fetch`
+  is replaced with a single `provider.fetch_bodies(&pending)` call. IMAP gets
+  one `UID FETCH` for all pending UIDs (restores pre-unification bulk perf);
+  JMAP and Graph fall back to the default sequential loop with no user-visible
+  change.
 - **`inbx expunge` CLI routes through `MailProvider`.** Previously called
   `connect_imap` + raw `expunge_folder`, which errored on JMAP / Graph accounts.
   Now uses `connect_provider` like the TUI, so JMAP runs the `Email/set destroy`

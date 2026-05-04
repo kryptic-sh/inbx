@@ -588,6 +588,57 @@ impl crate::provider::MailProvider for GraphClient {
         Ok(0)
     }
 
+    async fn create_folder(&mut self, name: &str) -> crate::provider::Result<()> {
+        self.post_json(
+            "https://graph.microsoft.com/v1.0/me/mailFolders",
+            serde_json::json!({ "displayName": name }),
+        )
+        .await
+        .map_err(crate::provider::Error::Graph)
+    }
+
+    async fn delete_folder(&mut self, name: &str) -> crate::provider::Result<()> {
+        let folder_id = self
+            .resolve_folder_id(name)
+            .await
+            .map_err(crate::provider::Error::Graph)?;
+        let url = format!("https://graph.microsoft.com/v1.0/me/mailFolders/{folder_id}");
+        let res = self
+            .http
+            .delete(&url)
+            .bearer_auth(&self.token)
+            .send()
+            .await
+            .map_err(|e| crate::provider::Error::Graph(Error::Reqwest(e)))?;
+        if !res.status().is_success() {
+            let status = res.status().as_u16();
+            let body = res.text().await.unwrap_or_default();
+            return Err(crate::provider::Error::Graph(Error::Api { status, body }));
+        }
+        Ok(())
+    }
+
+    async fn rename_folder(&mut self, from: &str, to: &str) -> crate::provider::Result<()> {
+        let folder_id = self
+            .resolve_folder_id(from)
+            .await
+            .map_err(crate::provider::Error::Graph)?;
+        let url = format!("https://graph.microsoft.com/v1.0/me/mailFolders/{folder_id}");
+        self.patch_json(&url, serde_json::json!({ "displayName": to }))
+            .await
+            .map_err(crate::provider::Error::Graph)
+    }
+
+    async fn subscribe_folder(&mut self, name: &str, on: bool) -> crate::provider::Result<()> {
+        // Graph has no subscription concept; log and no-op.
+        tracing::debug!(
+            name,
+            on,
+            "Graph subscribe_folder: no-op (Graph has no subscription concept)"
+        );
+        Ok(())
+    }
+
     async fn append_draft(&mut self, folder: &str, raw: &[u8]) -> crate::provider::Result<()> {
         // Resolve the caller-supplied folder (normally Drafts) to its Graph id.
         let folder_id = self

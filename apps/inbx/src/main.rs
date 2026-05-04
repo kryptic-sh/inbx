@@ -1452,30 +1452,34 @@ async fn cmd_folder(action: FolderCmd) -> Result<()> {
     match action {
         FolderCmd::Create { account, name } => {
             let acct = pick_account(&cfg, account.as_deref())?.clone();
-            let mut session = inbx_net::connect_imap(&acct).await?;
-            inbx_net::create_folder(&mut session, &name).await?;
-            let _ = session.logout().await;
+            let store = inbx_store::Store::open(&acct.name).await?;
+            let mut provider = inbx_net::connect_provider(&acct, Some(&store)).await?;
+            provider.create_folder(&name).await?;
+            drop(provider);
             println!("created {name}");
         }
         FolderCmd::Delete { account, name } => {
             let acct = pick_account(&cfg, account.as_deref())?.clone();
-            let mut session = inbx_net::connect_imap(&acct).await?;
-            inbx_net::delete_folder(&mut session, &name).await?;
-            let _ = session.logout().await;
+            let store = inbx_store::Store::open(&acct.name).await?;
+            let mut provider = inbx_net::connect_provider(&acct, Some(&store)).await?;
+            provider.delete_folder(&name).await?;
+            drop(provider);
             println!("deleted {name}");
         }
         FolderCmd::Rename { account, from, to } => {
             let acct = pick_account(&cfg, account.as_deref())?.clone();
-            let mut session = inbx_net::connect_imap(&acct).await?;
-            inbx_net::rename_folder(&mut session, &from, &to).await?;
-            let _ = session.logout().await;
+            let store = inbx_store::Store::open(&acct.name).await?;
+            let mut provider = inbx_net::connect_provider(&acct, Some(&store)).await?;
+            provider.rename_folder(&from, &to).await?;
+            drop(provider);
             println!("renamed {from} → {to}");
         }
         FolderCmd::Subscribe { account, name, on } => {
             let acct = pick_account(&cfg, account.as_deref())?.clone();
-            let mut session = inbx_net::connect_imap(&acct).await?;
-            inbx_net::subscribe_folder(&mut session, &name, on).await?;
-            let _ = session.logout().await;
+            let store = inbx_store::Store::open(&acct.name).await?;
+            let mut provider = inbx_net::connect_provider(&acct, Some(&store)).await?;
+            provider.subscribe_folder(&name, on).await?;
+            drop(provider);
             println!("{} {name}", if on { "subscribed" } else { "unsubscribed" });
         }
     }
@@ -3353,8 +3357,8 @@ async fn cmd_fetch(
             tracing::info!(count = pending.len(), "fetching bodies");
             // Open contacts store once for Autocrypt harvest (best-effort).
             let contacts = inbx_contacts::ContactsStore::open(&acct.name).await.ok();
-            for uid in pending {
-                let raw = provider.fetch_body(&folder, uid).await?;
+            let pairs = provider.fetch_bodies(&folder, &pending).await?;
+            for (uid, raw) in pairs {
                 let path = store.write_maildir(&folder, &raw, "\\Seen")?;
                 store
                     .set_maildir_path(&folder, uid, uidvalidity, &path.to_string_lossy())
