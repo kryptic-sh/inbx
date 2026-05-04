@@ -8,6 +8,16 @@ patch bumps.
 
 ## [Unreleased]
 
+### Added
+
+- Homebrew tap auto-publish for `inbx` on tag push. New
+  `pkg/homebrew/inbx.rb.in` template + `brew-tap` job in `release.yml` renders
+  the formula with the just-uploaded macOS sha256s and pushes it to
+  `kryptic-sh/homebrew-tap`. Install with `brew install kryptic-sh/tap/inbx`.
+- Alpine `.apk` packaging (x86_64) auto-built from the musl tarball and uploaded
+  to GitHub Releases on every tag. Install with
+  `apk add --allow-untrusted inbx-*.apk`.
+
 ## [0.3.2] - 2026-05-04
 
 ### Fixed

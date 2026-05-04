@@ -114,6 +114,25 @@ inbx tui                              # ratatui TUI
 inbx completion fish > ~/.config/fish/completions/inbx.fish
 ```
 
+## Install
+
+**macOS (Homebrew)**
+
+```bash
+brew install kryptic-sh/tap/inbx
+```
+
+**Arch Linux (AUR)**
+
+```bash
+yay -S inbx-bin
+```
+
+**Pre-built binaries**
+
+Grab the tarball for your platform from the
+[releases page](https://github.com/kryptic-sh/inbx/releases).
+
 ## Build
 
 ```
