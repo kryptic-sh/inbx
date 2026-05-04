@@ -205,6 +205,113 @@ fn write_outer_headers(buf: &mut Vec<u8>, h: &OuterHeaders) {
     }
 }
 
+/// Parsed representation of an `Autocrypt:` header.
+#[derive(Debug, Clone)]
+pub struct AutocryptHeader {
+    /// The `addr=` value (sender email).
+    pub addr: String,
+    /// Re-armored ASCII public key (round-tripped through binary OpenPGP packets).
+    pub keydata_armored: String,
+    /// Lowercase hex fingerprint of the primary key.
+    pub fingerprint: String,
+}
+
+/// Parse an `Autocrypt:` header value (everything AFTER `"Autocrypt: "`).
+///
+/// Per Autocrypt 1.1 §2:
+///  - attributes are `key=value;` separated
+///  - RFC 5322 line folds (`\r\n` + leading whitespace) inside `keydata=` are
+///    collapsed before base64-decoding
+///  - `addr=` is required; `keydata=` is required
+///  - unknown attributes are silently ignored (forward compatibility)
+pub fn parse_autocrypt_header(value: &str) -> Result<AutocryptHeader> {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    use pgp::composed::Deserializable;
+    use pgp::types::KeyDetails;
+
+    // Collapse RFC 5322 line folds: CRLF + leading whitespace → nothing.
+    // Also handle bare LF folds (liberal parsing).
+    let unfolded = {
+        let mut s = value.to_string();
+        // CRLF + whitespace
+        while let Some(pos) = s.find("\r\n") {
+            let after = pos + 2;
+            if s[after..].starts_with([' ', '\t']) {
+                s.replace_range(pos..after + 1, "");
+            } else {
+                break;
+            }
+        }
+        // bare LF + whitespace
+        let mut out = String::with_capacity(s.len());
+        let mut chars = s.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c == '\n'
+                && chars
+                    .peek()
+                    .map(|p| *p == ' ' || *p == '\t')
+                    .unwrap_or(false)
+            {
+                chars.next(); // drop the leading whitespace
+                continue;
+            }
+            out.push(c);
+        }
+        out
+    };
+
+    let mut addr: Option<String> = None;
+    let mut keydata_b64: Option<String> = None;
+
+    for part in unfolded.split(';') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        if let Some(eq) = part.find('=') {
+            let key = part[..eq].trim().to_ascii_lowercase();
+            let val = part[eq + 1..].trim();
+            match key.as_str() {
+                "addr" => addr = Some(val.to_string()),
+                "keydata" => {
+                    // Strip all whitespace from keydata value.
+                    let clean: String = val.chars().filter(|c| !c.is_ascii_whitespace()).collect();
+                    keydata_b64 = Some(clean);
+                }
+                _ => {} // ignore unknown attrs (prefer-encrypt, etc.)
+            }
+        }
+    }
+
+    let addr = addr.ok_or_else(|| crate::Error::Rpgp("Autocrypt: missing addr=".into()))?;
+    let keydata_b64 =
+        keydata_b64.ok_or_else(|| crate::Error::Rpgp("Autocrypt: missing keydata=".into()))?;
+
+    let binary = STANDARD
+        .decode(keydata_b64.as_bytes())
+        .map_err(|e| crate::Error::Rpgp(format!("Autocrypt keydata base64: {e}")))?;
+
+    let signed_key =
+        pgp::composed::SignedPublicKey::from_bytes(std::io::BufReader::new(binary.as_slice()))
+            .map_err(|e| crate::Error::Rpgp(format!("Autocrypt key parse: {e}")))?;
+
+    let fingerprint = signed_key
+        .primary_key
+        .fingerprint()
+        .to_string()
+        .to_lowercase();
+
+    let keydata_armored = signed_key
+        .to_armored_string(None.into())
+        .map_err(|e| crate::Error::Rpgp(format!("Autocrypt re-armor: {e}")))?;
+
+    Ok(AutocryptHeader {
+        addr,
+        keydata_armored,
+        fingerprint,
+    })
+}
+
 /// Build the value for an `Autocrypt:` header per Autocrypt 1.1.
 ///
 /// Returns the header value (no leading "Autocrypt:" or trailing CRLF).
@@ -318,5 +425,68 @@ mod tests {
                 line
             );
         }
+    }
+
+    /// Generate a key, build an Autocrypt header value, parse it back via
+    /// `parse_autocrypt_header`, assert the fingerprint round-trips correctly.
+    #[tokio::test]
+    async fn parse_autocrypt_round_trip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (key_id, _) = keygen(tmp.path(), "Dave", "dave@example.com", "")
+            .await
+            .unwrap();
+        let src = crate::inbx_managed::InbxManagedSource::new(tmp.path().to_path_buf());
+        let armored = src.export_public(&key_id).await.unwrap();
+
+        let header_value = autocrypt_header_value("dave@example.com", &armored.0).unwrap();
+        let parsed = parse_autocrypt_header(&header_value).unwrap();
+
+        assert_eq!(parsed.addr, "dave@example.com");
+        assert_eq!(parsed.fingerprint, key_id.0.to_lowercase());
+        assert!(
+            parsed
+                .keydata_armored
+                .contains("BEGIN PGP PUBLIC KEY BLOCK")
+        );
+    }
+
+    /// Manually fold a header value at 76 chars, verify parse still succeeds.
+    #[tokio::test]
+    async fn parse_autocrypt_handles_folds() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (key_id, _) = keygen(tmp.path(), "Eve", "eve@example.com", "")
+            .await
+            .unwrap();
+        let src = crate::inbx_managed::InbxManagedSource::new(tmp.path().to_path_buf());
+        let armored = src.export_public(&key_id).await.unwrap();
+
+        // Build unfolded value, then manually re-fold at 76 chars with CRLF + space.
+        let value = autocrypt_header_value("eve@example.com", &armored.0).unwrap();
+        // Replace existing folds with a different fold length to test robustness.
+        let unfolded: String = value.replace("\r\n ", "");
+        let refolded = unfolded
+            .as_bytes()
+            .chunks(76)
+            .map(|c| std::str::from_utf8(c).unwrap_or(""))
+            .collect::<Vec<_>>()
+            .join("\r\n ");
+
+        let parsed = parse_autocrypt_header(&refolded).unwrap();
+        assert_eq!(parsed.fingerprint, key_id.0.to_lowercase());
+    }
+
+    /// `parse_autocrypt_header` must error when `addr=` is absent.
+    #[test]
+    fn parse_autocrypt_missing_addr_errors() {
+        // Build a minimal header value with keydata but no addr.
+        use base64::{Engine, engine::general_purpose::STANDARD};
+        let fake_keydata = STANDARD.encode(b"not-real-but-just-testing-attr-parse");
+        let value = format!("keydata={fake_keydata}");
+        let result = parse_autocrypt_header(&value);
+        assert!(
+            result.is_err(),
+            "expected error when addr= is missing, got: {:?}",
+            result
+        );
     }
 }

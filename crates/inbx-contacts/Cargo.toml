@@ -11,9 +11,11 @@ authors.workspace = true
 
 [dependencies]
 inbx-config.workspace = true
+inbx-pgp.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 tokio.workspace = true
 sqlx.workspace = true
 mail-parser.workspace = true
 reqwest.workspace = true
+async-trait.workspace = true

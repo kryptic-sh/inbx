@@ -6,6 +6,7 @@ use std::collections::{HashMap, HashSet};
 
 use mail_parser::{MessageParser, MimeHeaders, PartType};
 
+pub use inbx_pgp::mime::AutocryptHeader;
 pub use pgp::{SecureKind, SecurityInfo};
 
 #[derive(Debug, thiserror::Error)]
@@ -58,6 +59,9 @@ pub struct Rendered {
     pub security: SecurityInfo,
     /// Populated when the caller passes a `KeySource` and PGP content is present.
     pub pgp_verify: Option<PgpVerifyResult>,
+    /// Parsed Autocrypt header from the incoming message, if present.
+    /// Callers should pass this to `ContactsStore::store_autocrypt` for harvest.
+    pub autocrypt: Option<AutocryptHeader>,
 }
 
 const TRACKER_HOSTS: &[&str] = &[
@@ -82,32 +86,44 @@ pub fn render_message(raw: &[u8], policy: RemotePolicy) -> Result<Rendered> {
     render_message_inner(raw, policy)
 }
 
-/// Async entry-point that accepts an optional [`inbx_pgp::KeySource`].
+/// Async entry-point that accepts an optional [`inbx_pgp::KeySource`] and an
+/// optional [`inbx_pgp::PubkeyLookup`] for sender-key resolution.
 ///
 /// * When `pgp` is `None` or the message contains no PGP content, behaves
 ///   identically to [`render_message`] with `pgp_verify: None`.
 /// * `PgpMime` → extracts the signed inner part and `application/pgp-signature`
-///   body, verifies using the user's own exported pubkey (slice 2 scope;
-///   sender-key lookup via contact store is slice 3).
+///   body. If `lookup` returns a key for the From address, verifies against that.
+///   Otherwise falls back to the user's own key (slice-2 behaviour) and tags
+///   `pgp_verify.error` with a fallback notice.
 /// * `PgpEncrypted` → decrypts, re-renders the decrypted bytes through
 ///   `render_message_inner`, merges into the returned `Rendered`.
+/// * Any `Autocrypt:` header is parsed and surfaced in `Rendered.autocrypt`.
+///   The caller is responsible for calling `ContactsStore::store_autocrypt`.
 ///
 /// Errors do NOT fail the render — they populate `pgp_verify.error`.
 pub async fn render_message_with_pgp(
     raw: &[u8],
     policy: RemotePolicy,
     pgp: Option<&dyn inbx_pgp::KeySource>,
+    lookup: Option<&dyn inbx_pgp::PubkeyLookup>,
 ) -> Result<Rendered> {
     let mut rendered = render_message_inner(raw, policy)?;
     rendered.security = pgp::detect(raw);
+
+    // Harvest Autocrypt header regardless of PGP verification path.
+    rendered.autocrypt = extract_autocrypt_header(raw);
 
     let Some(source) = pgp else {
         return Ok(rendered);
     };
 
+    // Extract the From address for sender-key lookup.
+    let from_email = extract_from_email(raw);
+
     match rendered.security.kind {
         SecureKind::PgpMime => {
-            rendered.pgp_verify = Some(try_verify_pgp_mime(raw, source).await);
+            rendered.pgp_verify =
+                Some(try_verify_pgp_mime(raw, source, lookup, from_email.as_deref()).await);
         }
         SecureKind::PgpEncrypted => {
             let (verify_result, decrypted_rendered) =
@@ -127,7 +143,52 @@ pub async fn render_message_with_pgp(
     Ok(rendered)
 }
 
-async fn try_verify_pgp_mime(raw: &[u8], source: &dyn inbx_pgp::KeySource) -> PgpVerifyResult {
+/// Extract and parse the first `Autocrypt:` header from a raw message.
+fn extract_autocrypt_header(raw: &[u8]) -> Option<AutocryptHeader> {
+    let s = std::str::from_utf8(raw).ok()?;
+    // Find "Autocrypt:" header (case-insensitive, at start of line).
+    let lower = s.to_ascii_lowercase();
+    let needle = "autocrypt:";
+    let pos = lower.find(needle)?;
+    let after = &s[pos + needle.len()..];
+    // Collect the full (possibly folded) header value up to a non-folded newline.
+    let mut value = String::new();
+    let mut chars = after.chars().peekable();
+    loop {
+        let line: String = chars.by_ref().take_while(|&c| c != '\n').collect();
+        // Strip trailing CR if any.
+        let line = line.trim_end_matches('\r');
+        value.push_str(line);
+        // If next char is whitespace it's a fold continuation.
+        if chars
+            .peek()
+            .map(|c| *c == ' ' || *c == '\t')
+            .unwrap_or(false)
+        {
+            value.push('\n');
+        } else {
+            break;
+        }
+    }
+    inbx_pgp::mime::parse_autocrypt_header(value.trim()).ok()
+}
+
+/// Extract the first From: address from a raw message.
+fn extract_from_email(raw: &[u8]) -> Option<String> {
+    let parsed = MessageParser::default().parse(raw)?;
+    parsed
+        .from()
+        .and_then(|g| g.first())
+        .and_then(|a| a.address())
+        .map(|s| s.to_string())
+}
+
+async fn try_verify_pgp_mime(
+    raw: &[u8],
+    source: &dyn inbx_pgp::KeySource,
+    lookup: Option<&dyn inbx_pgp::PubkeyLookup>,
+    from_email: Option<&str>,
+) -> PgpVerifyResult {
     // Extract signed inner bytes and detached signature from a multipart/signed message.
     let (signed_bytes, sig_bytes) = match extract_pgp_mime_parts(raw) {
         Some(p) => p,
@@ -139,32 +200,45 @@ async fn try_verify_pgp_mime(raw: &[u8], source: &dyn inbx_pgp::KeySource) -> Pg
         }
     };
 
-    // Slice 2: verify against the *user's own* exported key.
-    // Slice 3 will look up sender's key from contacts/key-server.
-    let keys = match source.list_keys().await {
-        Ok(k) => k,
-        Err(e) => {
-            return PgpVerifyResult {
-                error: Some(format!("list_keys: {e}")),
-                ..Default::default()
-            };
+    // Try to get sender's pubkey from contacts lookup first.
+    let (pub_key, fallback_error) = if let (Some(lk), Some(email)) = (lookup, from_email) {
+        match lk.lookup(email).await {
+            Ok(Some(key)) => (key, None),
+            Ok(None) => {
+                // Fall back to own key — tag error as informational.
+                let fallback_key = match own_key(source).await {
+                    Ok(k) => k,
+                    Err(e) => return e,
+                };
+                (
+                    fallback_key,
+                    Some(format!(
+                        "no stored pubkey for sender ({email}) — verifying against own key (fallback)"
+                    )),
+                )
+            }
+            Err(e) => {
+                let fallback_key = match own_key(source).await {
+                    Ok(k) => k,
+                    Err(fe) => return fe,
+                };
+                (
+                    fallback_key,
+                    Some(format!(
+                        "pubkey lookup error: {e} — verifying against own key (fallback)"
+                    )),
+                )
+            }
         }
-    };
-    let Some((first_key_id, _)) = keys.into_iter().next() else {
-        return PgpVerifyResult {
-            error: Some("no keys available for verification".into()),
-            ..Default::default()
+    } else {
+        // No lookup provided — slice-2 / no-contacts-store fallback. No error tag.
+        let fallback_key = match own_key(source).await {
+            Ok(k) => k,
+            Err(e) => return e,
         };
+        (fallback_key, None)
     };
-    let pub_key = match source.export_public(&first_key_id).await {
-        Ok(k) => k,
-        Err(e) => {
-            return PgpVerifyResult {
-                error: Some(format!("export_public: {e}")),
-                ..Default::default()
-            };
-        }
-    };
+
     let sig = inbx_pgp::Signature(sig_bytes);
     match source.verify_detached(&pub_key, &signed_bytes, &sig).await {
         Ok(vr) => PgpVerifyResult {
@@ -173,13 +247,42 @@ async fn try_verify_pgp_mime(raw: &[u8], source: &dyn inbx_pgp::KeySource) -> Pg
             signer_uid: vr.signer_uid,
             created_unix: vr.created_unix,
             decrypted_body: None,
-            error: None,
+            error: fallback_error,
         },
         Err(e) => PgpVerifyResult {
             error: Some(format!("verify_detached: {e}")),
             ..Default::default()
         },
     }
+}
+
+/// Export the first available key from `source`, returning `Ok(ArmoredKey)` or
+/// a ready-made `PgpVerifyResult` error.
+async fn own_key(
+    source: &dyn inbx_pgp::KeySource,
+) -> std::result::Result<inbx_pgp::ArmoredKey, PgpVerifyResult> {
+    let keys = match source.list_keys().await {
+        Ok(k) => k,
+        Err(e) => {
+            return Err(PgpVerifyResult {
+                error: Some(format!("list_keys: {e}")),
+                ..Default::default()
+            });
+        }
+    };
+    let Some((first_key_id, _)) = keys.into_iter().next() else {
+        return Err(PgpVerifyResult {
+            error: Some("no keys available for verification".into()),
+            ..Default::default()
+        });
+    };
+    source
+        .export_public(&first_key_id)
+        .await
+        .map_err(|e| PgpVerifyResult {
+            error: Some(format!("export_public: {e}")),
+            ..Default::default()
+        })
 }
 
 async fn try_decrypt_pgp_mime(
@@ -423,6 +526,7 @@ fn render_message_inner(raw: &[u8], policy: RemotePolicy) -> Result<Rendered> {
         phishing: phishing_warnings,
         security,
         pgp_verify: None,
+        autocrypt: None,
     })
 }
 

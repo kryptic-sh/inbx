@@ -220,6 +220,8 @@ async fn sync_once(
         if !pending.is_empty() {
             let uids: Vec<u32> = pending.iter().map(|u| *u as u32).collect();
             let bodies = inbx_net::fetch_bodies(&mut session, folder, &uids).await?;
+            // Open contacts store once for the entire body batch (best-effort).
+            let contacts = inbx_contacts::ContactsStore::open(&account.name).await.ok();
             for (uid, raw) in bodies {
                 let path = store.write_maildir(folder, &raw, "\\Seen")?;
                 store
@@ -231,11 +233,46 @@ async fn sync_once(
                     )
                     .await?;
                 index_in_store(&store, folder, uid as i64, uidvalidity as i64, &raw).await?;
+                // Harvest Autocrypt header from each incoming body (best-effort).
+                if let Some(cs) = &contacts {
+                    harvest_autocrypt(cs, &raw).await;
+                }
             }
         }
     }
     let _ = session.logout().await;
     Ok(())
+}
+
+/// Parse and store any Autocrypt: header from a raw message into the contacts store.
+/// Logs on error but never propagates — sync must not fail over a contacts update.
+async fn harvest_autocrypt(contacts: &inbx_contacts::ContactsStore, raw: &[u8]) {
+    use inbx_render::AutocryptHeader;
+    // Use a minimal render pass (no PGP, no key lookup) just to get autocrypt field.
+    match inbx_render::render_message_with_pgp(raw, inbx_render::RemotePolicy::Block, None, None)
+        .await
+    {
+        Ok(rendered) => {
+            if let Some(AutocryptHeader {
+                addr,
+                keydata_armored,
+                fingerprint,
+            }) = rendered.autocrypt
+            {
+                if let Err(e) = contacts
+                    .store_autocrypt(&addr, &keydata_armored, &fingerprint)
+                    .await
+                {
+                    tracing::debug!(%addr, %e, "autocrypt harvest: store_autocrypt failed (ignored)");
+                } else {
+                    tracing::debug!(%addr, %fingerprint, "autocrypt harvest: stored pubkey");
+                }
+            }
+        }
+        Err(e) => {
+            tracing::debug!(%e, "autocrypt harvest: render failed (ignored)");
+        }
+    }
 }
 
 async fn index_in_store(

@@ -3238,6 +3238,8 @@ async fn cmd_fetch(
             tracing::info!(count = pending.len(), "fetching bodies");
             let uids: Vec<u32> = pending.iter().map(|u| *u as u32).collect();
             let bodies = inbx_net::fetch_bodies(&mut session, &folder, &uids).await?;
+            // Open contacts store once for Autocrypt harvest (best-effort).
+            let contacts = inbx_contacts::ContactsStore::open(&acct.name).await.ok();
             for (uid, raw) in bodies {
                 let path = store.write_maildir(&folder, &raw, "\\Seen")?;
                 store
@@ -3249,6 +3251,22 @@ async fn cmd_fetch(
                     )
                     .await?;
                 index_message(&store, &folder, uid as i64, uidvalidity as i64, &raw).await?;
+                // Harvest Autocrypt: header into contacts (best-effort).
+                if let Some(cs) = &contacts
+                    && let Ok(rendered) = inbx_render::render_message_with_pgp(
+                        &raw,
+                        inbx_render::RemotePolicy::Block,
+                        None,
+                        None,
+                    )
+                    .await
+                    && let Some(ac) = rendered.autocrypt
+                    && let Err(e) = cs
+                        .store_autocrypt(&ac.addr, &ac.keydata_armored, &ac.fingerprint)
+                        .await
+                {
+                    tracing::debug!(addr = %ac.addr, %e, "autocrypt harvest: ignored");
+                }
             }
             println!("{folder}: bodies downloaded");
         }

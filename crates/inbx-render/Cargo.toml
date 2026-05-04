@@ -21,3 +21,5 @@ base64.workspace = true
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "macros"] }
 tempfile.workspace = true
+inbx-pgp.workspace = true
+async-trait.workspace = true

@@ -43,6 +43,15 @@ pub struct VerifyResult {
     pub created_unix: Option<i64>,
 }
 
+/// Trait for looking up a sender's stored public key by email address.
+/// Implemented by `inbx-contacts::ContactsStore`; `inbx-render` depends only on
+/// this trait so it does not need a hard dep on `inbx-contacts` (sqlite).
+#[async_trait::async_trait]
+pub trait PubkeyLookup: Send + Sync {
+    /// Return the ASCII-armored public key stored for `email`, or `None`.
+    async fn lookup(&self, email: &str) -> Result<Option<ArmoredKey>>;
+}
+
 /// Operations that any PGP key source must support.
 #[async_trait::async_trait]
 pub trait KeySource: Send + Sync {
