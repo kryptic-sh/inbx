@@ -128,6 +128,12 @@ brew install kryptic-sh/tap/inbx
 yay -S inbx-bin
 ```
 
+**Alpine Linux**
+
+```bash
+apk add --allow-untrusted inbx-*.apk   # download .apk from releases page
+```
+
 **Pre-built binaries**
 
 Grab the tarball for your platform from the
