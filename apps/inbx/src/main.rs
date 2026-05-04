@@ -1,3 +1,4 @@
+mod mbox;
 mod tui;
 
 use tracing_subscriber::layer::SubscriberExt as _;
@@ -197,7 +198,7 @@ enum Cmd {
         #[command(subcommand)]
         action: IcalCmd,
     },
-    /// Export messages from local index to mbox.
+    /// Export messages from local index to mbox or single .eml.
     Export {
         #[arg(long)]
         account: Option<String>,
@@ -206,6 +207,18 @@ enum Cmd {
         /// Output path; `-` for stdout.
         #[arg(long, default_value = "-")]
         output: String,
+        /// Export a single message as raw RFC 5322 (.eml), no mbox envelope.
+        #[arg(long)]
+        eml: bool,
+        /// UID of the single message to export (required with --eml).
+        #[arg(long)]
+        uid: Option<i64>,
+        /// Skip messages older than this Unix timestamp.
+        #[arg(long)]
+        since: Option<i64>,
+        /// Maximum number of messages to export.
+        #[arg(long)]
+        limit: Option<usize>,
     },
     /// Import an mbox or .eml file into a folder. The folder is created
     /// in the local index but not on the server.
@@ -973,7 +986,11 @@ async fn main() -> Result<()> {
             account,
             folder,
             output,
-        } => cmd_export(account, folder, output).await,
+            eml,
+            uid,
+            since,
+            limit,
+        } => cmd_export(account, folder, output, eml, uid, since, limit).await,
         Cmd::Import {
             account,
             folder,
@@ -1486,11 +1503,32 @@ async fn cmd_sieve(action: SieveCmd) -> Result<()> {
     Ok(())
 }
 
-async fn cmd_export(account: Option<String>, folder: String, output: String) -> Result<()> {
+async fn cmd_export(
+    account: Option<String>,
+    folder: String,
+    output: String,
+    eml: bool,
+    uid: Option<i64>,
+    since: Option<i64>,
+    limit: Option<usize>,
+) -> Result<()> {
     use std::io::Write as _;
     let cfg = inbx_config::load()?;
     let acct = pick_account(&cfg, account.as_deref())?;
     let store = inbx_store::Store::open(&acct.name).await?;
+
+    // .eml mode: export exactly one message as raw RFC 5322, no mbox envelope.
+    if eml {
+        let target_uid = uid.with_context(|| "--uid is required when --eml is set")?;
+        let raw = read_message_raw(&acct.name, &folder, target_uid).await?;
+        if output == "-" {
+            std::io::stdout().write_all(&raw)?;
+        } else {
+            std::fs::write(&output, &raw)?;
+        }
+        return Ok(());
+    }
+
     let rows = store.list_messages(&folder, u32::MAX).await?;
 
     let mut out: Box<dyn Write> = if output == "-" {
@@ -1501,6 +1539,18 @@ async fn cmd_export(account: Option<String>, folder: String, output: String) -> 
 
     let mut count = 0usize;
     for m in rows {
+        // --since filter
+        if let Some(since_ts) = since
+            && m.date_unix.unwrap_or(0) < since_ts
+        {
+            continue;
+        }
+        // --limit cap
+        if let Some(lim) = limit
+            && count >= lim
+        {
+            break;
+        }
         let Some(path) = m.maildir_path else { continue };
         let raw = match std::fs::read(&path) {
             Ok(b) => b,
@@ -1512,17 +1562,13 @@ async fn cmd_export(account: Option<String>, folder: String, output: String) -> 
         let from = m.from_addr.as_deref().unwrap_or("MAILER-DAEMON");
         let date = m
             .date_unix
-            .map(format_unix_rfc822)
+            .map(mbox::format_unix_from_line)
             .unwrap_or_else(|| "Thu Jan  1 00:00:00 1970".into());
         writeln!(out, "From {from} {date}")?;
-        // mbox From-quoting: lines starting with "From " get a > prepended.
-        for line in raw.split(|b| *b == b'\n') {
-            if line.starts_with(b"From ") {
-                out.write_all(b">")?;
-            }
-            out.write_all(line)?;
-            out.write_all(b"\n")?;
-        }
+        // Inject Status: / X-Status: headers reflecting local flags.
+        let enriched = mbox::inject_status_headers(&raw, &m.flags);
+        // mbox From-quoting.
+        out.write_all(&mbox::apply_from_quoting(&enriched))?;
         out.write_all(b"\n")?;
         count += 1;
     }
@@ -1560,7 +1606,11 @@ async fn cmd_import(
         })
         .await?;
 
-    let messages: Vec<Vec<u8>> = if eml { vec![buf] } else { split_mbox(&buf) };
+    let messages: Vec<Vec<u8>> = if eml {
+        vec![buf]
+    } else {
+        mbox::split_mbox(&buf)
+    };
 
     let mut next_uid = 1i64;
     let now = std::time::SystemTime::now()
@@ -1594,7 +1644,13 @@ async fn cmd_import(
             .as_ref()
             .and_then(|p| p.date())
             .map(|d| d.to_timestamp());
-        let path = store.write_maildir(&folder, &raw, "\\Seen")?;
+        // Derive flags from RFC 4155 Status: / X-Status: headers when present;
+        // fall back to empty (no flags) rather than defaulting to \Seen.
+        let flags = {
+            let f = mbox::flags_from_status_headers(&raw);
+            if f.is_empty() { String::new() } else { f }
+        };
+        let path = store.write_maildir(&folder, &raw, &flags)?;
         let row = inbx_store::MessageRow {
             folder: folder.clone(),
             uid: next_uid,
@@ -1606,7 +1662,7 @@ async fn cmd_import(
             from_addr: from,
             to_addrs: to,
             date_unix,
-            flags: "\\Seen".into(),
+            flags,
             maildir_path: Some(path.to_string_lossy().into_owned()),
             headers_only: 0,
             fetched_at_unix: now,
@@ -1621,62 +1677,6 @@ async fn cmd_import(
     }
     println!("imported {imported} messages into {folder}");
     Ok(())
-}
-
-fn split_mbox(buf: &[u8]) -> Vec<Vec<u8>> {
-    // Split at lines starting with "From " (the envelope separator).
-    let mut out: Vec<Vec<u8>> = Vec::new();
-    let mut current: Vec<u8> = Vec::new();
-    let mut at_line_start = true;
-    let mut i = 0;
-    while i < buf.len() {
-        if at_line_start && buf[i..].starts_with(b"From ") {
-            // Flush previous
-            if !current.is_empty() {
-                out.push(strip_from_quoting(std::mem::take(&mut current)));
-            }
-            // Skip the "From " line.
-            while i < buf.len() && buf[i] != b'\n' {
-                i += 1;
-            }
-            if i < buf.len() {
-                i += 1;
-            }
-            continue;
-        }
-        let b = buf[i];
-        current.push(b);
-        at_line_start = b == b'\n';
-        i += 1;
-    }
-    if !current.is_empty() {
-        out.push(strip_from_quoting(current));
-    }
-    out
-}
-
-fn strip_from_quoting(buf: Vec<u8>) -> Vec<u8> {
-    // Reverse mbox quoting: ">From " → "From ".
-    let mut out = Vec::with_capacity(buf.len());
-    let mut at_line_start = true;
-    let mut i = 0;
-    while i < buf.len() {
-        if at_line_start && buf[i] == b'>' && buf[i + 1..].starts_with(b"From ") {
-            i += 1;
-        }
-        out.push(buf[i]);
-        at_line_start = buf[i] == b'\n';
-        i += 1;
-    }
-    out
-}
-
-fn format_unix_rfc822(ts: i64) -> String {
-    // Rough day-of-week + ASCII timestamp; precision not critical for mbox.
-    let secs = ts.max(0);
-    let days = secs / 86400;
-    let dow = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"][(days % 7) as usize];
-    format!("{dow} Jan  1 00:00:{:02} 1970", secs % 60)
 }
 
 async fn cmd_unsubscribe(
