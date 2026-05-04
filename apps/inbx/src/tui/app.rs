@@ -131,6 +131,12 @@ pub(super) struct App {
     /// hits the disk; reused across reply / contacts-pane / pubkey-lookup).
     /// `Some(None)` after a failed open so we don't keep retrying.
     contacts_store: Option<Option<Arc<ContactsStore>>>,
+    /// Handle for the currently running background watch task. Aborted and
+    /// replaced whenever the active folder changes via `respawn_watch`.
+    watch_handle: Option<tokio::task::JoinHandle<()>>,
+    /// Name of the folder the current `watch_handle` is bound to.  `None`
+    /// while no watch task is running.
+    watched_folder: Option<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -322,21 +328,10 @@ impl App {
             contacts_store: None,
             receipt_responded: HashSet::new(),
             current_receipt: None,
+            watch_handle: None,
+            watched_folder: None,
         };
         app.reload_messages().await?;
-
-        // Spawn the long-lived background watch task (IDLE for IMAP, EventSource
-        // for JMAP).  It posts `TaskResult::WatchSignal` whenever the server
-        // signals new data; the event loop translates that into a `manual_sync`.
-        // The task exits cleanly when the channel receiver is dropped (TUI exit).
-        let watch_account = app.account.clone();
-        let watch_folder = app
-            .current_folder()
-            .map(|f| f.name.clone())
-            .unwrap_or_else(|| "INBOX".into());
-        let watch_tx = app.task_tx.0.clone();
-        let watch_store = app.store.clone();
-        tokio::spawn(do_watch(watch_account, watch_folder, watch_store, watch_tx));
 
         Ok(app)
     }
@@ -1495,6 +1490,7 @@ impl App {
             self.msg_state.select(Some(next));
         }
         self.refresh_body();
+        self.respawn_watch();
         Ok(())
     }
 
@@ -1582,6 +1578,28 @@ impl App {
             (Pane::Messages, false) => Pane::Folders,
             (Pane::Preview, false) => Pane::Messages,
         };
+    }
+
+    /// Spawn (or re-spawn) the background watch loop bound to the currently-
+    /// selected folder.  No-op if already watching that folder.  Aborts the
+    /// previous task before spawning a new one — the old IDLE / EventSource /
+    /// poll drops cleanly when the future is cancelled (sockets close on drop).
+    pub(super) fn respawn_watch(&mut self) {
+        let Some(folder) = self.current_folder().map(|f| f.name.clone()) else {
+            return; // No folder selected — nothing to watch.
+        };
+        if self.watched_folder.as_deref() == Some(folder.as_str()) {
+            return; // Already watching this folder.
+        }
+        if let Some(h) = self.watch_handle.take() {
+            h.abort();
+        }
+        let account = self.account.clone();
+        let store = self.store.clone();
+        let tx = self.task_tx.0.clone();
+        let f = folder.clone();
+        self.watch_handle = Some(tokio::spawn(do_watch(account, f, store, tx)));
+        self.watched_folder = Some(folder);
     }
 }
 
@@ -1941,8 +1959,10 @@ fn open_url(url: &str) -> std::io::Result<()> {
 /// Reconnect / backoff: any error backs off 30 s before retrying, matching the
 /// CLI `inbx watch` and `inbx-sync` patterns.
 ///
-/// The task runs for the lifetime of the TUI session. `tx.send` errors (the
-/// receiver was dropped because the TUI exited) terminate the loop cleanly.
+/// The task is per-folder: `App::respawn_watch` aborts and replaces it whenever
+/// the active folder changes, so the watch always tracks the current view.
+///
+/// `tx.send` errors (receiver dropped on TUI exit) terminate the loop cleanly.
 async fn do_watch(
     account: inbx_config::Account,
     folder: String,

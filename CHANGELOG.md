@@ -46,6 +46,11 @@ patch bumps.
 
 ### Changed
 
+- **TUI watch follows the active folder.** The background push task (IMAP IDLE /
+  JMAP EventSource / Graph delta poll) now rebinds whenever the user navigates
+  to a different folder — previously it stayed bound to the boot folder, so push
+  silently went dark on the new view. `reload_messages` is the chokepoint;
+  same-folder reloads are a no-op.
 - **`inbx folder` CLI routes through `MailProvider`.** `cmd_folder` previously
   called `connect_imap` directly, breaking on JMAP and Graph accounts. Now uses
   `connect_provider` for all four sub-commands (create / delete / rename /
