@@ -5,6 +5,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{FromRow, SqlitePool};
 
+mod threading;
+pub use threading::normalize_subject;
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("io: {0}")]
@@ -84,6 +87,19 @@ impl Store {
             .await?;
         sqlx::migrate!("./migrations").run(&pool).await?;
         Ok(Self { pool, root })
+    }
+
+    /// Construct a Store from a pre-existing pool (used in tests).
+    pub fn from_pool(pool: SqlitePool) -> Self {
+        Self {
+            pool,
+            root: PathBuf::new(),
+        }
+    }
+
+    /// Expose the pool (used in tests).
+    pub fn pool(&self) -> &SqlitePool {
+        &self.pool
     }
 
     pub fn root(&self) -> &Path {
@@ -209,9 +225,9 @@ impl Store {
         Ok(())
     }
 
-    /// Update threading columns and resolve thread_id by walking In-Reply-To
-    /// up through known parents. If no parent is in the store, the message's
-    /// own message_id (or self-uid placeholder) becomes the thread root.
+    /// Update threading columns and resolve thread_id via the JWZ algorithm.
+    /// The public signature is unchanged; the implementation now uses
+    /// `Threader::ingest` from the `threading` module.
     pub async fn set_threading(
         &self,
         folder: &str,
@@ -221,24 +237,26 @@ impl Store {
         in_reply_to: Option<&str>,
         refs: &[String],
     ) -> Result<()> {
-        let parent_ids: Vec<&str> = refs.iter().map(|s| s.as_str()).chain(in_reply_to).collect();
+        // Fetch the subject for loose Subject grouping.
+        let subject_row: Option<(Option<String>,)> = sqlx::query_as(
+            "SELECT subject FROM messages WHERE folder = ?1 AND uid = ?2 AND uidvalidity = ?3",
+        )
+        .bind(folder)
+        .bind(uid)
+        .bind(uidvalidity)
+        .fetch_optional(&self.pool)
+        .await?;
+        let subject = subject_row.and_then(|(s,)| s);
 
-        // Look up the parent's thread_id, walking from most-recent ref backward.
-        let mut thread_id: Option<String> = None;
-        for parent in parent_ids.iter().rev() {
-            let row: Option<(Option<String>,)> =
-                sqlx::query_as("SELECT thread_id FROM messages WHERE message_id = ?1 LIMIT 1")
-                    .bind(parent)
-                    .fetch_optional(&self.pool)
-                    .await?;
-            if let Some((Some(t),)) = row {
-                thread_id = Some(t);
-                break;
-            }
-        }
-        let resolved = thread_id
-            .or_else(|| message_id.map(|s| s.to_string()))
-            .unwrap_or_else(|| format!("{folder}/{uid}/{uidvalidity}"));
+        // Synthesise a stable message_id when the message has none.
+        let synthetic = format!("{folder}/{uid}/{uidvalidity}");
+        let mid = message_id.unwrap_or(synthetic.as_str());
+
+        let thread_id = threading::Threader::new(&self.pool)
+            .ingest(mid, in_reply_to, refs, subject.as_deref())
+            .await?;
+
+        // Persist refs column update.
         let refs_joined = if refs.is_empty() {
             None
         } else {
@@ -254,7 +272,7 @@ impl Store {
         .bind(uidvalidity)
         .bind(in_reply_to)
         .bind(refs_joined)
-        .bind(&resolved)
+        .bind(&thread_id)
         .execute(&self.pool)
         .await?;
         Ok(())
