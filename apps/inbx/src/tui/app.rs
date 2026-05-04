@@ -678,19 +678,22 @@ impl App {
             return Ok(());
         };
         let raw = composer.to_mime()?;
-        let mut session = inbx_net::connect_imap(&self.account).await?;
-        let folders = inbx_net::list_folders(&mut session).await?;
-        match inbx_net::find_drafts_folder(&folders) {
-            Some(drafts) => {
-                inbx_net::append_draft(&mut session, &drafts, &raw).await?;
+        // Hot-path: use MailProvider so JMAP accounts use Email/import.
+        let mut provider = inbx_net::connect_provider(&self.account).await?;
+        let folders = provider.list_folders().await?;
+        let drafts = inbx_net::find_drafts_folder(&folders);
+        match drafts {
+            Some(drafts_name) => {
+                provider.append_draft(&drafts_name, &raw).await?;
+                drop(provider);
                 self.composer = None;
-                self.status = format!("draft saved to {drafts}");
+                self.status = format!("draft saved to {drafts_name}");
             }
             None => {
+                drop(provider);
                 self.status = "no Drafts folder discovered".into();
             }
         }
-        let _ = session.logout().await;
         Ok(())
     }
 
@@ -886,15 +889,17 @@ impl App {
             return Ok(());
         };
         let has = msg.flags.contains(flag);
-        let mut session = inbx_net::connect_imap(&self.account).await?;
-        let op = if has { "-FLAGS" } else { "+FLAGS" };
-        inbx_net::store_flags(&mut session, &folder_name, &[msg.uid as u32], op, flag).await?;
-        let _ = session.logout().await;
         let (add, remove): (Vec<&str>, Vec<&str>) = if has {
             (vec![], vec![flag])
         } else {
             (vec![flag], vec![])
         };
+        // Hot-path: use MailProvider so JMAP accounts get Email/set.
+        let mut provider = inbx_net::connect_provider(&self.account).await?;
+        provider
+            .set_flags(&folder_name, msg.uid, &add, &remove)
+            .await?;
+        drop(provider);
         self.store
             .mutate_flags(&folder_name, &[msg.uid], &add, &remove)
             .await?;
@@ -1003,6 +1008,7 @@ impl App {
         let Some(folder_name) = self.current_folder().map(|f| f.name.clone()) else {
             return Ok(());
         };
+        // TODO(M21): port to MailProvider when JMAP expunge (Email/set destroy) lands.
         let mut session = inbx_net::connect_imap(&self.account).await?;
         let n = inbx_net::expunge_folder(&mut session, &folder_name).await?;
         let _ = session.logout().await;
@@ -1023,9 +1029,10 @@ impl App {
         let Some(msg) = self.current_message().cloned() else {
             return Ok(());
         };
-        let mut session = inbx_net::connect_imap(&self.account).await?;
-        inbx_net::uid_move(&mut session, &source, &[msg.uid as u32], target).await?;
-        let _ = session.logout().await;
+        // Hot-path: use MailProvider so JMAP accounts get Email/set move.
+        let mut provider = inbx_net::connect_provider(&self.account).await?;
+        provider.move_message(&source, msg.uid, target).await?;
+        drop(provider);
         self.store.delete_messages(&source, &[msg.uid]).await?;
         self.reload_messages().await?;
         self.status = format!("moved uid {} → {target}", msg.uid);
@@ -1570,6 +1577,8 @@ impl App {
 // ---------------------------------------------------------------------------
 
 /// Perform a full folder sync off the event-loop thread.
+///
+/// Uses `connect_provider` so JMAP accounts skip the IMAP path automatically.
 async fn do_manual_sync(
     account: inbx_config::Account,
     store: Store,
@@ -1577,11 +1586,15 @@ async fn do_manual_sync(
 ) -> super::tasks::TaskResult {
     use super::tasks::TaskResult;
     let result: anyhow::Result<(i64, usize, usize)> = async {
-        let mut session = inbx_net::connect_imap(&account).await?;
-        let (uidvalidity, rows) = inbx_net::fetch_headers(&mut session, &folder_name).await?;
+        let mut provider = inbx_net::connect_provider(&account).await?;
+        let rows = provider.fetch_headers(&folder_name, None, 500).await?;
+        // JMAP uses uidvalidity=0; IMAP rows carry real uidvalidity but
+        // HeaderRow.uidvalidity is already u32→i64 clean.
+        let uidvalidity: i64 = rows.first().map(|r| r.uidvalidity as i64).unwrap_or(0);
         let prev = store.folder_uidvalidity(&folder_name).await?;
         if let Some(prev) = prev
-            && prev as u32 != uidvalidity
+            && prev as u32 != uidvalidity as u32
+            && uidvalidity != 0
         {
             store.wipe_folder_messages(&folder_name).await?;
         }
@@ -1591,7 +1604,7 @@ async fn do_manual_sync(
                 delim: None,
                 special_use: None,
                 attrs: None,
-                uidvalidity: Some(uidvalidity as i64),
+                uidvalidity: Some(uidvalidity),
                 uidnext: None,
                 delta_link: None,
             })
@@ -1601,7 +1614,7 @@ async fn do_manual_sync(
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
         let pre_max = store
-            .folder_max_uid(&folder_name, uidvalidity as i64)
+            .folder_max_uid(&folder_name, uidvalidity)
             .await?
             .unwrap_or(0);
         let mut new_count = 0usize;
@@ -1629,7 +1642,8 @@ async fn do_manual_sync(
                 })
                 .await?;
         }
-        let _ = session.logout().await;
+        // IMAP sessions need logout; JMAP is stateless HTTP (no-op).
+        drop(provider);
         Ok((now, new_count, rows.len()))
     }
     .await;
@@ -1652,6 +1666,8 @@ async fn do_manual_sync(
 }
 
 /// Fetch a single message body off the event-loop thread.
+///
+/// Uses `connect_provider` so JMAP accounts skip the IMAP path automatically.
 async fn do_fetch_body(
     account: inbx_config::Account,
     store: Store,
@@ -1662,15 +1678,13 @@ async fn do_fetch_body(
 ) -> super::tasks::TaskResult {
     use super::tasks::TaskResult;
     let result: anyhow::Result<()> = async {
-        let mut session = inbx_net::connect_imap(&account).await?;
-        let bodies = inbx_net::fetch_bodies(&mut session, &folder_name, &[uid as u32]).await?;
-        let _ = session.logout().await;
-        if let Some((_fetched_uid, raw)) = bodies.into_iter().next() {
-            let path = store.write_maildir(&folder_name, &raw, &flags)?;
-            store
-                .set_maildir_path(&folder_name, uid, uidvalidity, &path.to_string_lossy())
-                .await?;
-        }
+        let mut provider = inbx_net::connect_provider(&account).await?;
+        let raw = provider.fetch_body(&folder_name, uid).await?;
+        drop(provider);
+        let path = store.write_maildir(&folder_name, &raw, &flags)?;
+        store
+            .set_maildir_path(&folder_name, uid, uidvalidity, &path.to_string_lossy())
+            .await?;
         Ok(())
     }
     .await;

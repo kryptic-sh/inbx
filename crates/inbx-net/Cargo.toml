@@ -31,3 +31,4 @@ serde.workspace = true
 serde_json.workspace = true
 tokio-socks.workspace = true
 keyring.workspace = true
+async-trait.workspace = true

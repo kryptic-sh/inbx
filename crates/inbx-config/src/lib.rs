@@ -309,4 +309,55 @@ username = "x"
         assert_eq!(cfg.accounts[0].imap_port, 993);
         assert_eq!(cfg.accounts[0].smtp_port, 465);
     }
+
+    /// Verify that accounts without a `[transport]` section parse as
+    /// `Transport::Imap` (the default), so existing config files keep working.
+    #[test]
+    fn transport_defaults_to_imap() {
+        let raw = r#"
+[[accounts]]
+name = "y"
+email = "y@y.com"
+imap_host = "imap.y.com"
+smtp_host = "smtp.y.com"
+username = "y"
+"#;
+        let cfg: Config = toml::from_str(raw).unwrap();
+        assert!(
+            matches!(cfg.accounts[0].transport, Transport::Imap),
+            "transport should default to Imap, got {:?}",
+            cfg.accounts[0].transport
+        );
+    }
+
+    /// Verify JMAP transport round-trips through TOML.
+    #[test]
+    fn transport_jmap_round_trip() {
+        let raw = r#"
+[[accounts]]
+name = "fastmail"
+email = "me@fastmail.com"
+imap_host = "imap.fastmail.com"
+smtp_host = "smtp.fastmail.com"
+username = "me@fastmail.com"
+
+[accounts.transport]
+kind = "jmap"
+session_url = "https://api.fastmail.com/jmap/session"
+"#;
+        let cfg: Config = toml::from_str(raw).unwrap();
+        match &cfg.accounts[0].transport {
+            Transport::Jmap { session_url } => {
+                assert_eq!(session_url, "https://api.fastmail.com/jmap/session");
+            }
+            other => panic!("expected Transport::Jmap, got {other:?}"),
+        }
+        // Also verify serialise → parse round-trip.
+        let serialised = toml::to_string_pretty(&cfg).unwrap();
+        let reparsed: Config = toml::from_str(&serialised).unwrap();
+        assert!(matches!(
+            reparsed.accounts[0].transport,
+            Transport::Jmap { .. }
+        ));
+    }
 }

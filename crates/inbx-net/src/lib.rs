@@ -4,6 +4,7 @@ pub mod imap;
 pub mod jmap;
 pub mod mdn;
 pub mod oauth;
+pub mod provider;
 pub mod proxy;
 pub mod sieve;
 pub mod smtp;
@@ -17,4 +18,5 @@ pub use imap::{
 };
 pub use mdn::{Disposition as MdnDisposition, MdnContext, build_mdn};
 pub use oauth::{Error as OAuthError, TokenSet, login as oauth_login, refresh as oauth_refresh};
+pub use provider::{Error as ProviderError, ImapProvider, MailProvider, connect_provider};
 pub use smtp::{Error as SmtpError, send_message};
