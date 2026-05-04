@@ -331,6 +331,11 @@ enum Cmd {
         #[arg(long)]
         dry_run: bool,
     },
+    /// PGP key management and file crypto operations.
+    Pgp {
+        #[command(subcommand)]
+        cmd: PgpCmd,
+    },
 }
 
 #[derive(Subcommand)]
@@ -618,6 +623,71 @@ enum OAuthCmd {
 }
 
 #[derive(Subcommand)]
+enum PgpCmd {
+    /// Generate an inbx-managed Ed25519 keypair for an account.
+    Keygen {
+        #[arg(long)]
+        account: Option<String>,
+        /// Override identity name (defaults to account email's local part).
+        #[arg(long)]
+        name: Option<String>,
+        /// Passphrase. If omitted, prompts on stdin.
+        #[arg(long)]
+        passphrase: Option<String>,
+    },
+    /// List keys available via the account's key source.
+    List {
+        #[arg(long)]
+        account: Option<String>,
+    },
+    /// Export a public key to stdout as ASCII armor.
+    Export {
+        #[arg(long)]
+        account: Option<String>,
+        /// Hex fingerprint. Defaults to the account's configured key.
+        #[arg(long)]
+        fingerprint: Option<String>,
+    },
+    /// Sign a file (detached, ASCII-armor signature on stdout).
+    Sign {
+        #[arg(long)]
+        account: Option<String>,
+        path: std::path::PathBuf,
+    },
+    /// Verify a detached signature against a file.
+    Verify {
+        #[arg(long)]
+        account: Option<String>,
+        /// Path to the signed file.
+        path: std::path::PathBuf,
+        /// Path to the detached signature (ASCII armor).
+        #[arg(long)]
+        sig: std::path::PathBuf,
+        /// Path to the signer's pubkey ASCII armor (optional; defaults to
+        /// the account's configured key for self-verify smoke tests).
+        #[arg(long)]
+        pubkey: Option<std::path::PathBuf>,
+    },
+    /// Encrypt a file to one or more pubkey files. Output written to
+    /// `<path>.pgp` unless `--out` is given.
+    Encrypt {
+        #[arg(long)]
+        account: Option<String>,
+        path: std::path::PathBuf,
+        #[arg(long)]
+        recipient: Vec<std::path::PathBuf>,
+        #[arg(long)]
+        out: Option<std::path::PathBuf>,
+    },
+    /// Decrypt a file. Output to stdout.
+    Decrypt {
+        #[arg(long)]
+        account: Option<String>,
+        path: std::path::PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
 enum ContactsCmd {
     /// Add or update a contact.
     Add {
@@ -887,6 +957,7 @@ async fn main() -> Result<()> {
             mailto,
             dry_run,
         } => cmd_unsubscribe(account, folder, uid, mailto, dry_run).await,
+        Cmd::Pgp { cmd } => cmd_pgp(cmd).await,
         Cmd::Export {
             account,
             folder,
@@ -2360,6 +2431,310 @@ async fn cmd_tui(account: Option<String>) -> Result<()> {
     let acct = pick_account(&cfg, account.as_deref())?.clone();
     tui::run(acct).await
 }
+
+// ── PGP command handlers ──────────────────────────────────────────────────────
+
+/// Resolve the per-account inbx-managed directory.
+/// Uses `pgp.managed_dir` if set; otherwise `<data_dir>/<account>/pgp/`.
+fn managed_dir_for(acct: &inbx_config::Account) -> std::path::PathBuf {
+    if let Some(pgp) = &acct.pgp
+        && let Some(dir) = &pgp.managed_dir
+    {
+        return dir.clone();
+    }
+    inbx_config::data_dir()
+        .map(|d| d.join(&acct.name).join("pgp"))
+        .unwrap_or_else(|_| {
+            std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
+                .join(".local")
+                .join("share")
+                .join("inbx")
+                .join(&acct.name)
+                .join("pgp")
+        })
+}
+
+async fn cmd_pgp(cmd: PgpCmd) -> Result<()> {
+    match cmd {
+        PgpCmd::Keygen {
+            account,
+            name,
+            passphrase,
+        } => cmd_pgp_keygen(account, name, passphrase).await,
+        PgpCmd::List { account } => cmd_pgp_list(account).await,
+        PgpCmd::Export {
+            account,
+            fingerprint,
+        } => cmd_pgp_export(account, fingerprint).await,
+        PgpCmd::Sign { account, path } => cmd_pgp_sign(account, path).await,
+        PgpCmd::Verify {
+            account,
+            path,
+            sig,
+            pubkey,
+        } => cmd_pgp_verify(account, path, sig, pubkey).await,
+        PgpCmd::Encrypt {
+            account,
+            path,
+            recipient,
+            out,
+        } => cmd_pgp_encrypt(account, path, recipient, out).await,
+        PgpCmd::Decrypt { account, path } => cmd_pgp_decrypt(account, path).await,
+    }
+}
+
+async fn cmd_pgp_keygen(
+    account: Option<String>,
+    name_override: Option<String>,
+    passphrase_flag: Option<String>,
+) -> Result<()> {
+    let mut cfg = inbx_config::load()?;
+    let acct_name = pick_account(&cfg, account.as_deref())?.name.clone();
+
+    // Check pgp config; refuse if key_source is explicitly GnuPG.
+    let needs_write = {
+        let acct = cfg.accounts.iter().find(|a| a.name == acct_name).unwrap();
+        match &acct.pgp {
+            Some(pgp) => {
+                if pgp.key_source == inbx_pgp::KeySourceKind::Gnupg {
+                    bail!(
+                        "this command writes inbx-managed keys; \
+                         set `pgp.key_source = \"inbx-managed\"` in your config first"
+                    );
+                }
+                false
+            }
+            None => true, // write default PgpConfig
+        }
+    };
+
+    if needs_write {
+        let acct = cfg
+            .accounts
+            .iter_mut()
+            .find(|a| a.name == acct_name)
+            .unwrap();
+        acct.pgp = Some(inbx_pgp::PgpConfig {
+            key_source: inbx_pgp::KeySourceKind::InbxManaged,
+            key_fingerprint: None,
+            managed_dir: None,
+        });
+        inbx_config::save(&cfg)?;
+        let cfg_path = inbx_config::config_path()?;
+        println!("wrote default pgp config to {}", cfg_path.display());
+    }
+
+    let acct = cfg
+        .accounts
+        .iter()
+        .find(|a| a.name == acct_name)
+        .unwrap()
+        .clone();
+    let email = &acct.email;
+    let name = name_override.unwrap_or_else(|| {
+        // Default: local part of email.
+        email.split('@').next().unwrap_or(email).to_string()
+    });
+
+    let passphrase = match passphrase_flag {
+        Some(p) => p,
+        None => rpassword::prompt_password("pgp passphrase: ")?,
+    };
+
+    let managed_dir = managed_dir_for(&acct);
+    let (key_id, sec_path) =
+        inbx_pgp::inbx_managed::keygen(&managed_dir, &name, email, &passphrase).await?;
+
+    println!("fingerprint: {}", key_id.0);
+    println!("secret key:  {}", sec_path.display());
+    println!(
+        "\nShare your public key with:\n  inbx pgp export --account {acct_name} --fingerprint {}",
+        key_id.0
+    );
+    Ok(())
+}
+
+async fn cmd_pgp_list(account: Option<String>) -> Result<()> {
+    let cfg = inbx_config::load()?;
+    let acct = pick_account(&cfg, account.as_deref())?;
+    let pgp = acct.pgp.as_ref().ok_or_else(|| {
+        anyhow::anyhow!(
+            "no pgp config for account {}; run `inbx pgp keygen` first",
+            acct.name
+        )
+    })?;
+    let src = inbx_pgp::key_source_for(pgp)?;
+    let keys = src.list_keys().await?;
+    if keys.is_empty() {
+        println!("(no keys found)");
+    } else {
+        for (key_id, uid) in keys {
+            println!("{}  {}", key_id.0, uid);
+        }
+    }
+    Ok(())
+}
+
+async fn cmd_pgp_export(account: Option<String>, fingerprint: Option<String>) -> Result<()> {
+    let cfg = inbx_config::load()?;
+    let acct = pick_account(&cfg, account.as_deref())?;
+    let pgp = acct
+        .pgp
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("no pgp config for account {}", acct.name))?;
+    let src = inbx_pgp::key_source_for(pgp)?;
+
+    let key_id = fingerprint
+        .or_else(|| pgp.key_fingerprint.clone())
+        .map(inbx_pgp::KeyId)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "no fingerprint given and no pgp.key_fingerprint in config; \
+                 pass --fingerprint HEXFPR"
+            )
+        })?;
+
+    let armor = src.export_public(&key_id).await?;
+    use std::io::Write as _;
+    std::io::stdout().write_all(armor.0.as_bytes())?;
+    Ok(())
+}
+
+async fn cmd_pgp_sign(account: Option<String>, path: std::path::PathBuf) -> Result<()> {
+    let cfg = inbx_config::load()?;
+    let acct = pick_account(&cfg, account.as_deref())?;
+    let pgp = acct
+        .pgp
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("no pgp config for account {}", acct.name))?;
+    let src = inbx_pgp::key_source_for(pgp)?;
+
+    let key_id = pgp
+        .key_fingerprint
+        .as_deref()
+        .map(|s| inbx_pgp::KeyId(s.to_string()))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "pgp.key_fingerprint not set; run `inbx pgp keygen` or set it in config"
+            )
+        })?;
+
+    let data = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+    let sig = src.sign_detached(&key_id, &data).await?;
+    use std::io::Write as _;
+    std::io::stdout().write_all(&sig.0)?;
+    Ok(())
+}
+
+async fn cmd_pgp_verify(
+    account: Option<String>,
+    path: std::path::PathBuf,
+    sig_path: std::path::PathBuf,
+    pubkey_path: Option<std::path::PathBuf>,
+) -> Result<()> {
+    let cfg = inbx_config::load()?;
+    let acct = pick_account(&cfg, account.as_deref())?;
+    let pgp = acct
+        .pgp
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("no pgp config for account {}", acct.name))?;
+    let src = inbx_pgp::key_source_for(pgp)?;
+
+    let data = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+    let sig_bytes =
+        std::fs::read(&sig_path).with_context(|| format!("read {}", sig_path.display()))?;
+    let sig = inbx_pgp::Signature(sig_bytes);
+
+    // Resolve pubkey: from file arg, or from account's configured key.
+    let pubkey = if let Some(pk_path) = pubkey_path {
+        let armor = std::fs::read_to_string(&pk_path)
+            .with_context(|| format!("read pubkey {}", pk_path.display()))?;
+        inbx_pgp::ArmoredKey(armor)
+    } else {
+        let key_id = pgp
+            .key_fingerprint
+            .as_deref()
+            .map(|s| inbx_pgp::KeyId(s.to_string()))
+            .ok_or_else(|| {
+                anyhow::anyhow!("no --pubkey given and pgp.key_fingerprint not set in config")
+            })?;
+        src.export_public(&key_id).await?
+    };
+
+    let result = src.verify_detached(&pubkey, &data, &sig).await?;
+    if result.valid {
+        println!(
+            "VALID  signer={}  uid={}",
+            result.signer_fingerprint.unwrap_or_default(),
+            result.signer_uid.unwrap_or_default()
+        );
+    } else {
+        eprintln!("INVALID signature");
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+async fn cmd_pgp_encrypt(
+    account: Option<String>,
+    path: std::path::PathBuf,
+    recipient_paths: Vec<std::path::PathBuf>,
+    out_path: Option<std::path::PathBuf>,
+) -> Result<()> {
+    let cfg = inbx_config::load()?;
+    let acct = pick_account(&cfg, account.as_deref())?;
+    let pgp = acct
+        .pgp
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("no pgp config for account {}", acct.name))?;
+    let src = inbx_pgp::key_source_for(pgp)?;
+
+    if recipient_paths.is_empty() {
+        bail!("at least one --recipient pubkey file is required");
+    }
+
+    let mut recipients = Vec::new();
+    for rp in &recipient_paths {
+        let armor = std::fs::read_to_string(rp)
+            .with_context(|| format!("read recipient pubkey {}", rp.display()))?;
+        recipients.push(inbx_pgp::ArmoredKey(armor));
+    }
+
+    let plaintext = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+    let ciphertext = src.encrypt_to(&recipients, &plaintext).await?;
+
+    let out = out_path.unwrap_or_else(|| {
+        let mut p = path.clone();
+        let ext = p
+            .extension()
+            .map(|e| format!("{}.pgp", e.to_string_lossy()))
+            .unwrap_or_else(|| "pgp".to_string());
+        p.set_extension(ext);
+        p
+    });
+    std::fs::write(&out, &ciphertext.0).with_context(|| format!("write {}", out.display()))?;
+    println!("encrypted to {}", out.display());
+    Ok(())
+}
+
+async fn cmd_pgp_decrypt(account: Option<String>, path: std::path::PathBuf) -> Result<()> {
+    let cfg = inbx_config::load()?;
+    let acct = pick_account(&cfg, account.as_deref())?;
+    let pgp = acct
+        .pgp
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("no pgp config for account {}", acct.name))?;
+    let src = inbx_pgp::key_source_for(pgp)?;
+
+    let raw = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+    let ciphertext = inbx_pgp::Ciphertext(raw);
+    let (plain, _verify) = src.decrypt(&ciphertext).await?;
+    use std::io::Write as _;
+    std::io::stdout().write_all(&plain.0)?;
+    Ok(())
+}
+
+// ── end PGP handlers ──────────────────────────────────────────────────────────
 
 fn cmd_config() -> Result<()> {
     let path = inbx_config::config_path()?;

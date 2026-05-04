@@ -11,6 +11,7 @@ authors.workspace = true
 
 [dependencies]
 inbx-config.workspace = true
+inbx-pgp.workspace = true
 thiserror.workspace = true
 serde.workspace = true
 mail-parser.workspace = true
@@ -19,3 +20,7 @@ hjkl-editor.workspace = true
 hjkl-buffer.workspace = true
 hjkl-clipboard.workspace = true
 hjkl-form.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio.workspace = true

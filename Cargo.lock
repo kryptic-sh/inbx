@@ -3071,6 +3071,7 @@ dependencies = [
  "inbx-contacts",
  "inbx-ical",
  "inbx-net",
+ "inbx-pgp",
  "inbx-render",
  "inbx-store",
  "mail-builder",
@@ -3093,10 +3094,13 @@ dependencies = [
  "hjkl-editor",
  "hjkl-form",
  "inbx-config",
+ "inbx-pgp",
  "mail-builder",
  "mail-parser",
  "serde",
+ "tempfile",
  "thiserror 2.0.18",
+ "tokio",
 ]
 
 [[package]]

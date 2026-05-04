@@ -26,12 +26,21 @@ const TO_IDX: usize = 1;
 const CC_IDX: usize = 2;
 const BCC_IDX: usize = 3;
 
+/// Sign-and/or-encrypt options for [`Composer::to_mime_with_pgp`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PgpFlags {
+    pub sign: bool,
+    pub encrypt: bool,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("parse: could not parse RFC 5322 input")]
     Parse,
     #[error("missing field: {0}")]
     Missing(&'static str),
+    #[error("pgp: {0}")]
+    Pgp(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -100,6 +109,8 @@ pub struct Composer {
     pub in_reply_to: Option<String>,
     pub references: Vec<String>,
     pub attachments: Vec<Attachment>,
+    /// PGP sign/encrypt flags. Both false by default.
+    pub pgp: PgpFlags,
 }
 
 #[derive(Debug, Clone)]
@@ -169,6 +180,7 @@ impl Composer {
             in_reply_to: None,
             references: Vec::new(),
             attachments: Vec::new(),
+            pgp: PgpFlags::default(),
         }
     }
 
@@ -499,6 +511,110 @@ impl Composer {
             .map_err(|_| Error::Missing("write"))?;
         Ok(bytes)
     }
+
+    /// Like [`to_mime`] but applies the PGP envelope when `pgp.sign` or
+    /// `pgp.encrypt` is set.  Recipient public keys come from the caller —
+    /// slice 3 does not own a contact-keystore yet.
+    ///
+    /// Returns `Err(Error::Missing)` when a flag is set but the required
+    /// `source` or `signer_key` is absent.
+    pub async fn to_mime_with_pgp(
+        &self,
+        source: Option<&dyn inbx_pgp::KeySource>,
+        signer_key: Option<&inbx_pgp::KeyId>,
+        recipient_pubkeys: &[inbx_pgp::ArmoredKey],
+    ) -> Result<Vec<u8>> {
+        if !self.pgp.sign && !self.pgp.encrypt {
+            return self.to_mime();
+        }
+
+        let src = source.ok_or(Error::Missing(
+            "pgp key source required when sign/encrypt is set",
+        ))?;
+
+        // Build inner RFC 5322 bytes from the sync path.
+        let inner = self.to_mime()?;
+
+        // Build outer headers for sign_pgp_mime / encrypt_pgp_mime.
+        let outer_headers = self.outer_headers();
+
+        if self.pgp.encrypt {
+            let signer = if self.pgp.sign {
+                Some(signer_key.ok_or(Error::Missing("signer_key required when pgp.sign is set"))?)
+            } else {
+                None
+            };
+            let result = inbx_pgp::mime::encrypt_pgp_mime(
+                src,
+                signer,
+                recipient_pubkeys,
+                &inner,
+                &outer_headers,
+            )
+            .await
+            .map_err(|e| Error::Pgp(e.to_string()))?;
+            Ok(result)
+        } else {
+            // sign only
+            let key =
+                signer_key.ok_or(Error::Missing("signer_key required when pgp.sign is set"))?;
+            let result = inbx_pgp::mime::sign_pgp_mime(src, key, &inner, &outer_headers)
+                .await
+                .map_err(|e| Error::Pgp(e.to_string()))?;
+            Ok(result)
+        }
+    }
+
+    /// Build [`inbx_pgp::mime::OuterHeaders`] from this composer's current state.
+    fn outer_headers(&self) -> inbx_pgp::mime::OuterHeaders {
+        let from_name = self.identity.name.clone().unwrap_or_default();
+        let from = if from_name.is_empty() {
+            self.identity.email.clone()
+        } else {
+            format!("{from_name} <{}>", self.identity.email)
+        };
+        let to = parse_addresses(&self.to())
+            .into_iter()
+            .map(|(name, addr)| {
+                if name.is_empty() {
+                    addr
+                } else {
+                    format!("{name} <{addr}>")
+                }
+            })
+            .collect();
+        let cc = parse_addresses(&self.cc())
+            .into_iter()
+            .map(|(name, addr)| {
+                if name.is_empty() {
+                    addr
+                } else {
+                    format!("{name} <{addr}>")
+                }
+            })
+            .collect();
+        let bcc = parse_addresses(&self.bcc())
+            .into_iter()
+            .map(|(name, addr)| {
+                if name.is_empty() {
+                    addr
+                } else {
+                    format!("{name} <{addr}>")
+                }
+            })
+            .collect();
+        inbx_pgp::mime::OuterHeaders {
+            from,
+            to,
+            cc,
+            bcc,
+            subject: self.subject(),
+            message_id: None,
+            in_reply_to: self.in_reply_to.clone(),
+            references: self.references.clone(),
+            date: None,
+        }
+    }
 }
 
 /// Map a `Field` variant for a header field to its index in `headers.fields`.
@@ -801,5 +917,83 @@ mod tests {
         let mut c = Composer::new_blank(id());
         c.focus = Field::Subject;
         matches!(c.focused_editor(), FocusedEditor::Header(_));
+    }
+
+    // ── PGP tests ─────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn to_mime_with_pgp_no_flags_matches_to_mime() {
+        use mail_parser::MessageParser;
+        let mut c = Composer::new_blank(id());
+        c.set_subject("PGP test");
+        c.set_to("bob@example.com");
+        c.body.set_content("hello");
+        // pgp flags both false — should behave identically to to_mime()
+        // (Message-ID differs per call, so compare subject/body only)
+        let plain = c.to_mime().unwrap();
+        let via_pgp = c.to_mime_with_pgp(None, None, &[]).await.unwrap();
+        let p1 = MessageParser::default().parse(&plain).expect("parse plain");
+        let p2 = MessageParser::default()
+            .parse(&via_pgp)
+            .expect("parse via_pgp");
+        assert_eq!(p1.subject(), p2.subject(), "subjects must match");
+        assert_eq!(p1.body_text(0), p2.body_text(0), "bodies must match");
+        // Neither should be multipart/signed or multipart/encrypted.
+        assert!(
+            !std::str::from_utf8(&plain)
+                .unwrap_or("")
+                .contains("multipart/signed"),
+            "plain must not be multipart/signed"
+        );
+    }
+
+    #[tokio::test]
+    async fn to_mime_with_pgp_sign_only_round_trip() {
+        use inbx_pgp::inbx_managed::{InbxManagedSource, keygen};
+        use mail_parser::{MessageParser, MimeHeaders};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_path_buf();
+        let (key_id, _) = keygen(&dir, "Alice", "alice@example.com", "")
+            .await
+            .unwrap();
+        let src = InbxManagedSource::new(dir);
+
+        let mut c = Composer::new_blank(id());
+        c.set_subject("Signed mail");
+        c.set_to("bob@example.com");
+        c.body.set_content("signed body");
+        c.pgp = PgpFlags {
+            sign: true,
+            encrypt: false,
+        };
+
+        let outer = c
+            .to_mime_with_pgp(Some(&src), Some(&key_id), &[])
+            .await
+            .unwrap();
+
+        let parsed = MessageParser::default().parse(&outer).expect("parse outer");
+        let ct = parsed.content_type().expect("Content-Type header present");
+        assert_eq!(ct.ctype(), "multipart", "outer must be multipart");
+        let subtype = ct.subtype().unwrap_or_default();
+        assert_eq!(subtype, "signed", "subtype must be signed");
+    }
+
+    #[tokio::test]
+    async fn to_mime_with_pgp_missing_source_errors() {
+        let mut c = Composer::new_blank(id());
+        c.set_subject("S");
+        c.set_to("bob@example.com");
+        c.body.set_content("x");
+        c.pgp = PgpFlags {
+            sign: true,
+            encrypt: false,
+        };
+        let err = c.to_mime_with_pgp(None, None, &[]).await.unwrap_err();
+        assert!(
+            matches!(err, Error::Missing(_)),
+            "must error Missing when source is None but sign=true"
+        );
     }
 }
