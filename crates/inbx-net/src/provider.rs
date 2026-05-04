@@ -103,6 +103,17 @@ pub trait MailProvider: Send + Sync {
 
     /// Append `raw` to the provider's Drafts mailbox, marked `$draft`.
     async fn append_draft(&mut self, folder: &str, raw: &[u8]) -> Result<()>;
+
+    /// Expunge `\Deleted`-flagged messages from `folder`.
+    ///
+    /// Returns the number of messages destroyed server-side.
+    ///
+    /// - IMAP: `SELECT` then `EXPUNGE`.
+    /// - JMAP: `Email/query` filtered by `inMailbox + $deleted`, then
+    ///   `Email/set { destroy: [...] }`.
+    /// - Graph: no-op (returns 0) — Graph has no per-message deletion flag;
+    ///   "delete" means move to DeletedItems.
+    async fn expunge_folder(&mut self, folder: &str) -> Result<usize>;
 }
 
 // ---------------------------------------------------------------------------
@@ -189,6 +200,10 @@ impl MailProvider for ImapProvider {
 
     async fn append_draft(&mut self, folder: &str, raw: &[u8]) -> Result<()> {
         Ok(imap::append_draft(&mut self.session, folder, raw).await?)
+    }
+
+    async fn expunge_folder(&mut self, folder: &str) -> Result<usize> {
+        Ok(imap::expunge_folder(&mut self.session, folder).await? as usize)
     }
 }
 
@@ -331,6 +346,10 @@ mod tests {
 
         async fn append_draft(&mut self, _folder: &str, _raw: &[u8]) -> Result<()> {
             Ok(())
+        }
+
+        async fn expunge_folder(&mut self, _folder: &str) -> Result<usize> {
+            Ok(0)
         }
     }
 

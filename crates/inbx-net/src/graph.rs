@@ -577,6 +577,17 @@ impl crate::provider::MailProvider for GraphClient {
             .map_err(crate::provider::Error::Graph)
     }
 
+    async fn expunge_folder(&mut self, folder: &str) -> crate::provider::Result<usize> {
+        // Graph has no per-message \Deleted flag: "delete" in Graph is
+        // move-to-DeletedItems. There is no folder-level expunge equivalent.
+        // Returning 0 is correct — nothing is silently destroyed.
+        tracing::debug!(
+            folder,
+            "Graph expunge_folder: no-op (Graph uses move-to-DeletedItems, not a deletion flag)"
+        );
+        Ok(0)
+    }
+
     async fn append_draft(&mut self, folder: &str, raw: &[u8]) -> crate::provider::Result<()> {
         // Resolve the caller-supplied folder (normally Drafts) to its Graph id.
         let folder_id = self

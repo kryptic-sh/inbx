@@ -1103,6 +1103,89 @@ impl crate::provider::MailProvider for JmapClient {
             .await
             .map_err(crate::provider::Error::Jmap)
     }
+
+    async fn expunge_folder(&mut self, folder: &str) -> crate::provider::Result<usize> {
+        // Resolve the folder name to its JMAP mailbox id.
+        let mailboxes = self
+            .list_mailboxes()
+            .await
+            .map_err(crate::provider::Error::Jmap)?;
+        let mailbox_id = mailboxes
+            .iter()
+            .find(|m| {
+                m.name.eq_ignore_ascii_case(folder)
+                    || m.role
+                        .as_deref()
+                        .map(|r| r.eq_ignore_ascii_case(folder))
+                        .unwrap_or(false)
+            })
+            .map(|m| m.id.clone())
+            .ok_or_else(|| {
+                crate::provider::Error::Jmap(Error::Server {
+                    status: 0,
+                    body: format!("JMAP: no mailbox matching '{folder}'"),
+                })
+            })?;
+
+        // Email/query filtered by inMailbox + $deleted keyword.
+        // This mirrors the IMAP \Deleted flag: messages marked $deleted in this
+        // mailbox are the ones EXPUNGE would remove on IMAP.
+        let v = self
+            .invoke(
+                vec![json!([
+                    "Email/query",
+                    {
+                        "accountId": self.account_id,
+                        "filter": {
+                            "inMailbox": mailbox_id,
+                            "hasKeyword": "$deleted"
+                        },
+                        "limit": 1000_u32,
+                    },
+                    "q"
+                ])],
+                vec![CORE_CAPABILITY, MAIL_CAPABILITY],
+            )
+            .await
+            .map_err(crate::provider::Error::Jmap)?;
+
+        let ids: Vec<String> = v["methodResponses"][0][1]["ids"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        if ids.is_empty() {
+            return Ok(0);
+        }
+
+        // TODO: paginate Email/query if a folder ever holds >1000 $deleted msgs.
+        // Email/set { destroy: [...] } — permanently removes the messages.
+        let resp = self
+            .invoke(
+                vec![json!([
+                    "Email/set",
+                    {
+                        "accountId": self.account_id,
+                        "destroy": ids
+                    },
+                    "d"
+                ])],
+                vec![CORE_CAPABILITY, MAIL_CAPABILITY],
+            )
+            .await
+            .map_err(crate::provider::Error::Jmap)?;
+
+        // Server reports actual destroyed ids; notDestroyed entries are skipped.
+        let destroyed = resp["methodResponses"][0][1]["destroyed"]
+            .as_array()
+            .map(|a| a.len())
+            .unwrap_or(0);
+        Ok(destroyed)
+    }
 }
 
 impl JmapClient {

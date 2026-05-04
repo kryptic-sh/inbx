@@ -1021,10 +1021,9 @@ impl App {
         let Some(folder_name) = self.current_folder().map(|f| f.name.clone()) else {
             return Ok(());
         };
-        // TODO(M21): port to MailProvider when JMAP expunge (Email/set destroy) lands.
-        let mut session = inbx_net::connect_imap(&self.account).await?;
-        let n = inbx_net::expunge_folder(&mut session, &folder_name).await?;
-        let _ = session.logout().await;
+        let mut provider = inbx_net::connect_provider(&self.account, Some(&self.store)).await?;
+        let n = provider.expunge_folder(&folder_name).await?;
+        drop(provider);
         let purged = self.store.purge_deleted(&folder_name).await?;
         self.reload_messages().await?;
         self.status = format!("expunged {n} (server) / {purged} (local) in {folder_name}");

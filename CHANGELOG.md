@@ -17,6 +17,12 @@ patch bumps.
   the current folder. Fastmail / Stalwart accounts now get live TUI updates like
   IMAP IDLE accounts. `inbx-sync` shares the same dispatch via an extracted
   `wait_for_change` helper.
+- **`MailProvider::expunge_folder` for JMAP and Graph.** TUI expunge now routes
+  through `connect_provider` like the other hot-path ops. JMAP runs
+  `Email/query` filtered by `inMailbox + $deleted` then `Email/set { destroy }`
+  and reports the server's actual destroyed count. Graph is a no-op (returns 0
+  with a `tracing::debug!`) since Graph has no per-message deletion flag —
+  "delete" in Graph means move-to-DeletedItems.
 
 ## [0.2.0] - 2026-05-04
 
