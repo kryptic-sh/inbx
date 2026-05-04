@@ -162,12 +162,11 @@ impl MailProvider for ImapProvider {
         since_uid: Option<i64>,
         _limit: u32,
     ) -> Result<Vec<HeaderRow>> {
-        // `since_uid` is a delta hint — for now do a full fetch like the
-        // existing TUI sync path does.  The IMAP path does not yet do
-        // incremental UID-range fetches; that optimisation is left for a
-        // follow-up once the trait is stable.
-        let _ = since_uid; // TODO(M21-delta): use UID SEARCH UID <since>:*
-        let (_uidvalidity, rows) = imap::fetch_headers(&mut self.session, folder).await?;
+        let (_uidvalidity, rows) = if let Some(uid) = since_uid.filter(|&u| u > 0) {
+            imap::fetch_headers_since(&mut self.session, folder, uid as u32).await?
+        } else {
+            imap::fetch_headers(&mut self.session, folder).await?
+        };
         Ok(rows)
     }
 

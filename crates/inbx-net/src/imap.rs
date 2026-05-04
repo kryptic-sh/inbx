@@ -391,6 +391,69 @@ pub async fn fetch_headers(
     Ok((uidvalidity, out))
 }
 
+/// Select a folder and fetch envelope + flags for messages with UID > `since_uid`.
+/// Uses `UID FETCH <since_uid+1>:*`; post-filters because `N:*` always returns
+/// the highest UID even when N exceeds it (RFC 3501 §6.4.8).
+pub async fn fetch_headers_since(
+    session: &mut ImapSession,
+    folder: &str,
+    since_uid: u32,
+) -> Result<(u32, Vec<HeaderRow>)> {
+    let mailbox = session.select(folder).await?;
+    let uidvalidity = mailbox.uid_validity.unwrap_or(0);
+    if mailbox.exists == 0 {
+        return Ok((uidvalidity, Vec::new()));
+    }
+
+    let seq = format!("{}:*", since_uid.saturating_add(1));
+    let stream = session
+        .uid_fetch(&seq, "(UID FLAGS ENVELOPE INTERNALDATE)")
+        .await?;
+    let fetches: Vec<async_imap::types::Fetch> =
+        stream.filter_map(|r| async move { r.ok() }).collect().await;
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+
+    let mut out = Vec::with_capacity(fetches.len());
+    for f in fetches {
+        let Some(uid) = f.uid else { continue };
+        // Post-filter: N:* returns the highest UID even when N > highest.
+        if uid <= since_uid {
+            continue;
+        }
+        let env = f.envelope();
+        let subject = env
+            .and_then(|e| e.subject.as_ref())
+            .map(|b| String::from_utf8_lossy(b).into_owned());
+        let message_id = env
+            .and_then(|e| e.message_id.as_ref())
+            .map(|b| String::from_utf8_lossy(b).into_owned());
+        let from_addr = env.and_then(|e| e.from.as_ref()).map(|v| format_addrs(v));
+        let to_addrs = env.and_then(|e| e.to.as_ref()).map(|v| format_addrs(v));
+        let date_unix = f.internal_date().map(|d| d.timestamp());
+
+        let flags: Vec<String> = f.flags().map(|fl| format!("{fl:?}")).collect();
+        let flags = flags.join(" ");
+
+        out.push(HeaderRow {
+            uid,
+            uidvalidity,
+            message_id,
+            subject,
+            from_addr,
+            to_addrs,
+            date_unix,
+            flags,
+            fetched_at_unix: now,
+            provider_id: None,
+        });
+    }
+    Ok((uidvalidity, out))
+}
+
 /// Backwards-compat alias kept for existing CLI sites.
 pub async fn fetch_inbox_headers(session: &mut ImapSession) -> Result<(u32, Vec<HeaderRow>)> {
     fetch_headers(session, "INBOX").await
