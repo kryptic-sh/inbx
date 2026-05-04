@@ -23,6 +23,14 @@ patch bumps.
   and reports the server's actual destroyed count. Graph is a no-op (returns 0
   with a `tracing::debug!`) since Graph has no per-message deletion flag —
   "delete" in Graph means move-to-DeletedItems.
+- **Graph delta polling in the watch path.** Replaces the 5-min sleep
+  placeholder with `delta_messages(folder_id, stored_link)` against
+  `/me/mailFolders/{id}/messages/delta`. Loads the persisted `delta_link` from
+  Store, fetches changes, persists the new link, signals only when messages came
+  back, sleeps 75 s between polls. Same shape in both `tui::do_watch` and
+  `inbx-sync::wait_for_change`. Errors back off 30 s like the other transports.
+  Graph accounts now get near-realtime TUI updates, finishing the JMAP/Graph
+  parity sweep (push + expunge + delta).
 
 ## [0.2.0] - 2026-05-04
 

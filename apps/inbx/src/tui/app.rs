@@ -335,7 +335,8 @@ impl App {
             .map(|f| f.name.clone())
             .unwrap_or_else(|| "INBOX".into());
         let watch_tx = app.task_tx.0.clone();
-        tokio::spawn(do_watch(watch_account, watch_folder, watch_tx));
+        let watch_store = app.store.clone();
+        tokio::spawn(do_watch(watch_account, watch_folder, watch_store, watch_tx));
 
         Ok(app)
     }
@@ -1945,6 +1946,7 @@ fn open_url(url: &str) -> std::io::Result<()> {
 async fn do_watch(
     account: inbx_config::Account,
     folder: String,
+    store: inbx_store::Store,
     tx: tokio::sync::mpsc::UnboundedSender<super::tasks::TaskResult>,
 ) {
     use super::tasks::TaskResult;
@@ -2009,10 +2011,72 @@ async fn do_watch(
                 }
             }
             Transport::Graph => {
-                // No push path for Graph today.  Poll every 5 min.
-                // TODO: replace with delta-link polling once Graph watch lands.
-                tracing::debug!("watch: Graph — polling every 5 min");
-                tokio::time::sleep(std::time::Duration::from_secs(5 * 60)).await;
+                // Delta-link poll: connect, resolve folder id, fetch changes.
+                let client = match inbx_net::graph::GraphClient::connect(&account).await {
+                    Ok(c) => c,
+                    Err(e) => {
+                        tracing::warn!(%e, "watch: Graph connect failed; backing off 30s");
+                        tokio::time::sleep(BACKOFF).await;
+                        continue;
+                    }
+                };
+                // Resolve folder display name → Graph folder id.
+                let folder_id = match client.list_folders().await {
+                    Ok(folders) => {
+                        match folders
+                            .iter()
+                            .find(|f| f.display_name.eq_ignore_ascii_case(&folder))
+                            .map(|f| f.id.clone())
+                        {
+                            Some(id) => id,
+                            None => {
+                                tracing::warn!(
+                                    folder,
+                                    "watch: Graph folder not found; backing off 30s"
+                                );
+                                tokio::time::sleep(BACKOFF).await;
+                                continue;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(%e, "watch: Graph list_folders failed; backing off 30s");
+                        tokio::time::sleep(BACKOFF).await;
+                        continue;
+                    }
+                };
+                // Load stored delta link (None on first run).
+                let stored_link = match store.get_delta_link(&folder).await {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::warn!(%e, "watch: Graph get_delta_link failed; backing off 30s");
+                        tokio::time::sleep(BACKOFF).await;
+                        continue;
+                    }
+                };
+                // Call delta endpoint.
+                let (messages, new_link) = match client
+                    .delta_messages(&folder_id, stored_link.as_deref())
+                    .await
+                {
+                    Ok(r) => r,
+                    Err(e) => {
+                        tracing::warn!(%e, "watch: Graph delta_messages failed; backing off 30s");
+                        tokio::time::sleep(BACKOFF).await;
+                        continue;
+                    }
+                };
+                // Persist new delta link.
+                if let Err(e) = store.set_delta_link(&folder, new_link.as_deref()).await {
+                    tracing::warn!(%e, "watch: Graph set_delta_link failed (ignored)");
+                }
+                if messages.is_empty() {
+                    // No changes — sleep before next poll, don't signal.
+                    tracing::debug!("watch: Graph delta — no changes; sleeping 75s");
+                    tokio::time::sleep(std::time::Duration::from_secs(75)).await;
+                    continue;
+                }
+                tracing::debug!(count = messages.len(), "watch: Graph delta — new messages");
             }
         }
 

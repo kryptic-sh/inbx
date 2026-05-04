@@ -148,9 +148,77 @@ async fn wait_for_change(account: &Account, folder: &str) {
             }
         }
         Transport::Graph => {
-            // No push path for Graph today. TODO: delta-link poll.
-            tracing::debug!(account = %account.name, "Graph: polling every 5 min");
-            tokio::time::sleep(Duration::from_secs(5 * 60)).await;
+            // Delta-link poll: open store, resolve folder id, fetch changes.
+            let store = match inbx_store::Store::open(&account.name).await {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!(account = %account.name, %e, "Graph: store open failed; sleeping 30s");
+                    tokio::time::sleep(BACKOFF).await;
+                    return;
+                }
+            };
+            let client = match inbx_net::graph::GraphClient::connect(account).await {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::warn!(account = %account.name, %e, "Graph: connect failed; sleeping 30s");
+                    tokio::time::sleep(BACKOFF).await;
+                    return;
+                }
+            };
+            // Resolve folder display name → Graph folder id.
+            let folder_id = match client.list_folders().await {
+                Ok(folders) => {
+                    match folders
+                        .iter()
+                        .find(|f| f.display_name.eq_ignore_ascii_case(folder))
+                        .map(|f| f.id.clone())
+                    {
+                        Some(id) => id,
+                        None => {
+                            tracing::warn!(account = %account.name, %folder, "Graph: folder not found; sleeping 30s");
+                            tokio::time::sleep(BACKOFF).await;
+                            return;
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(account = %account.name, %e, "Graph: list_folders failed; sleeping 30s");
+                    tokio::time::sleep(BACKOFF).await;
+                    return;
+                }
+            };
+            // Load stored delta link (None on first run).
+            let stored_link = match store.get_delta_link(folder).await {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!(account = %account.name, %e, "Graph: get_delta_link failed; sleeping 30s");
+                    tokio::time::sleep(BACKOFF).await;
+                    return;
+                }
+            };
+            // Call delta endpoint.
+            let (messages, new_link) = match client
+                .delta_messages(&folder_id, stored_link.as_deref())
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!(account = %account.name, %e, "Graph: delta_messages failed; sleeping 30s");
+                    tokio::time::sleep(BACKOFF).await;
+                    return;
+                }
+            };
+            // Persist new delta link.
+            if let Err(e) = store.set_delta_link(folder, new_link.as_deref()).await {
+                tracing::warn!(account = %account.name, %e, "Graph: set_delta_link failed (ignored)");
+            }
+            if messages.is_empty() {
+                // No changes — sleep before next poll, don't signal sync.
+                tracing::debug!(account = %account.name, "Graph delta: no changes; sleeping 75s");
+                tokio::time::sleep(Duration::from_secs(75)).await;
+                return;
+            }
+            tracing::info!(account = %account.name, count = messages.len(), "Graph delta: new messages");
         }
     }
 }
