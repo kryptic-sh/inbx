@@ -946,9 +946,10 @@
         <h2>install</h2>
         <h3>Prebuilt binaries on every tagged release.</h3>
         <p style="color: var(--fg-muted); margin: 0 0 20px">
-          Linux (x86_64) — .tar.gz. macOS (Apple Silicon) — .tar.gz. Windows
-          (x64) — .zip. SHA-256 sidecars on every artifact. More targets land as
-          the workspace stabilises.
+          macOS via Homebrew tap, Arch via AUR, Alpine .apk, or grab a prebuilt
+          binary. Linux (x86_64) — .tar.gz. macOS (Apple Silicon) — .tar.gz.
+          Windows (x64) — .zip. SHA-256 sidecars on every artifact. More targets
+          land as the workspace stabilises.
         </p>
         <div class="cta">
           <a
@@ -960,11 +961,37 @@
           >
           <a
             class="btn"
+            href="https://github.com/kryptic-sh/homebrew-tap"
+            target="_blank"
+            rel="noopener"
+            >Homebrew (kryptic-sh/tap) ↗</a
+          >
+          <a
+            class="btn"
             href="https://github.com/kryptic-sh/inbx/releases"
             target="_blank"
             rel="noopener"
             >all releases ↗</a
           >
+        </div>
+        <div class="term" style="margin-top: 20px">
+          <div class="chrome">
+            <span class="dot r"></span><span class="dot y"></span
+            ><span class="dot g"></span>
+            <span class="title">inbx — macOS (Homebrew)</span>
+          </div>
+          <pre
+            style="
+              margin: 0;
+              padding: 14px 16px;
+              font-size: 13px;
+              line-height: 1.6;
+              overflow-x: auto;
+              color: var(--fg);
+              font-family: var(--mono);
+            "
+          ><span class="ok">$</span> brew install kryptic-sh/tap/inbx
+<span class="ok">$</span> inbx</pre>
         </div>
         <div class="term" style="margin-top: 20px">
           <div class="chrome">
@@ -985,6 +1012,26 @@
           ><span class="ok">$</span> yay -S inbx-bin   <span class="cm"># or: paru -S inbx-bin</span>
 
 <span class="cm"># installs inbx + inbx-sync to /usr/bin/, auto-tracks tagged releases</span></pre>
+        </div>
+        <div class="term" style="margin-top: 20px">
+          <div class="chrome">
+            <span class="dot r"></span><span class="dot y"></span
+            ><span class="dot g"></span>
+            <span class="title">inbx — Alpine Linux</span>
+          </div>
+          <pre
+            style="
+              margin: 0;
+              padding: 14px 16px;
+              font-size: 13px;
+              line-height: 1.6;
+              overflow-x: auto;
+              color: var(--fg);
+              font-family: var(--mono);
+            "
+          ><span class="ok">$</span> <span class="cm"># download .apk from releases page, then:</span>
+<span class="ok">$</span> apk add --allow-untrusted inbx-*.apk
+<span class="ok">$</span> inbx</pre>
         </div>
         <div class="term" style="margin-top: 20px">
           <div class="chrome">
