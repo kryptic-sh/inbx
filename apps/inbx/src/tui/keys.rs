@@ -3,394 +3,153 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use hjkl_engine::{Input as EngineInput, Key as EngineKey};
 use hjkl_form::FormMode;
 use hjkl_picker::PickerEvent;
-use inbx_composer::{FocusedEditor, PgpFlags};
+use inbx_composer::FocusedEditor;
 
-use super::app::{ActivePicker, App, IcalResponse, LeaderState, MovePickerState, Pane};
-use super::wizard::AccountWizard;
+use super::app::{ActivePicker, App, LeaderState};
+use super::binds::{Action, Context};
 
 /// Returns true to quit the TUI.
+///
+/// All key dispatch goes through `Action::from_key` → `Action::invoke`.
+/// Gate predicates in the BINDS table encode the pane/state conditions that
+/// previously lived as hand-rolled `if app.pane == …` blocks.
+///
+/// The only inline bookkeeping that remains:
+/// • Help-overlay dismissal (pre-table; no action needed).
+/// • Leader arming (`<Space>` consumed, not dispatched).
+/// • `pending_g` arming for the `gg` chord (consumed on second `g`).
+/// • Post-action pane-follow-up (reload messages / refresh body) that was
+///   already baked into MoveDown/MoveUp::invoke — kept here only for the
+///   cases where from_key falls through with no action (pending_g clear).
 pub(super) async fn handle_list_key(app: &mut App, key: KeyEvent) -> Result<bool> {
+    // 1. Help overlay: any key dismisses it.
     if app.show_help {
-        // Any key dismisses the help overlay.
         app.show_help = false;
         return Ok(false);
     }
-    if key.code == KeyCode::Char('?') {
-        app.show_help = true;
-        return Ok(false);
-    }
-    if key.code == KeyCode::Char('q')
-        || (key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))
-    {
-        return Ok(true);
-    }
 
-    if key.code == KeyCode::Char('a') {
-        app.open_account_picker()?;
-        return Ok(false);
-    }
-
-    // List-pane leader: <Space> arms the prefix; second key opens a picker.
+    // 2. Leader-chord dispatch: consume when leader is armed.
     if app.pending_leader == Some(LeaderState::Pending) {
         app.pending_leader = None;
-        match key.code {
-            KeyCode::Char('f') => {
-                app.open_folder_picker();
-                return Ok(false);
-            }
-            KeyCode::Char('b') => {
-                app.open_hjkl_account_picker()?;
-                return Ok(false);
-            }
-            KeyCode::Char('m') => {
-                app.open_message_picker();
-                return Ok(false);
-            }
-            KeyCode::Char('a') => {
-                app.open_attachment_picker();
-                return Ok(false);
-            }
-            KeyCode::Char('n') => {
-                app.active_wizard = Some(AccountWizard::new());
-                app.status = "wizard: new account — <Space>s save · Esc cancel".into();
-                return Ok(false);
-            }
-            KeyCode::Char('S') => {
-                // Connect to ManageSieve, list scripts, open sieve picker.
-                app.open_sieve_picker();
-                return Ok(false);
-            }
-            _ => {
-                // Unrecognised chord — fall through.
-            }
+        if let Some(act) = Action::from_key(
+            app,
+            Context::List,
+            key,
+            Some(LeaderState::Pending),
+            false,
+            false,
+        ) {
+            return act.invoke(app).await;
         }
+        // Unrecognised leader chord — fall through to plain dispatch.
     }
+
+    // Arm the leader on <Space>.
     if key.code == KeyCode::Char(' ') && key.modifiers.is_empty() {
         app.pending_leader = Some(LeaderState::Pending);
         return Ok(false);
     }
 
-    // Compose / reply / forward shortcuts.
-    match key.code {
-        KeyCode::Char('c') => {
-            app.open_blank();
+    // 3. g-chord arming / resolution.
+    //    First `g` arms pending_g and waits for a second key.
+    //    Second `g` is dispatched via from_key (JumpTop or ScrollBodyTop,
+    //    depending on the gate).
+    if key.code == KeyCode::Char('g') && key.modifiers.is_empty() {
+        if app.pending_g {
+            // Second `g` — dispatch through table (gate picks the right action).
+            let act = Action::from_key(app, Context::List, key, None, false, true);
+            if let Some(a) = act {
+                return a.invoke(app).await;
+            }
+            // Shouldn't happen if table is correct, but reset state.
+            app.pending_g = false;
+            return Ok(false);
+        } else {
+            // First `g` — arm.
+            app.pending_g = true;
             return Ok(false);
         }
-        KeyCode::Char('r') => {
-            app.open_reply(false).await?;
-            return Ok(false);
-        }
-        KeyCode::Char('R') => {
-            app.open_reply(true).await?;
-            return Ok(false);
-        }
-        KeyCode::Char('f') => {
-            app.open_forward().await?;
-            return Ok(false);
-        }
-        _ => {}
     }
 
-    // Mutation shortcuts on the messages pane.
-    if key.code == KeyCode::Char('F') {
-        app.manual_sync();
-        return Ok(false);
-    }
-
-    if key.code == KeyCode::Char('L') {
-        app.oauth_login().await?;
-        return Ok(false);
-    }
-
-    if key.code == KeyCode::Char('O') {
-        app.open_outbox().await?;
-        return Ok(false);
-    }
-
-    if key.code == KeyCode::Char('/') {
-        app.open_search();
-        return Ok(false);
-    }
-
-    // n / N — jump to next / prev match from the most recent `/` search
-    // without reopening the overlay. No-op when there's no prior search.
-    if key.code == KeyCode::Char('n') && key.modifiers.is_empty() {
-        app.step_last_search(1).await?;
-        return Ok(false);
-    }
-    if key.code == KeyCode::Char('N') && key.modifiers.is_empty() {
-        app.step_last_search(-1).await?;
-        return Ok(false);
-    }
-
-    if key.code == KeyCode::Char('C') {
-        app.open_contacts().await?;
-        return Ok(false);
-    }
-
-    if app.pane == Pane::Messages {
-        match key.code {
-            KeyCode::Char('s') => {
-                app.toggle_seen().await?;
-                return Ok(false);
-            }
-            KeyCode::Char('*') => {
-                app.toggle_starred().await?;
-                return Ok(false);
-            }
-            KeyCode::Char('d') => {
-                app.toggle_deleted().await?;
-                return Ok(false);
-            }
-            KeyCode::Char('e') => {
-                app.expunge().await?;
-                return Ok(false);
-            }
-            KeyCode::Char('m') => {
-                app.move_picker = Some(MovePickerState::new());
-                return Ok(false);
-            }
-            KeyCode::Char('U') => {
-                app.unsubscribe_current().await?;
-                return Ok(false);
-            }
-            KeyCode::Char('T') => {
-                app.open_thread().await?;
-                return Ok(false);
-            }
-            KeyCode::Char('i') => {
-                app.open_ical().await?;
-                return Ok(false);
-            }
-            _ => {}
-        }
-    }
-
-    // Read-receipt prompt: Y = send, N = decline. Only active in Preview pane
-    // when a pending receipt exists and the user has not yet responded.
-    if app.pane == Pane::Preview && app.current_receipt.is_some() {
-        match key.code {
-            KeyCode::Char('Y') => {
-                app.send_read_receipt().await?;
-                return Ok(false);
-            }
-            KeyCode::Char('N') => {
-                app.decline_read_receipt();
-                return Ok(false);
-            }
-            _ => {}
-        }
-    }
-
-    // Body scroll keys when Preview pane is focused.
-    if app.pane == Pane::Preview {
-        match key.code {
-            KeyCode::Char('j') | KeyCode::Down => {
-                app.body_scroll = app.body_scroll.saturating_add(1);
-                return Ok(false);
-            }
-            KeyCode::Char('k') | KeyCode::Up => {
-                app.body_scroll = app.body_scroll.saturating_sub(1);
-                return Ok(false);
-            }
-            KeyCode::PageDown => {
-                app.body_scroll = app.body_scroll.saturating_add(10);
-                return Ok(false);
-            }
-            KeyCode::PageUp => {
-                app.body_scroll = app.body_scroll.saturating_sub(10);
-                return Ok(false);
-            }
-            KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                app.body_scroll = app.body_scroll.saturating_add(10);
-                return Ok(false);
-            }
-            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                app.body_scroll = app.body_scroll.saturating_sub(10);
-                return Ok(false);
-            }
-            KeyCode::Char('g') => {
-                if app.pending_g {
-                    app.body_scroll = 0;
-                    app.pending_g = false;
-                } else {
-                    app.pending_g = true;
-                }
-                return Ok(false);
-            }
-            KeyCode::Char('G') => {
-                let lines = app.body.lines().count() as u16;
-                app.body_scroll = lines.saturating_sub(1);
-                app.pending_g = false;
-                return Ok(false);
-            }
-            _ => {}
-        }
-    }
-
-    // Pane movement (always available)
-    match key.code {
-        KeyCode::Tab => app.cycle_pane(true),
-        KeyCode::BackTab => app.cycle_pane(false),
-        KeyCode::Char('h') => app.cycle_pane(false),
-        KeyCode::Char('l') => app.cycle_pane(true),
-        _ => {}
-    }
-
-    // List navigation
-    match key.code {
-        KeyCode::Char('j') | KeyCode::Down => {
+    // 4. Plain dispatch through the binds table.
+    if let Some(act) = Action::from_key(
+        app,
+        Context::List,
+        key,
+        app.pending_leader,
+        false,
+        app.pending_g,
+    ) {
+        let was_g_consumer = matches!(act, Action::JumpTop | Action::ScrollBodyTop);
+        let result = act.invoke(app).await?;
+        if !was_g_consumer {
             app.pending_g = false;
-            app.step_list(1);
         }
-        KeyCode::Char('k') | KeyCode::Up => {
-            app.pending_g = false;
-            app.step_list(-1);
-        }
-        KeyCode::Char('g') => {
-            if app.pending_g {
-                app.jump_top();
-                app.pending_g = false;
-            } else {
-                app.pending_g = true;
-            }
-        }
-        KeyCode::Char('G') => {
-            app.pending_g = false;
-            app.jump_bottom();
-        }
-        KeyCode::Enter => {
-            app.pending_g = false;
-            if app.pane == Pane::Folders {
-                app.reload_messages().await?;
-                app.pane = Pane::Messages;
-                app.status = format!("loaded {} messages", app.messages.len());
-            } else if app.pane == Pane::Messages {
-                // Lazy body fetch: if local body is missing, spawn a
-                // background fetch. The preview pane will update when the
-                // task result arrives.
-                if let Some(m) = app.current_message()
-                    && m.maildir_path.is_none()
-                {
-                    app.fetch_current_body();
-                }
-                app.refresh_body();
-                app.pane = Pane::Preview;
-            }
-        }
-        _ => {
-            if !matches!(
-                key.code,
-                KeyCode::Char('g') | KeyCode::Tab | KeyCode::BackTab
-            ) {
-                app.pending_g = false;
-            }
-        }
+        return Ok(result);
     }
 
-    // Selection updates body / messages.
-    match app.pane {
-        Pane::Folders => {
-            app.reload_messages().await?;
-        }
-        Pane::Messages => app.refresh_body(),
-        Pane::Preview => {}
+    // No binding matched.
+    // Clear pending_g for keys that aren't `g`, Tab or BackTab.
+    if !matches!(
+        key.code,
+        KeyCode::Char('g') | KeyCode::Tab | KeyCode::BackTab
+    ) {
+        app.pending_g = false;
     }
     Ok(false)
 }
 
 pub(super) async fn handle_composer_key(app: &mut App, key: KeyEvent) -> Result<bool> {
     // Ctrl-G chord: arms the PGP toggle prefix. Only fires in the composer pane.
-    // `s` = toggle sign, `e` = toggle encrypt; any other key cancels.
     if app.pending_pgp_chord {
-        app.pending_pgp_chord = false;
-        if let Some(c) = app.composer.as_mut() {
-            match key.code {
-                KeyCode::Char('s') => {
-                    c.pgp.sign = !c.pgp.sign;
-                    let label = pgp_flag_label(&c.pgp);
-                    app.status =
-                        format!("pgp sign: {}{label}", if c.pgp.sign { "on" } else { "off" });
-                    return Ok(false);
+        if let Some(action) = Action::from_key(app, Context::Composer, key, None, true, false) {
+            match action {
+                Action::ComposerPgpSign | Action::ComposerPgpEncrypt => {
+                    return action.invoke(app).await;
                 }
-                KeyCode::Char('e') => {
-                    c.pgp.encrypt = !c.pgp.encrypt;
-                    let label = pgp_flag_label(&c.pgp);
-                    app.status = format!(
-                        "pgp encrypt: {}{label}",
-                        if c.pgp.encrypt { "on" } else { "off" }
-                    );
-                    return Ok(false);
-                }
-                _ => {
-                    // Cancelled — fall through and process the key normally.
-                    app.status = "pgp chord cancelled".into();
-                }
+                _ => {}
             }
         }
+        // Cancelled — fall through and process the key normally.
+        app.pending_pgp_chord = false;
+        app.status = "pgp chord cancelled".into();
     }
 
-    // Global composer commands ride above the editor's input grammar.
-    if key.modifiers.contains(KeyModifiers::CONTROL) {
-        match key.code {
-            KeyCode::Char('s') => {
-                app.send_composer().await?;
-                return Ok(false);
-            }
-            KeyCode::Char('d') => {
-                app.save_draft().await?;
-                return Ok(false);
-            }
-            KeyCode::Char('q') => {
-                app.close_composer();
-                return Ok(false);
-            }
-            // Ctrl-G arms the PGP toggle chord (composer-only).
-            KeyCode::Char('g') => {
-                app.pending_pgp_chord = true;
-                app.status = "pgp chord: s=sign e=encrypt (any other key cancels)".into();
-                return Ok(false);
+    // Global composer commands.
+    if let Some(action) = Action::from_key(
+        app,
+        Context::Composer,
+        key,
+        app.pending_leader,
+        false,
+        false,
+    ) {
+        match action {
+            Action::ComposerSend
+            | Action::ComposerSaveDraft
+            | Action::ComposerDiscard
+            | Action::ComposerFocusNext
+            | Action::ComposerFocusPrev
+            | Action::ComposerPgpArm
+            | Action::ComposerYank
+            | Action::ComposerPaste => {
+                // Clear leader before invoke.
+                app.pending_leader = None;
+                return action.invoke(app).await;
             }
             _ => {}
         }
     }
-    if key.code == KeyCode::Tab {
-        if let Some(c) = app.composer.as_mut() {
-            c.focus_next();
-        }
-        return Ok(false);
-    }
-    if key.code == KeyCode::BackTab {
-        if let Some(c) = app.composer.as_mut() {
-            c.focus_prev();
-        }
-        return Ok(false);
-    }
 
-    // Leader-key chord: <Space> arms the prefix; a second key dispatches.
-    // <Space>y — yank focused editor text to system clipboard.
-    // <Space>p — replace focused editor text from system clipboard.
-    if app.pending_leader == Some(LeaderState::Pending) {
-        app.pending_leader = None;
-        match key.code {
-            KeyCode::Char('y') => {
-                app.yank_to_clipboard();
-                return Ok(false);
-            }
-            KeyCode::Char('p') => {
-                app.put_from_clipboard();
-                return Ok(false);
-            }
-            _ => {
-                // Unrecognised chord — fall through and forward the key to the editor.
-            }
-        }
-    }
+    // Arm leader if Space pressed without a bind.
     if key.code == KeyCode::Char(' ') && key.modifiers.is_empty() {
         app.pending_leader = Some(LeaderState::Pending);
         return Ok(false);
     }
+    // Clear leader for any other key.
+    app.pending_leader = None;
 
+    // Pass remaining keys to the editor / header field.
     if let Some(c) = app.composer.as_mut() {
         match c.focused_editor() {
             FocusedEditor::Body(ed) => {
@@ -440,19 +199,10 @@ fn crossterm_key_to_engine_input(key: KeyEvent) -> EngineInput {
 
 pub(super) async fn handle_outbox_key(app: &mut App, key: KeyEvent) -> Result<()> {
     let len = app.outbox.as_ref().map(|o| o.entries.len()).unwrap_or(0);
+
+    // j/k/Up/Down navigation handled separately because it directly mutates
+    // the overlay list state (not an App-level method).
     match key.code {
-        KeyCode::Esc => {
-            app.outbox = None;
-        }
-        KeyCode::Char('D') => {
-            app.drain_outbox();
-        }
-        KeyCode::Char('d') => {
-            app.drain_outbox_one().await?;
-        }
-        KeyCode::Char('x') => {
-            app.delete_outbox_one().await?;
-        }
         KeyCode::Up | KeyCode::Char('k') if key.modifiers.is_empty() => {
             if len > 0
                 && let Some(ob) = app.outbox.as_mut()
@@ -461,6 +211,7 @@ pub(super) async fn handle_outbox_key(app: &mut App, key: KeyEvent) -> Result<()
                 ob.state
                     .select(Some(if cur == 0 { len - 1 } else { cur - 1 }));
             }
+            return Ok(());
         }
         KeyCode::Down | KeyCode::Char('j') if key.modifiers.is_empty() => {
             if len > 0
@@ -469,58 +220,70 @@ pub(super) async fn handle_outbox_key(app: &mut App, key: KeyEvent) -> Result<()
                 let cur = ob.state.selected().unwrap_or(0);
                 ob.state.select(Some((cur + 1) % len));
             }
+            return Ok(());
         }
         _ => {}
+    }
+
+    if let Some(action) = Action::from_key(app, Context::Outbox, key, None, false, false) {
+        action.invoke(app).await?;
     }
     Ok(())
 }
 
 pub(super) async fn handle_move_picker_key(app: &mut App, key: KeyEvent) -> Result<()> {
+    // j/k/Up/Down navigation for the move picker.
     let targets = app.picker_targets();
-    let Some(picker) = app.move_picker.as_mut() else {
-        return Ok(());
-    };
+    let len = targets.len();
     match key.code {
-        KeyCode::Esc => {
-            app.move_picker = None;
-        }
-        KeyCode::Enter => {
-            let idx = picker.state.selected().unwrap_or(0);
-            if let Some(target) = targets.get(idx).cloned() {
-                app.move_picker = None;
-                app.move_current_to(&target).await?;
-            }
-        }
         KeyCode::Up | KeyCode::Char('k') if key.modifiers.is_empty() => {
-            let len = targets.len();
-            if len > 0 {
+            if len > 0
+                && let Some(picker) = app.move_picker.as_mut()
+            {
                 let cur = picker.state.selected().unwrap_or(0);
                 picker
                     .state
                     .select(Some(if cur == 0 { len - 1 } else { cur - 1 }));
             }
+            return Ok(());
         }
         KeyCode::Down | KeyCode::Char('j') if key.modifiers.is_empty() => {
-            let len = targets.len();
-            if len > 0 {
+            if len > 0
+                && let Some(picker) = app.move_picker.as_mut()
+            {
                 let cur = picker.state.selected().unwrap_or(0);
                 picker.state.select(Some((cur + 1) % len));
             }
+            return Ok(());
         }
+        // Filter editing — typed characters filter the list.
         KeyCode::Backspace => {
-            picker.filter.pop();
-            picker.state.select(Some(0));
+            if let Some(picker) = app.move_picker.as_mut() {
+                picker.filter.pop();
+                picker.state.select(Some(0));
+            }
+            return Ok(());
         }
-        KeyCode::Char(c) => {
-            picker.filter.push(c);
-            picker.state.select(Some(0));
+        KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            if let Some(picker) = app.move_picker.as_mut() {
+                picker.filter.push(c);
+                picker.state.select(Some(0));
+            }
+            return Ok(());
         }
         _ => {}
+    }
+
+    if let Some(action) = Action::from_key(app, Context::MovePicker, key, None, false, false) {
+        action.invoke(app).await?;
     }
     Ok(())
 }
 
 pub(super) async fn handle_search_key(app: &mut App, key: KeyEvent) -> Result<()> {
+    // Esc and Enter are handled by the binds table for close/confirm, but
+    // search confirm requires checking whether results are available — keep
+    // that logic here.
     match key.code {
         KeyCode::Esc => {
             app.search = None;
@@ -560,6 +323,7 @@ pub(super) async fn handle_search_key(app: &mut App, key: KeyEvent) -> Result<()
         .map(|s| !s.results.is_empty())
         .unwrap_or(false);
 
+    // j/k/Up/Down navigate results when results exist.
     if has_results {
         let len = app.search.as_ref().map(|s| s.results.len()).unwrap_or(0);
         match key.code {
@@ -619,20 +383,8 @@ pub(super) async fn handle_account_picker_key(app: &mut App, key: KeyEvent) -> R
         .as_ref()
         .map(|p| p.accounts.len())
         .unwrap_or(0);
+
     match key.code {
-        KeyCode::Esc => {
-            app.account_picker = None;
-        }
-        KeyCode::Enter => {
-            let pick = app
-                .account_picker
-                .as_ref()
-                .and_then(|p| p.state.selected().and_then(|i| p.accounts.get(i)).cloned());
-            if let Some(acct) = pick {
-                app.account_picker = None;
-                app.switch_account(acct).await?;
-            }
-        }
         KeyCode::Up | KeyCode::Char('k') if key.modifiers.is_empty() => {
             if len > 0
                 && let Some(p) = app.account_picker.as_mut()
@@ -641,6 +393,7 @@ pub(super) async fn handle_account_picker_key(app: &mut App, key: KeyEvent) -> R
                 p.state
                     .select(Some(if cur == 0 { len - 1 } else { cur - 1 }));
             }
+            return Ok(());
         }
         KeyCode::Down | KeyCode::Char('j') if key.modifiers.is_empty() => {
             if len > 0
@@ -649,8 +402,13 @@ pub(super) async fn handle_account_picker_key(app: &mut App, key: KeyEvent) -> R
                 let cur = p.state.selected().unwrap_or(0);
                 p.state.select(Some((cur + 1) % len));
             }
+            return Ok(());
         }
         _ => {}
+    }
+
+    if let Some(action) = Action::from_key(app, Context::AccountPicker, key, None, false, false) {
+        action.invoke(app).await?;
     }
     Ok(())
 }
@@ -658,72 +416,59 @@ pub(super) async fn handle_account_picker_key(app: &mut App, key: KeyEvent) -> R
 pub(super) async fn handle_contacts_key(app: &mut App, key: KeyEvent) -> Result<()> {
     let filtered = app.contacts_filtered();
     let len = filtered.len();
-    let Some(state) = app.contacts.as_mut() else {
-        return Ok(());
-    };
+
     match key.code {
-        KeyCode::Esc => {
-            app.contacts = None;
-        }
-        KeyCode::Enter => {
-            let idx = state.state.selected().unwrap_or(0);
-            if let Some(c) = filtered.get(idx).cloned() {
-                app.contacts = None;
-                app.compose_to_contact(&c.email);
-            }
-        }
         KeyCode::Up | KeyCode::Char('k') if key.modifiers.is_empty() && len > 0 => {
-            let cur = state.state.selected().unwrap_or(0);
-            state
-                .state
-                .select(Some(if cur == 0 { len - 1 } else { cur - 1 }));
+            if let Some(state) = app.contacts.as_mut() {
+                let cur = state.state.selected().unwrap_or(0);
+                state
+                    .state
+                    .select(Some(if cur == 0 { len - 1 } else { cur - 1 }));
+            }
+            return Ok(());
         }
         KeyCode::Down | KeyCode::Char('j') if key.modifiers.is_empty() && len > 0 => {
-            let cur = state.state.selected().unwrap_or(0);
-            state.state.select(Some((cur + 1) % len));
+            if let Some(state) = app.contacts.as_mut() {
+                let cur = state.state.selected().unwrap_or(0);
+                state.state.select(Some((cur + 1) % len));
+            }
+            return Ok(());
         }
+        // Filter editing.
         KeyCode::Backspace => {
-            state.filter.pop();
-            state.state.select(Some(0));
+            if let Some(state) = app.contacts.as_mut() {
+                state.filter.pop();
+                state.state.select(Some(0));
+            }
+            return Ok(());
         }
-        KeyCode::Char(c) => {
-            state.filter.push(c);
-            state.state.select(Some(0));
+        KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            if let Some(state) = app.contacts.as_mut() {
+                state.filter.push(c);
+                state.state.select(Some(0));
+            }
+            return Ok(());
         }
         _ => {}
+    }
+
+    if let Some(action) = Action::from_key(app, Context::Contacts, key, None, false, false) {
+        action.invoke(app).await?;
     }
     Ok(())
 }
 
 pub(super) async fn handle_ical_key(app: &mut App, key: KeyEvent) -> Result<()> {
-    match key.code {
-        KeyCode::Esc => app.close_ical(),
-        KeyCode::Char('a') => app.respond_ical(IcalResponse::Accept).await?,
-        KeyCode::Char('t') => app.respond_ical(IcalResponse::Tentative).await?,
-        KeyCode::Char('d') => app.respond_ical(IcalResponse::Decline).await?,
-        _ => {}
+    if let Some(action) = Action::from_key(app, Context::Ical, key, None, false, false) {
+        action.invoke(app).await?;
     }
     Ok(())
 }
 
 pub(super) async fn handle_thread_key(app: &mut App, key: KeyEvent) -> Result<()> {
     let len = app.thread.as_ref().map(|t| t.messages.len()).unwrap_or(0);
+
     match key.code {
-        KeyCode::Esc => {
-            app.thread = None;
-        }
-        KeyCode::Enter => {
-            let pick = app.thread.as_ref().and_then(|t| {
-                t.state
-                    .selected()
-                    .and_then(|i| t.messages.get(i))
-                    .map(|m| (m.folder.clone(), m.uid))
-            });
-            if let Some((folder, uid)) = pick {
-                app.thread = None;
-                app.jump_to_message(&folder, uid).await?;
-            }
-        }
         KeyCode::Up | KeyCode::Char('k') if key.modifiers.is_empty() => {
             if len > 0
                 && let Some(t) = app.thread.as_mut()
@@ -732,6 +477,7 @@ pub(super) async fn handle_thread_key(app: &mut App, key: KeyEvent) -> Result<()
                 t.state
                     .select(Some(if cur == 0 { len - 1 } else { cur - 1 }));
             }
+            return Ok(());
         }
         KeyCode::Down | KeyCode::Char('j') if key.modifiers.is_empty() => {
             if len > 0
@@ -740,8 +486,13 @@ pub(super) async fn handle_thread_key(app: &mut App, key: KeyEvent) -> Result<()
                 let cur = t.state.selected().unwrap_or(0);
                 t.state.select(Some((cur + 1) % len));
             }
+            return Ok(());
         }
         _ => {}
+    }
+
+    if let Some(action) = Action::from_key(app, Context::Thread, key, None, false, false) {
+        action.invoke(app).await?;
     }
     Ok(())
 }
@@ -760,7 +511,6 @@ pub(super) async fn handle_wizard_key(app: &mut App, key: KeyEvent) -> Result<()
             return Ok(());
         }
         // Leader chord for save: <Space>s.
-        // We repurpose `pending_leader` already in App for this.
         if app.pending_leader == Some(super::app::LeaderState::Pending) {
             app.pending_leader = None;
             if key.code == KeyCode::Char('s') {
@@ -777,13 +527,11 @@ pub(super) async fn handle_wizard_key(app: &mut App, key: KeyEvent) -> Result<()
                     },
                     Err(e) => {
                         app.status = format!("wizard validation: {e}");
-                        // Put a fresh wizard back so the user can correct it.
-                        // (Simple: just discard state and warn.)
                     }
                 }
                 return Ok(());
             }
-            // Any other <Space>X: put leader back as unrecognised and fall through.
+            // Any other <Space>X: fall through.
         }
         if key.code == KeyCode::Char(' ') && key.modifiers.is_empty() {
             app.pending_leader = Some(super::app::LeaderState::Pending);
@@ -822,7 +570,6 @@ fn save_wizard_account(acct: inbx_config::Account, password: &str) -> Result<Str
 }
 
 /// Route key events when an `active_picker` overlay is open.
-/// Returns `true` if the picker was closed (either cancelled or accepted).
 pub(super) async fn handle_active_picker_key(app: &mut App, key: KeyEvent) -> Result<()> {
     // Pull the picker out temporarily to avoid borrow-checker trouble.
     let Some(mut picker_state) = app.active_picker.take() else {
@@ -932,15 +679,4 @@ pub(super) async fn handle_sieve_wizard_key(app: &mut App, key: KeyEvent) -> Res
     let label = wizard.focused_label().to_string();
     app.status = format!("sieve: {label} — <Space>s save · Esc cancel");
     Ok(())
-}
-
-/// Return the bracket label for the current PGP flag state.
-/// Used to append to status-bar messages after a Ctrl-G chord.
-fn pgp_flag_label(flags: &PgpFlags) -> &'static str {
-    match (flags.sign, flags.encrypt) {
-        (true, true) => " [sign+encrypt]",
-        (true, false) => " [sign]",
-        (false, true) => " [encrypt]",
-        (false, false) => "",
-    }
 }

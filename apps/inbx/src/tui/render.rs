@@ -9,6 +9,7 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 
 use super::ACTIVE_THEME;
 use super::app::{ActivePicker, App, Mode, Pane};
+use super::binds::{Action, Category, current_context};
 
 pub(super) fn draw(f: &mut ratatui::Frame, app: &App) {
     let area = f.area();
@@ -66,59 +67,45 @@ pub(super) fn draw(f: &mut ratatui::Frame, app: &App) {
         draw_sieve_wizard(f, app, outer[0]);
     }
     if app.show_help {
-        draw_help(f, outer[0]);
+        draw_help(f, app, outer[0]);
     }
     draw_status(f, app, outer[1]);
 }
 
-fn draw_help(f: &mut ratatui::Frame, area: Rect) {
-    let lines = [
-        "  navigation",
-        "    j / k       — down / up",
-        "    h / l, Tab  — switch pane",
-        "    g g         — top of list",
-        "    G           — bottom of list",
-        "    Enter       — open folder / preview",
-        "",
-        "  message ops (messages pane)",
-        "    s           — toggle \\Seen",
-        "    *           — toggle \\Flagged",
-        "    d           — toggle \\Deleted",
-        "    e           — EXPUNGE folder",
-        "    m           — move to folder",
-        "    F           — manual sync",
-        "    T           — thread view",
-        "    U           — list-unsubscribe",
-        "    i           — accept/decline invite",
-        "    Y / N       — send / decline read receipt (preview pane)",
-        "",
-        "  compose",
-        "    c           — new draft",
-        "    r / R       — reply / reply-all",
-        "    f           — forward",
-        "",
-        "  composer",
-        "    Tab / S-Tab — cycle field",
-        "    Ctrl-S      — send",
-        "    Ctrl-D      — save draft to server",
-        "    Ctrl-Q      — discard",
-        "    Ctrl-G s    — toggle PGP sign",
-        "    Ctrl-G e    — toggle PGP encrypt",
-        "",
-        "  overlays",
-        "    /           — search (FTS)",
-        "    n / N       — next / prev search match",
-        "    a           — switch account",
-        "    C           — contacts",
-        "    O           — outbox panel",
-        "    L           — oauth login",
-        "",
-        "  global",
-        "    ?           — toggle this help",
-        "    q / Ctrl-C  — quit",
+fn draw_help(f: &mut ratatui::Frame, app: &App, area: Rect) {
+    let ctx = current_context(app);
+    let mut lines: Vec<String> = Vec::new();
+
+    // Collect actions per category, preserving the canonical category order.
+    let all_categories = [
+        Category::Navigation,
+        Category::MessageOps,
+        Category::Compose,
+        Category::ComposerControls,
+        Category::Overlays,
+        Category::Global,
     ];
+
+    for cat in all_categories {
+        let rows: Vec<_> = Action::all_rows_in(ctx)
+            .filter(|(_, _, c)| *c == cat)
+            .collect();
+        if rows.is_empty() {
+            continue;
+        }
+        lines.push(format!("  {}", cat.label()));
+        for (key, desc, _) in rows {
+            lines.push(format!("    {:<16}— {}", key.label, desc));
+        }
+        lines.push(String::new());
+    }
+    // Remove trailing blank line.
+    if lines.last().map(|l| l.is_empty()).unwrap_or(false) {
+        lines.pop();
+    }
+
     let height = (lines.len() as u16 + 2).min(area.height);
-    let width = 60u16.min(area.width);
+    let width = 64u16.min(area.width);
     let x = area.x + area.width.saturating_sub(width) / 2;
     let y = area.y + area.height.saturating_sub(height) / 2;
     let popup = Rect {
