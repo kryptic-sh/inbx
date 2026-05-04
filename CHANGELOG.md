@@ -8,6 +8,16 @@ patch bumps.
 
 ## [Unreleased]
 
+### Added
+
+- **JMAP push in the TUI.** `App::new` spawns a long-lived `do_watch` task that
+  dispatches on `account.transport`: IMAP IDLE (RFC 2177), JMAP EventSource (RFC
+  8620), or a Graph poll placeholder. Push events post
+  `TaskResult::WatchSignal`, which the event loop turns into a `manual_sync` on
+  the current folder. Fastmail / Stalwart accounts now get live TUI updates like
+  IMAP IDLE accounts. `inbx-sync` shares the same dispatch via an extracted
+  `wait_for_change` helper.
+
 ## [0.2.0] - 2026-05-04
 
 ### Added
