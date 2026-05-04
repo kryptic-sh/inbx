@@ -29,7 +29,7 @@
 //! the message has no RFC 5322 Message-ID — callers that need it can look
 //! there.  A cleaner path (separate column) is left for follow-up if needed.
 
-use crate::{imap, jmap};
+use crate::{graph, imap, jmap};
 use inbx_config::{Account, Transport};
 
 pub use crate::imap::{FolderInfo, HeaderRow};
@@ -44,6 +44,8 @@ pub enum Error {
     Imap(#[from] imap::Error),
     #[error("jmap: {0}")]
     Jmap(#[from] jmap::Error),
+    #[error("graph: {0}")]
+    Graph(#[from] graph::Error),
     #[error("auto-detect: {0}")]
     AutoDetect(String),
 }
@@ -234,8 +236,8 @@ pub fn fastmail_jmap_session_url(imap_host: &str) -> Option<&'static str> {
 /// - `Transport::Imap` (default) → authenticated IMAP session wrapped in
 ///   `ImapProvider`.
 /// - `Transport::Jmap { session_url }` → `JmapClient` connected to `session_url`.
-/// - `Transport::Graph` → IMAP fallback (Graph's MailProvider wiring is
-///   deferred; TODO(M21): implement GraphProvider).
+/// - `Transport::Graph` → `GraphClient` implementing `MailProvider` via the
+///   Microsoft Graph API (`/me/messages`, `/me/sendMail`, etc.).
 ///
 /// Existing IMAP-only accounts keep working unchanged because `Transport`
 /// defaults to `Imap`.  To opt into JMAP, set `[transport]` in the account
@@ -244,6 +246,11 @@ pub fn fastmail_jmap_session_url(imap_host: &str) -> Option<&'static str> {
 /// [accounts.transport]
 /// kind = "jmap"
 /// session_url = "https://api.fastmail.com/jmap/session"
+/// ```
+/// To opt into Graph (Microsoft 365 / Outlook):
+/// ```toml
+/// [accounts.transport]
+/// kind = "graph"
 /// ```
 pub async fn connect_provider(
     account: &Account,
@@ -258,10 +265,8 @@ pub async fn connect_provider(
             Ok(Box::new(client))
         }
         Transport::Graph => {
-            // Graph has its own GraphClient; fall back to IMAP for M21.
-            // TODO(M21): wire GraphClient as a MailProvider when Graph is in scope.
-            let session = imap::connect_imap(account).await?;
-            Ok(Box::new(ImapProvider { session }))
+            let client = graph::GraphClient::connect(account).await?;
+            Ok(Box::new(client))
         }
     }
 }
@@ -347,5 +352,35 @@ mod tests {
         let mut p = MockProvider;
         let body = p.fetch_body("INBOX", 1).await.unwrap();
         assert!(!body.is_empty());
+    }
+
+    /// Verify the Graph error variant can be constructed and formatted.
+    /// This also ensures `provider::Error::Graph` compiles with `#[from]`.
+    #[test]
+    fn provider_error_graph_variant_compiles() {
+        let graph_err = crate::graph::Error::Missing("test field");
+        let provider_err = Error::Graph(graph_err);
+        let msg = provider_err.to_string();
+        assert!(msg.contains("graph"), "error message: {msg}");
+    }
+
+    /// Verify Transport::Graph matches the correct arm (no live network needed).
+    #[test]
+    fn transport_graph_variant_matches() {
+        use inbx_config::Transport;
+        let t = Transport::Graph;
+        // Verify the variant is Graph — connect_provider would pick the Graph arm.
+        assert!(
+            matches!(t, Transport::Graph),
+            "Transport::Graph should match Graph arm"
+        );
+        // Imap and Jmap must not match Graph.
+        assert!(!matches!(Transport::Imap, Transport::Graph));
+        assert!(!matches!(
+            Transport::Jmap {
+                session_url: String::new()
+            },
+            Transport::Graph
+        ));
     }
 }

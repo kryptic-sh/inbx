@@ -330,6 +330,36 @@ username = "y"
         );
     }
 
+    /// Verify Graph transport round-trips through TOML.
+    #[test]
+    fn transport_graph_round_trip() {
+        let raw = r#"
+[[accounts]]
+name = "outlook"
+email = "me@outlook.com"
+imap_host = "outlook.office365.com"
+smtp_host = "smtp.office365.com"
+username = "me@outlook.com"
+
+[accounts.transport]
+kind = "graph"
+"#;
+        let cfg: Config = toml::from_str(raw).unwrap();
+        assert!(
+            matches!(cfg.accounts[0].transport, Transport::Graph),
+            "expected Transport::Graph, got {:?}",
+            cfg.accounts[0].transport
+        );
+        // Serialise → re-parse round-trip.
+        let serialised = toml::to_string_pretty(&cfg).unwrap();
+        let reparsed: Config = toml::from_str(&serialised).unwrap();
+        assert!(
+            matches!(reparsed.accounts[0].transport, Transport::Graph),
+            "round-trip failed: {:?}",
+            reparsed.accounts[0].transport
+        );
+    }
+
     /// Verify JMAP transport round-trips through TOML.
     #[test]
     fn transport_jmap_round_trip() {

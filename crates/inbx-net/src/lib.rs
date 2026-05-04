@@ -10,6 +10,7 @@ pub mod sieve;
 pub mod smtp;
 pub mod unsubscribe;
 
+pub use graph::graph_id_to_uid;
 pub use imap::{
     Error as ImapError, FolderInfo, HeaderRow, ImapSession, append_draft, append_message,
     connect_imap, create_folder, delete_folder, expunge_folder, fetch_bodies, fetch_headers,
