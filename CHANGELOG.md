@@ -32,6 +32,17 @@ patch bumps.
   Graph accounts now get near-realtime TUI updates, finishing the JMAP/Graph
   parity sweep (push + expunge + delta).
 
+### Changed
+
+- **`inbx expunge` CLI routes through `MailProvider`.** Previously called
+  `connect_imap` + raw `expunge_folder`, which errored on JMAP / Graph accounts.
+  Now uses `connect_provider` like the TUI, so JMAP runs the `Email/set destroy`
+  path and Graph reports the no-op.
+- **`inbx watch` CLI dispatches on transport.** Graph accounts now run a
+  `delta_messages` poll cycle (75 s sleep on no-change, immediate fetch on
+  changes) via the new `graph_delta_tick` helper, matching `inbx-sync` and
+  `tui::do_watch`. JMAP still forwards to `inbx jmap push`.
+
 ## [0.2.0] - 2026-05-04
 
 ### Added

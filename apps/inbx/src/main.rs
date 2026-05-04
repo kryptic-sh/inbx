@@ -1172,9 +1172,8 @@ async fn cmd_watch(account: Option<String>, folder: String, bodies: bool) -> Res
     let cfg = inbx_config::load()?;
     let acct = pick_account(&cfg, account.as_deref())?.clone();
     let acct_name = acct.name.clone();
-    // Transport dispatch — IDLE only applies to IMAP. Graph and JMAP
-    // use their own push paths; for now we forward JMAP to its push
-    // subcommand. Graph push is a delta-poll for now.
+    // Transport dispatch — JMAP forwards to its push subcommand; Graph runs a
+    // delta-link poll loop; IMAP runs the classic IDLE-with-fetch loop.
     if let inbx_config::Transport::Jmap { session_url } = &acct.transport {
         return cmd_jmap(JmapCmd::Push {
             account: Some(acct_name),
@@ -1204,19 +1203,57 @@ async fn cmd_watch(account: Option<String>, folder: String, bodies: bool) -> Res
         // Refresh acct from disk in case config changed.
         let cfg = inbx_config::load()?;
         let acct = pick_account(&cfg, Some(&acct_name))?.clone();
-        match inbx_net::idle::wait_for_new_in(&acct, &folder).await {
-            Ok(inbx_net::idle::IdleEvent::NewData) => {
-                tracing::info!("new data signal");
+        match &acct.transport {
+            inbx_config::Transport::Imap => {
+                match inbx_net::idle::wait_for_new_in(&acct, &folder).await {
+                    Ok(inbx_net::idle::IdleEvent::NewData) => {
+                        tracing::info!("new data signal");
+                    }
+                    Ok(inbx_net::idle::IdleEvent::Timeout) => {
+                        tracing::info!("idle keepalive cycle");
+                    }
+                    Err(e) => {
+                        tracing::warn!(%e, "idle error; backing off 30s");
+                        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                    }
+                }
             }
-            Ok(inbx_net::idle::IdleEvent::Timeout) => {
-                tracing::info!("idle keepalive cycle");
+            inbx_config::Transport::Graph => {
+                // Delta-link poll: 75s between cycles when idle, signal
+                // immediately on changes by falling through to the next fetch.
+                if let Err(e) = graph_delta_tick(&acct, &folder).await {
+                    tracing::warn!(%e, "Graph delta tick failed; backing off 30s");
+                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                }
             }
-            Err(e) => {
-                tracing::warn!(%e, "idle error; backing off 30s");
-                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-            }
+            inbx_config::Transport::Jmap { .. } => unreachable!("forwarded above"),
         }
     }
+}
+
+/// One Graph delta-poll cycle for `inbx watch`. Returns when there are
+/// changes (caller fetches next iteration) or after a 75 s sleep on no-change.
+async fn graph_delta_tick(acct: &inbx_config::Account, folder: &str) -> Result<()> {
+    let store = inbx_store::Store::open(&acct.name).await?;
+    let client = inbx_net::graph::GraphClient::connect(acct).await?;
+    let folders = client.list_folders().await?;
+    let folder_id = folders
+        .iter()
+        .find(|f| f.display_name.eq_ignore_ascii_case(folder))
+        .map(|f| f.id.clone())
+        .ok_or_else(|| anyhow::anyhow!("Graph folder {folder} not found"))?;
+    let stored = store.get_delta_link(folder).await?;
+    let (messages, new_link) = client.delta_messages(&folder_id, stored.as_deref()).await?;
+    if let Err(e) = store.set_delta_link(folder, new_link.as_deref()).await {
+        tracing::warn!(%e, "Graph: set_delta_link failed (ignored)");
+    }
+    if messages.is_empty() {
+        tracing::debug!("Graph delta: no changes; sleeping 75s");
+        tokio::time::sleep(std::time::Duration::from_secs(75)).await;
+    } else {
+        tracing::info!(count = messages.len(), "Graph delta: new messages");
+    }
+    Ok(())
 }
 
 /// Best-effort drain — only attempts due rows; failures bubble back into the
@@ -1327,10 +1364,10 @@ async fn cmd_mark(
 async fn cmd_expunge(account: Option<String>, folder: String) -> Result<()> {
     let cfg = inbx_config::load()?;
     let acct = pick_account(&cfg, account.as_deref())?.clone();
-    let mut session = inbx_net::connect_imap(&acct).await?;
-    let n = inbx_net::expunge_folder(&mut session, &folder).await?;
-    let _ = session.logout().await;
     let store = inbx_store::Store::open(&acct.name).await?;
+    let mut provider = inbx_net::connect_provider(&acct, Some(&store)).await?;
+    let n = provider.expunge_folder(&folder).await?;
+    drop(provider);
     let purged = store.purge_deleted(&folder).await?;
     println!("expunged {n} server / {purged} local rows in {folder}");
     Ok(())
