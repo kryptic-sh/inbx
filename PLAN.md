@@ -222,7 +222,21 @@ inbx/
 - **DKIM/SPF/DMARC** verify, display result badge.
 - **Phishing heuristics** on display.
 - **No auto-execute** attachments. Sniff MIME, never trust extension.
-- **S/MIME** + **PGP** (sequoia-openpgp) for sign + encrypt.
+- **S/MIME** + **PGP** (sequoia-openpgp) for sign + encrypt. Two key sources,
+  account-configurable:
+  - **`gnupg`** — read keys from the system GPG keyring at `~/.gnupg/`. Default
+    for users who already manage keys via `gpg` and don't want a parallel store.
+    Sign/decrypt operations shell out to `gpg` (no private-key extraction).
+  - **`inbx-managed`** — keypair lives at `~/.local/share/inbx/<acct>/pgp/` with
+    the secret key passphrase in the OS keyring. For users who want a
+    per-account email key separate from their identity-grade GPG key, or who are
+    GPG-free.
+
+  Per-account TOML field `pgp.key_source = "gnupg" | "inbx-managed"` with
+  `key_id` / `key_fingerprint` to pick the specific key when the source has
+  multiple. Default: `gnupg` if `~/.gnupg/` exists at first PGP enable, else
+  `inbx-managed` with a generate-on-first-use prompt.
+
 - **Read receipts**: never auto-send; user prompt only.
 - **Encryption at rest**: deferred. Threat model documented.
 - **Sandbox HTML**: GUI uses sanitized blob in webview; TUI text-only.
@@ -336,7 +350,7 @@ inbx/
 | M19 | Import/export (mbox, .eml)                                                                    | store, app/inbx       |
 | M20 | GUI MVP                                                                                       | app/inbx-gui          |
 | M21 | JMAP. Client-side rules.                                                                      | net, core             |
-| M22 | PGP + S/MIME (sign + encrypt)                                                                 | net, composer, render |
+| M22 | PGP + S/MIME (sign + encrypt; dual key source: gnupg keyring or inbx-managed)                 | net, composer, render |
 | M23 | CardDAV contacts sync                                                                         | contacts, net         |
 | M24 | Templates / canned replies                                                                    | composer              |
 | M25 | hjkl-picker overlays in TUI (folder, account, message-jump, attachment)                       | app/inbx              |
