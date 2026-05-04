@@ -3,6 +3,7 @@ pub mod idle;
 pub mod imap;
 pub mod jmap;
 pub mod oauth;
+pub mod proxy;
 pub mod sieve;
 pub mod smtp;
 pub mod unsubscribe;

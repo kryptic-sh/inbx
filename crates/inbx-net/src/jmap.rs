@@ -8,7 +8,6 @@
 //! provider's own protocol path.
 
 use std::pin::Pin;
-use std::time::Duration;
 
 use bytes::Bytes;
 use futures_util::Stream;
@@ -17,7 +16,7 @@ use inbx_config::{Account, AuthMethod};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::oauth;
+use crate::{oauth, proxy};
 
 /// Wrapper around a chunked SSE response. `next_event` strips the SSE
 /// envelope (`event:` / `data:` / blank-line delimiter) and returns each
@@ -145,13 +144,13 @@ impl JmapClient {
             },
             AuthMethod::OAuth2 { provider, .. } => {
                 let refresh = inbx_config::load_refresh_token(&account.name)?;
-                let access = oauth::refresh(&account.auth, provider, &refresh).await?;
+                let access =
+                    oauth::refresh(&account.auth, provider, &refresh, account.proxy.as_ref())
+                        .await?;
                 JmapAuth::Bearer(access)
             }
         };
-        let http = reqwest::ClientBuilder::new()
-            .timeout(Duration::from_secs(30))
-            .build()?;
+        let http = proxy::build_reqwest_client(account.proxy.as_ref(), 30)?;
         let res = apply_auth(http.get(session_url), &auth).send().await?;
         if !res.status().is_success() {
             let status = res.status().as_u16();

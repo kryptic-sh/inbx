@@ -105,7 +105,12 @@ inbx/
     requests starttls and capability missing OR upgrade fails, abort connection
     — never fall through to plaintext.
 - No plaintext-only mode. Ever.
-- Per-account proxy / SOCKS via `tokio-socks`.
+- Per-account proxy / SOCKS via `tokio-socks` (shipped v0.1.x). IMAP and Sieve
+  route through the proxy at the TCP layer; Graph, JMAP, and OAuth flows use
+  `reqwest`'s built-in proxy support. **SMTP (lettre 0.11) does not honor the
+  proxy** — a `tracing::warn!` fires once at startup if the account has a
+  `proxy` field set; workaround: route SMTP through a SOCKS-aware tunnel such as
+  `proxychains` or `redsocks`.
 - DKIM/SPF/DMARC verify on inbound for display badge.
 - IMAP UIDPLUS for Drafts/Sent append. Folder ops (create/rename/ delete/move,
   subscriptions).

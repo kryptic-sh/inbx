@@ -54,6 +54,7 @@ async-imap = { version = "0.10", default-features = false, features = ["runtime-
 tokio-rustls = { version = "0.26", default-features = false, features = ["tls12", "ring"] }
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 webpki-roots = "0.26"
+tokio-socks = "0.5"
 
 # Mail parsing
 mail-parser = "0.10"

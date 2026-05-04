@@ -71,13 +71,11 @@ impl<'a> Threader<'a> {
                 && !self.would_create_cycle(child_id, parent_id).await?
             {
                 // Cycle check: walk up from proposed parent; if we hit child_id, skip.
-                sqlx::query(
-                    "UPDATE thread_containers SET parent_id = ?2 WHERE message_id = ?1",
-                )
-                .bind(child_id)
-                .bind(parent_id)
-                .execute(self.pool)
-                .await?;
+                sqlx::query("UPDATE thread_containers SET parent_id = ?2 WHERE message_id = ?1")
+                    .bind(child_id)
+                    .bind(parent_id)
+                    .execute(self.pool)
+                    .await?;
             }
         }
 
@@ -91,13 +89,11 @@ impl<'a> Threader<'a> {
             if matches!(existing, Some((None,)))
                 && !self.would_create_cycle(message_id, direct_parent).await?
             {
-                sqlx::query(
-                    "UPDATE thread_containers SET parent_id = ?2 WHERE message_id = ?1",
-                )
-                .bind(message_id)
-                .bind(direct_parent)
-                .execute(self.pool)
-                .await?;
+                sqlx::query("UPDATE thread_containers SET parent_id = ?2 WHERE message_id = ?1")
+                    .bind(message_id)
+                    .bind(direct_parent)
+                    .execute(self.pool)
+                    .await?;
             }
         }
 

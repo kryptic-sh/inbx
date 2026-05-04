@@ -3,12 +3,10 @@
 //! Lives next to the IMAP/SMTP path so individual accounts can opt in. Uses
 //! the same OAuth2 refresh-token storage as IMAP-side XOAUTH2.
 
-use std::time::Duration;
-
 use inbx_config::{Account, AuthMethod, OAuthProvider};
 use serde::Deserialize;
 
-use crate::oauth;
+use crate::{oauth, proxy};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -46,10 +44,9 @@ impl GraphClient {
             _ => return Err(Error::NotMicrosoft),
         };
         let refresh = inbx_config::load_refresh_token(&account.name)?;
-        let token = oauth::refresh(&account.auth, &provider, &refresh).await?;
-        let http = reqwest::ClientBuilder::new()
-            .timeout(Duration::from_secs(30))
-            .build()?;
+        let token =
+            oauth::refresh(&account.auth, &provider, &refresh, account.proxy.as_ref()).await?;
+        let http = proxy::build_reqwest_client(account.proxy.as_ref(), 30)?;
         Ok(Self { http, token })
     }
 

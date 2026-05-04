@@ -17,3 +17,4 @@ keyring.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 inbx-pgp.workspace = true
+url.workspace = true

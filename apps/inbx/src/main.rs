@@ -2217,7 +2217,7 @@ async fn cmd_oauth(action: OAuthCmd) -> Result<()> {
                     acct.name
                 ),
             };
-            let token = inbx_net::oauth_login(&acct.auth, &provider).await?;
+            let token = inbx_net::oauth_login(&acct.auth, &provider, acct.proxy.as_ref()).await?;
             inbx_config::store_refresh_token(&acct.name, &token.refresh)?;
             println!(
                 "saved refresh token for {} (access token expires in {}s)",
@@ -2928,6 +2928,7 @@ fn cmd_accounts_add(oauth: Option<String>) -> Result<()> {
         auth,
         transport: inbx_config::Transport::Imap,
         pgp: None,
+        proxy: None,
     });
     inbx_config::save(&cfg)?;
     if oauth.is_some() {

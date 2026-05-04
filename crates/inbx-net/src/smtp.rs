@@ -1,4 +1,8 @@
+use std::sync::Once;
+
 use inbx_config::{Account, AuthMethod, TlsMode};
+
+static SMTP_PROXY_WARN: Once = Once::new();
 use lettre::address::Address as LettreAddress;
 use lettre::address::Envelope;
 use lettre::transport::smtp::AsyncSmtpTransport;
@@ -34,6 +38,15 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// Envelope is derived from From/To/Cc/Bcc headers in the message itself.
 /// Honors `account.auth` (app password vs OAuth2 XOAUTH2).
 pub async fn send_message(account: &Account, raw: &[u8]) -> Result<()> {
+    if account.proxy.is_some() {
+        SMTP_PROXY_WARN.call_once(|| {
+            tracing::warn!(
+                "smtp: per-account proxy ignored — lettre 0.11 has no SOCKS hook \
+                 (workaround: route SMTP through a SOCKS-aware tunnel like \
+                 proxychains or 'redsocks')"
+            );
+        });
+    }
     let envelope = envelope_from_raw(raw)?;
     let builder = match account.smtp_security {
         TlsMode::Tls => AsyncSmtpTransport::<Tokio1Executor>::relay(&account.smtp_host)?,
@@ -49,7 +62,8 @@ pub async fn send_message(account: &Account, raw: &[u8]) -> Result<()> {
         }
         AuthMethod::OAuth2 { provider, .. } => {
             let refresh = inbx_config::load_refresh_token(&account.name)?;
-            let access = oauth::refresh(&account.auth, provider, &refresh).await?;
+            let access =
+                oauth::refresh(&account.auth, provider, &refresh, account.proxy.as_ref()).await?;
             builder
                 .credentials(Credentials::new(account.email.clone(), access))
                 .authentication(vec![Mechanism::Xoauth2])

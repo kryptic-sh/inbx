@@ -6,7 +6,7 @@
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
-use inbx_config::{AuthMethod, OAuthProvider};
+use inbx_config::{AuthMethod, OAuthProvider, ProxyConfig};
 use oauth2::basic::BasicClient;
 use oauth2::{
     AuthUrl, AuthorizationCode, ClientId, ClientSecret, CsrfToken, PkceCodeChallenge,
@@ -113,17 +113,23 @@ fn pick_client_secret(method: &AuthMethod, provider: &OAuthProvider) -> Option<C
         .map(ClientSecret::new)
 }
 
-fn http_client() -> Result<reqwest::Client> {
-    let c = reqwest::ClientBuilder::new()
+fn http_client(proxy: Option<&ProxyConfig>) -> Result<reqwest::Client> {
+    let mut builder = reqwest::ClientBuilder::new()
         .redirect(reqwest::redirect::Policy::none())
-        .timeout(Duration::from_secs(30))
-        .build()?;
-    Ok(c)
+        .timeout(Duration::from_secs(30));
+    if let Some(p) = proxy {
+        builder = builder.proxy(reqwest::Proxy::all(&p.url)?);
+    }
+    Ok(builder.build()?)
 }
 
 /// Run an interactive auth-code flow with a loopback redirect on a random
 /// port. Returns (refresh_token, access_token, expires_in_secs).
-pub async fn login(method: &AuthMethod, provider: &OAuthProvider) -> Result<TokenSet> {
+pub async fn login(
+    method: &AuthMethod,
+    provider: &OAuthProvider,
+    proxy: Option<&ProxyConfig>,
+) -> Result<TokenSet> {
     let client_id = pick_client_id(method, provider)?;
     let client_secret = pick_client_secret(method, provider);
     let (auth_url_s, token_url_s, scope_s) = endpoints(provider);
@@ -164,7 +170,7 @@ pub async fn login(method: &AuthMethod, provider: &OAuthProvider) -> Result<Toke
         return Err(Error::CsrfMismatch);
     }
 
-    let http = http_client()?;
+    let http = http_client(proxy)?;
     let token = client
         .exchange_code(code)
         .set_pkce_verifier(PkceCodeVerifier::new(pkce_verifier.secret().to_string()))
@@ -192,6 +198,7 @@ pub async fn refresh(
     method: &AuthMethod,
     provider: &OAuthProvider,
     refresh_token: &str,
+    proxy: Option<&ProxyConfig>,
 ) -> Result<String> {
     let client_id = pick_client_id(method, provider)?;
     let client_secret = pick_client_secret(method, provider);
@@ -207,7 +214,7 @@ pub async fn refresh(
         client = client.set_client_secret(secret);
     }
 
-    let http = http_client()?;
+    let http = http_client(proxy)?;
     let token = client
         .exchange_refresh_token(&RefreshToken::new(refresh_token.to_string()))
         .request_async(&http)

@@ -5,6 +5,58 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+/// Parsed representation of a SOCKS5 proxy URL.
+#[derive(Debug, Clone)]
+pub struct ParsedProxy {
+    pub host: String,
+    pub port: u16,
+    /// `true` when the scheme is `socks5h` (DNS resolved by the proxy).
+    pub remote_dns: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProxyConfig {
+    /// SOCKS5 proxy URL: e.g. `"socks5://127.0.0.1:9050"` (Tor) or
+    /// `"socks5h://user:pass@host:1080"`.
+    pub url: String,
+    /// Optional username for SOCKS5 auth.  When present the password must be
+    /// in the OS keyring under service `"inbx-proxy"`, username =
+    /// `account.name + ".proxy"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
+}
+
+impl ProxyConfig {
+    /// Parse `self.url` into host, port and scheme flag.  Returns `Err` on
+    /// garbage input.
+    pub fn parse(&self) -> Result<ParsedProxy> {
+        let url = url::Url::parse(&self.url)
+            .map_err(|_| Error::ProxyUrl(format!("invalid proxy URL: {}", self.url)))?;
+        let scheme = url.scheme();
+        let remote_dns = match scheme {
+            "socks5" => false,
+            "socks5h" => true,
+            other => {
+                return Err(Error::ProxyUrl(format!(
+                    "unsupported proxy scheme `{other}`; expected socks5 or socks5h"
+                )));
+            }
+        };
+        let host = url
+            .host_str()
+            .ok_or_else(|| Error::ProxyUrl("proxy URL missing host".into()))?
+            .to_string();
+        let port = url
+            .port()
+            .ok_or_else(|| Error::ProxyUrl("proxy URL missing port".into()))?;
+        Ok(ParsedProxy {
+            host,
+            port,
+            remote_dns,
+        })
+    }
+}
+
 pub use inbx_pgp::config::PgpConfig;
 
 #[derive(Debug, thiserror::Error)]
@@ -19,6 +71,8 @@ pub enum Error {
     TomlEncode(#[from] toml::ser::Error),
     #[error("keyring: {0}")]
     Keyring(#[from] keyring::Error),
+    #[error("proxy url: {0}")]
+    ProxyUrl(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -109,6 +163,8 @@ pub struct Account {
     pub transport: Transport,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pgp: Option<PgpConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy: Option<ProxyConfig>,
 }
 
 fn default_imap_port() -> u16 {
@@ -209,6 +265,7 @@ mod tests {
                 auth: AuthMethod::AppPassword,
                 transport: Transport::Imap,
                 pgp: None,
+                proxy: None,
             }],
         };
         let raw = toml::to_string_pretty(&cfg).unwrap();

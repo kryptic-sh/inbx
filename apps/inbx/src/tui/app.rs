@@ -897,7 +897,9 @@ impl App {
             }
         };
         self.status = "oauth login: opening browser…".into();
-        match inbx_net::oauth_login(&self.account.auth, &provider).await {
+        match inbx_net::oauth_login(&self.account.auth, &provider, self.account.proxy.as_ref())
+            .await
+        {
             Ok(token) => {
                 inbx_config::store_refresh_token(&self.account.name, &token.refresh)?;
                 self.status = "oauth login complete".into();

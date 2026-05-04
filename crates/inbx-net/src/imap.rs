@@ -7,7 +7,7 @@ use async_imap::imap_proto::types::NameAttribute;
 use futures_util::StreamExt;
 use inbx_config::{Account, AuthMethod, TlsMode};
 
-use crate::oauth;
+use crate::{oauth, proxy};
 use rustls::pki_types::ServerName;
 use rustls::{ClientConfig, RootCertStore};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufStream};
@@ -35,6 +35,8 @@ pub enum Error {
     Config(#[from] inbx_config::Error),
     #[error("oauth: {0}")]
     OAuth(#[from] oauth::Error),
+    #[error("proxy: {0}")]
+    Proxy(#[from] proxy::Error),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -90,15 +92,25 @@ async fn do_starttls(tcp: TcpStream) -> Result<TcpStream> {
 /// auth method. Resolves credentials from the OS keyring (app password) or
 /// performs an OAuth2 refresh and authenticates via XOAUTH2.
 pub async fn connect_imap(account: &Account) -> Result<ImapSession> {
-    let addr = (account.imap_host.as_str(), account.imap_port);
-
     let tls_stream = match account.imap_security {
         TlsMode::Tls => {
-            let tcp = TcpStream::connect(addr).await?;
+            let tcp = proxy::connect(
+                account.proxy.as_ref(),
+                &account.imap_host,
+                account.imap_port,
+                &account.name,
+            )
+            .await?;
             upgrade_tls(tcp, &account.imap_host).await?
         }
         TlsMode::Starttls => {
-            let tcp = TcpStream::connect(addr).await?;
+            let tcp = proxy::connect(
+                account.proxy.as_ref(),
+                &account.imap_host,
+                account.imap_port,
+                &account.name,
+            )
+            .await?;
             let tcp = do_starttls(tcp).await?;
             upgrade_tls(tcp, &account.imap_host).await?
         }
@@ -115,7 +127,8 @@ pub async fn connect_imap(account: &Account) -> Result<ImapSession> {
         }
         AuthMethod::OAuth2 { provider, .. } => {
             let refresh = inbx_config::load_refresh_token(&account.name)?;
-            let access = oauth::refresh(&account.auth, provider, &refresh).await?;
+            let access =
+                oauth::refresh(&account.auth, provider, &refresh, account.proxy.as_ref()).await?;
             let auth = Xoauth2Authenticator::new(&account.email, &access);
             client
                 .authenticate("XOAUTH2", auth)

@@ -18,7 +18,7 @@ use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
 use tokio_rustls::client::TlsStream;
 
-use crate::oauth;
+use crate::{oauth, proxy};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -36,6 +36,8 @@ pub enum Error {
     Protocol(&'static str),
     #[error("oauth: {0}")]
     OAuth(#[from] oauth::Error),
+    #[error("proxy: {0}")]
+    Proxy(#[from] proxy::Error),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -63,7 +65,7 @@ impl SieveClient {
     pub async fn connect(account: &Account) -> Result<Self> {
         let host = account.imap_host.as_str();
         let port = DEFAULT_PORT;
-        let tcp = TcpStream::connect((host, port)).await?;
+        let tcp = proxy::connect(account.proxy.as_ref(), host, port, &account.name).await?;
         let connector = TlsConnector::from(tls_config());
         let server_name = ServerName::try_from(host.to_string())?;
         let tls = connector.connect(server_name, tcp).await?;
@@ -80,7 +82,9 @@ impl SieveClient {
             }
             AuthMethod::OAuth2 { provider, .. } => {
                 let refresh = inbx_config::load_refresh_token(&account.name)?;
-                let access = oauth::refresh(&account.auth, provider, &refresh).await?;
+                let access =
+                    oauth::refresh(&account.auth, provider, &refresh, account.proxy.as_ref())
+                        .await?;
                 me.authenticate_xoauth2(&account.email, &access).await?;
             }
         }
