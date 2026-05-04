@@ -6,6 +6,8 @@ use std::collections::{HashMap, HashSet};
 
 use mail_parser::{MessageParser, MimeHeaders, PartType};
 
+pub use pgp::{SecureKind, SecurityInfo};
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("parse: could not parse RFC 5322 input")]
@@ -25,6 +27,19 @@ pub enum RemotePolicy {
     Allow,
 }
 
+/// Result of a PGP verify or decrypt operation on the rendered message.
+#[derive(Debug, Clone, Default)]
+pub struct PgpVerifyResult {
+    pub verified: bool,
+    pub signer_fingerprint: Option<String>,
+    pub signer_uid: Option<String>,
+    pub created_unix: Option<i64>,
+    /// Only `Some` for encrypted messages that were successfully decrypted.
+    pub decrypted_body: Option<Vec<u8>>,
+    /// Non-fatal error message if the PGP operation failed.
+    pub error: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct Rendered {
     /// Best-effort plaintext rendering for a TUI.
@@ -39,6 +54,10 @@ pub struct Rendered {
     pub inline_cids: HashMap<String, Vec<u8>>,
     /// Phishing heuristic warnings for this message.
     pub phishing: Vec<phishing::PhishingWarning>,
+    /// PGP/S-MIME security kind detected in the raw message.
+    pub security: SecurityInfo,
+    /// Populated when the caller passes a `KeySource` and PGP content is present.
+    pub pgp_verify: Option<PgpVerifyResult>,
 }
 
 const TRACKER_HOSTS: &[&str] = &[
@@ -60,6 +79,301 @@ const TRACKER_HOSTS: &[&str] = &[
 ];
 
 pub fn render_message(raw: &[u8], policy: RemotePolicy) -> Result<Rendered> {
+    render_message_inner(raw, policy)
+}
+
+/// Async entry-point that accepts an optional [`inbx_pgp::KeySource`].
+///
+/// * When `pgp` is `None` or the message contains no PGP content, behaves
+///   identically to [`render_message`] with `pgp_verify: None`.
+/// * `PgpMime` → extracts the signed inner part and `application/pgp-signature`
+///   body, verifies using the user's own exported pubkey (slice 2 scope;
+///   sender-key lookup via contact store is slice 3).
+/// * `PgpEncrypted` → decrypts, re-renders the decrypted bytes through
+///   `render_message_inner`, merges into the returned `Rendered`.
+///
+/// Errors do NOT fail the render — they populate `pgp_verify.error`.
+pub async fn render_message_with_pgp(
+    raw: &[u8],
+    policy: RemotePolicy,
+    pgp: Option<&dyn inbx_pgp::KeySource>,
+) -> Result<Rendered> {
+    let mut rendered = render_message_inner(raw, policy)?;
+    rendered.security = pgp::detect(raw);
+
+    let Some(source) = pgp else {
+        return Ok(rendered);
+    };
+
+    match rendered.security.kind {
+        SecureKind::PgpMime => {
+            rendered.pgp_verify = Some(try_verify_pgp_mime(raw, source).await);
+        }
+        SecureKind::PgpEncrypted => {
+            let (verify_result, decrypted_rendered) =
+                try_decrypt_pgp_mime(raw, policy, source).await;
+            if let Some(mut dr) = decrypted_rendered {
+                // Merge: replace plain/html with decrypted content, keep outer security badge.
+                rendered.plain = dr.plain;
+                rendered.html = dr.html;
+                rendered.blocked_remote += dr.blocked_remote;
+                rendered.trackers.append(&mut dr.trackers);
+            }
+            rendered.pgp_verify = Some(verify_result);
+        }
+        _ => {}
+    }
+
+    Ok(rendered)
+}
+
+async fn try_verify_pgp_mime(raw: &[u8], source: &dyn inbx_pgp::KeySource) -> PgpVerifyResult {
+    // Extract signed inner bytes and detached signature from a multipart/signed message.
+    let (signed_bytes, sig_bytes) = match extract_pgp_mime_parts(raw) {
+        Some(p) => p,
+        None => {
+            return PgpVerifyResult {
+                error: Some("could not extract PGP/MIME signed parts".into()),
+                ..Default::default()
+            };
+        }
+    };
+
+    // Slice 2: verify against the *user's own* exported key.
+    // Slice 3 will look up sender's key from contacts/key-server.
+    let keys = match source.list_keys().await {
+        Ok(k) => k,
+        Err(e) => {
+            return PgpVerifyResult {
+                error: Some(format!("list_keys: {e}")),
+                ..Default::default()
+            };
+        }
+    };
+    let Some((first_key_id, _)) = keys.into_iter().next() else {
+        return PgpVerifyResult {
+            error: Some("no keys available for verification".into()),
+            ..Default::default()
+        };
+    };
+    let pub_key = match source.export_public(&first_key_id).await {
+        Ok(k) => k,
+        Err(e) => {
+            return PgpVerifyResult {
+                error: Some(format!("export_public: {e}")),
+                ..Default::default()
+            };
+        }
+    };
+    let sig = inbx_pgp::Signature(sig_bytes);
+    match source.verify_detached(&pub_key, &signed_bytes, &sig).await {
+        Ok(vr) => PgpVerifyResult {
+            verified: vr.valid,
+            signer_fingerprint: vr.signer_fingerprint,
+            signer_uid: vr.signer_uid,
+            created_unix: vr.created_unix,
+            decrypted_body: None,
+            error: None,
+        },
+        Err(e) => PgpVerifyResult {
+            error: Some(format!("verify_detached: {e}")),
+            ..Default::default()
+        },
+    }
+}
+
+async fn try_decrypt_pgp_mime(
+    raw: &[u8],
+    policy: RemotePolicy,
+    source: &dyn inbx_pgp::KeySource,
+) -> (PgpVerifyResult, Option<Rendered>) {
+    let ct_bytes = match extract_pgp_encrypted_ciphertext(raw) {
+        Some(b) => b,
+        None => {
+            return (
+                PgpVerifyResult {
+                    error: Some("could not extract PGP encrypted ciphertext part".into()),
+                    ..Default::default()
+                },
+                None,
+            );
+        }
+    };
+
+    let ct = inbx_pgp::Ciphertext(ct_bytes);
+    match source.decrypt(&ct).await {
+        Ok((plain, _vr)) => {
+            let decrypted_body = plain.0.clone();
+            // Re-render the decrypted payload.
+            let inner_rendered = render_message_inner(&plain.0, policy).ok();
+            (
+                PgpVerifyResult {
+                    verified: false, // decrypt-only; signing is asserted via inner multipart/signed
+                    decrypted_body: Some(decrypted_body),
+                    ..Default::default()
+                },
+                inner_rendered,
+            )
+        }
+        Err(e) => (
+            PgpVerifyResult {
+                error: Some(format!("decrypt: {e}")),
+                ..Default::default()
+            },
+            None,
+        ),
+    }
+}
+
+/// For a `multipart/signed` raw message, extract `(signed_bytes, signature_bytes)`
+/// where `signed_bytes` is the verbatim first MIME part bytes (CRLF normalised)
+/// and `signature_bytes` is the body of the `application/pgp-signature` part.
+fn extract_pgp_mime_parts(raw: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
+    let s = std::str::from_utf8(raw).ok()?;
+    let lower = s.to_ascii_lowercase();
+
+    // Find boundary.
+    let bnd_start = lower.find("boundary=\"")? + 10;
+    let bnd_end = s[bnd_start..].find('"')? + bnd_start;
+    let boundary = s[bnd_start..bnd_end].to_string();
+
+    let sep = format!("--{boundary}");
+    let end_sep = format!("--{boundary}--");
+
+    let parts: Vec<&str> = s
+        .split(sep.as_str())
+        .filter(|p| !p.trim_start_matches("\r\n").starts_with('-'))
+        .filter(|p| p != &"" && !p.starts_with("--"))
+        .collect();
+
+    // parts[0] = preamble, parts[1] = first body part, parts[2] = sig part
+    // Collect properly by finding boundaries
+    let mut boundaries: Vec<usize> = Vec::new();
+    let mut search_from = 0;
+    while let Some(pos) = s[search_from..].find(sep.as_str()) {
+        let abs = search_from + pos;
+        boundaries.push(abs);
+        search_from = abs + sep.len();
+    }
+
+    if boundaries.len() < 2 {
+        return None;
+    }
+
+    // Signed content: from end of first boundary line to start of second boundary.
+    let first_sep_end = s[boundaries[0]..]
+        .find("\r\n")
+        .map(|o| boundaries[0] + o + 2)
+        .or_else(|| s[boundaries[0]..].find('\n').map(|o| boundaries[0] + o + 1))?;
+
+    let second_sep_start = boundaries[1];
+    // Per RFC 3156: the CRLF immediately before the boundary delimiter is NOT
+    // part of the signed data. Trim it.
+    let signed_end = if second_sep_start >= 2
+        && s.as_bytes().get(second_sep_start - 2) == Some(&b'\r')
+        && s.as_bytes().get(second_sep_start - 1) == Some(&b'\n')
+    {
+        second_sep_start - 2
+    } else if second_sep_start >= 1 && s.as_bytes().get(second_sep_start - 1) == Some(&b'\n') {
+        second_sep_start - 1
+    } else {
+        second_sep_start
+    };
+
+    let signed_bytes = s.as_bytes()[first_sep_end..signed_end].to_vec();
+
+    // Signature part: after third boundary line to end_sep or next boundary.
+    let sig_sep_end = s[boundaries[1]..]
+        .find("\r\n")
+        .map(|o| boundaries[1] + o + 2)
+        .or_else(|| s[boundaries[1]..].find('\n').map(|o| boundaries[1] + o + 1))?;
+
+    let sig_part_end = if let Some(next_end) = s[sig_sep_end..].find(end_sep.as_str()) {
+        sig_sep_end + next_end
+    } else {
+        s.len()
+    };
+    let sig_part = &s[sig_sep_end..sig_part_end];
+
+    // Strip headers from sig_part to get the body.
+    let sig_body = if let Some(idx) = sig_part.find("\r\n\r\n") {
+        &sig_part[idx + 4..]
+    } else if let Some(idx) = sig_part.find("\n\n") {
+        &sig_part[idx + 2..]
+    } else {
+        sig_part
+    };
+
+    let _ = parts;
+    Some((signed_bytes, sig_body.trim_end().as_bytes().to_vec()))
+}
+
+/// For a `multipart/encrypted` raw message, extract the ciphertext bytes
+/// from the second part (`application/octet-stream`).
+fn extract_pgp_encrypted_ciphertext(raw: &[u8]) -> Option<Vec<u8>> {
+    let s = std::str::from_utf8(raw).ok()?;
+    let lower = s.to_ascii_lowercase();
+
+    let bnd_start = lower.find("boundary=\"")? + 10;
+    let bnd_end = s[bnd_start..].find('"')? + bnd_start;
+    let boundary = s[bnd_start..bnd_end].to_string();
+
+    let sep = format!("--{boundary}");
+    let end_sep = format!("--{boundary}--");
+
+    // Find boundaries.
+    let mut boundaries: Vec<usize> = Vec::new();
+    let mut search_from = 0;
+    while let Some(pos) = s[search_from..].find(sep.as_str()) {
+        let abs = search_from + pos;
+        boundaries.push(abs);
+        search_from = abs + sep.len();
+    }
+
+    if boundaries.len() < 2 {
+        return None;
+    }
+
+    // Second part (index 1).
+    let second_start = s[boundaries[1]..]
+        .find("\r\n")
+        .map(|o| boundaries[1] + o + 2)
+        .or_else(|| s[boundaries[1]..].find('\n').map(|o| boundaries[1] + o + 1))?;
+
+    let second_end = if boundaries.len() > 2 {
+        boundaries[2]
+    } else if let Some(end_pos) = s[second_start..].find(end_sep.as_str()) {
+        second_start + end_pos
+    } else {
+        s.len()
+    };
+
+    let second_part = &s[second_start..second_end];
+
+    // Check if this part has Content-Transfer-Encoding: base64
+    let headers_end = second_part
+        .find("\r\n\r\n")
+        .map(|i| (i, i + 4))
+        .or_else(|| second_part.find("\n\n").map(|i| (i, i + 2)));
+    let (_, body_start) = headers_end.unwrap_or((0, 0));
+    let headers_str = &second_part[..body_start];
+    let is_base64 = headers_str
+        .to_ascii_lowercase()
+        .contains("content-transfer-encoding: base64");
+
+    let body = second_part[body_start..].trim_end();
+
+    if is_base64 {
+        // Strip whitespace from base64 body and decode.
+        let b64_clean: String = body.chars().filter(|c| !c.is_whitespace()).collect();
+        use base64::{Engine, engine::general_purpose::STANDARD};
+        STANDARD.decode(b64_clean.as_bytes()).ok()
+    } else {
+        Some(body.as_bytes().to_vec())
+    }
+}
+
+fn render_message_inner(raw: &[u8], policy: RemotePolicy) -> Result<Rendered> {
     let parsed = MessageParser::default().parse(raw).ok_or(Error::Parse)?;
 
     let mut plain_parts: Vec<String> = Vec::new();
@@ -98,6 +412,7 @@ pub fn render_message(raw: &[u8], policy: RemotePolicy) -> Result<Rendered> {
     };
 
     let phishing_warnings = phishing::analyze(raw, sanitized_html.as_deref());
+    let security = pgp::detect(raw);
 
     Ok(Rendered {
         plain,
@@ -106,6 +421,8 @@ pub fn render_message(raw: &[u8], policy: RemotePolicy) -> Result<Rendered> {
         trackers,
         inline_cids,
         phishing: phishing_warnings,
+        security,
+        pgp_verify: None,
     })
 }
 

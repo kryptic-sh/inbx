@@ -14,3 +14,10 @@ thiserror.workspace = true
 mail-parser.workspace = true
 ammonia.workspace = true
 html2text.workspace = true
+inbx-pgp.workspace = true
+async-trait.workspace = true
+base64.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros"] }
+tempfile.workspace = true

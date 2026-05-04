@@ -21,8 +21,10 @@ which.workspace = true
 tempfile.workspace = true
 rand = "0.8"
 smallvec = "1"
+base64.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
 tokio = { workspace = true, features = ["rt", "macros"] }
 toml.workspace = true
+base64.workspace = true

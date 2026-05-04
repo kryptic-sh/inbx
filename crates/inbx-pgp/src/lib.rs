@@ -8,6 +8,7 @@ pub mod config;
 pub mod error;
 pub mod gnupg;
 pub mod inbx_managed;
+pub mod mime;
 
 pub use config::{KeySourceKind, PgpConfig};
 pub use error::{Error, Result};
