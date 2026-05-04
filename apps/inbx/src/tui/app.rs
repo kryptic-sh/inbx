@@ -13,6 +13,7 @@ use ratatui::widgets::ListState;
 
 use super::ACTIVE_THEME;
 use super::render::render_path;
+use super::tasks::{TaskRx, TaskTx};
 
 /// Tracks the leader-key (`<Space>`) prefix state. Reset to `None` after any
 /// second key is consumed or on an unrecognised chord.
@@ -112,6 +113,13 @@ pub(super) struct App {
     /// in flight. The event loop forces redraws at 120 ms while busy so the
     /// spinner in the status line animates.
     pub(super) busy: bool,
+    /// Count of background tasks currently in flight.  `busy` mirrors
+    /// `pending_op_count > 0`.  Increment on spawn; decrement on result.
+    pub(super) pending_op_count: u32,
+    /// Sender half of the background-task result channel.
+    pub(super) task_tx: TaskTx,
+    /// Receiver half of the background-task result channel.
+    pub(super) task_rx: TaskRx,
     /// UIDs for which the user has already responded to a read-receipt prompt
     /// (either sent or declined).  Not persisted across sessions — best effort.
     pub(super) receipt_responded: HashSet<i64>,
@@ -278,6 +286,7 @@ impl App {
         }
         let theme = inbx_config::theme::load_theme().unwrap_or_default();
         let _ = ACTIVE_THEME.set(theme);
+        let (task_tx, task_rx) = super::tasks::channel();
         let mut app = Self {
             account,
             store,
@@ -307,12 +316,36 @@ impl App {
             active_wizard: None,
             active_sieve_wizard: None,
             busy: false,
+            pending_op_count: 0,
+            task_tx,
+            task_rx,
             contacts_store: None,
             receipt_responded: HashSet::new(),
             current_receipt: None,
         };
         app.reload_messages().await?;
         Ok(app)
+    }
+
+    /// Increment the pending-op counter and set busy. Call before spawning a
+    /// background task.  Returns `false` (and sets a status) if an op is
+    /// already in flight — callers should abort in that case.
+    pub(super) fn spawn_pending(&mut self) -> bool {
+        if self.pending_op_count > 0 {
+            self.status = "busy — wait for current op".into();
+            return false;
+        }
+        self.pending_op_count += 1;
+        self.busy = true;
+        true
+    }
+
+    /// Decrement the pending-op counter. When it reaches zero, clears busy.
+    pub(super) fn complete_pending(&mut self) {
+        self.pending_op_count = self.pending_op_count.saturating_sub(1);
+        if self.pending_op_count == 0 {
+            self.busy = false;
+        }
     }
 
     pub(super) fn open_blank(&mut self) {
@@ -870,77 +903,23 @@ impl App {
         Ok(())
     }
 
-    /// Manual sync trigger (`F`). Connects, refreshes the current folder's
-    /// headers, and downloads the body for the currently-selected message
-    /// if it's still header-only.
-    pub(super) async fn manual_sync(&mut self) -> Result<()> {
+    /// Manual sync trigger (`F`). Spawns a background task that connects,
+    /// refreshes the current folder's headers, and posts `TaskResult::SyncDone`.
+    pub(super) fn manual_sync(&mut self) {
         let Some(folder_name) = self.current_folder().map(|f| f.name.clone()) else {
-            return Ok(());
+            return;
         };
+        if !self.spawn_pending() {
+            return;
+        }
         self.status = format!("syncing {folder_name}…");
-        self.busy = true;
-        let mut session = inbx_net::connect_imap(&self.account).await?;
-        let (uidvalidity, rows) = inbx_net::fetch_headers(&mut session, &folder_name).await?;
-        let prev = self.store.folder_uidvalidity(&folder_name).await?;
-        if let Some(prev) = prev
-            && prev as u32 != uidvalidity
-        {
-            self.store.wipe_folder_messages(&folder_name).await?;
-        }
-        self.store
-            .upsert_folder(&inbx_store::FolderRow {
-                name: folder_name.clone(),
-                delim: None,
-                special_use: None,
-                attrs: None,
-                uidvalidity: Some(uidvalidity as i64),
-                uidnext: None,
-                delta_link: None,
-            })
-            .await?;
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
-        let mut new_count = 0usize;
-        let pre_max = self
-            .store
-            .folder_max_uid(&folder_name, uidvalidity as i64)
-            .await?
-            .unwrap_or(0);
-        for h in &rows {
-            if (h.uid as i64) > pre_max {
-                new_count += 1;
-            }
-            self.store
-                .upsert_message(&inbx_store::MessageRow {
-                    folder: folder_name.clone(),
-                    uid: h.uid as i64,
-                    uidvalidity: h.uidvalidity as i64,
-                    message_id: h.message_id.clone(),
-                    subject: h.subject.clone(),
-                    from_addr: h.from_addr.clone(),
-                    to_addrs: h.to_addrs.clone(),
-                    date_unix: h.date_unix,
-                    flags: h.flags.clone(),
-                    maildir_path: None,
-                    headers_only: 1,
-                    fetched_at_unix: now,
-                    in_reply_to: None,
-                    refs: None,
-                    thread_id: None,
-                })
-                .await?;
-        }
-        let _ = session.logout().await;
-        self.reload_messages().await?;
-        self.last_sync_unix = Some(now);
-        self.busy = false;
-        self.status = format!(
-            "synced {folder_name} ({} msgs, {new_count} new)",
-            rows.len()
-        );
-        Ok(())
+        let account = self.account.clone();
+        let store = self.store.clone();
+        let tx = self.task_tx.0.clone();
+        tokio::spawn(async move {
+            let result = do_manual_sync(account, store, folder_name).await;
+            let _ = tx.send(result);
+        });
     }
 
     /// Current modal state for the status-line indicator. The composer
@@ -963,41 +942,38 @@ impl App {
         unread_count(&self.messages)
     }
 
-    /// Lazy body fetch. If the selected message is header-only, pull its
-    /// body from IMAP, write to Maildir, update store, and refresh the
-    /// preview.
-    pub(super) async fn fetch_current_body(&mut self) -> Result<()> {
+    /// Lazy body fetch. If the selected message is header-only, spawns a
+    /// background task to pull from IMAP. Result comes back as
+    /// `TaskResult::BodyFetched`.
+    pub(super) fn fetch_current_body(&mut self) {
         let Some(msg) = self.current_message().cloned() else {
-            return Ok(());
+            return;
         };
         if msg.maildir_path.is_some() {
-            return Ok(());
+            return;
         }
         let Some(folder_name) = self.current_folder().map(|f| f.name.clone()) else {
-            return Ok(());
+            return;
         };
-        self.status = format!("fetching body for uid {}…", msg.uid);
-        self.busy = true;
-        let mut session = inbx_net::connect_imap(&self.account).await?;
-        let bodies = inbx_net::fetch_bodies(&mut session, &folder_name, &[msg.uid as u32]).await?;
-        let _ = session.logout().await;
-        self.busy = false;
-        if let Some((uid, raw)) = bodies.into_iter().next() {
-            let path = self.store.write_maildir(&folder_name, &raw, &msg.flags)?;
-            self.store
-                .set_maildir_path(
-                    &folder_name,
-                    uid as i64,
-                    msg.uidvalidity,
-                    &path.to_string_lossy(),
-                )
-                .await?;
-            self.reload_messages().await?;
-            self.status = format!("fetched body uid {}", msg.uid);
-        } else {
-            self.status = "no body returned".into();
+        if !self.spawn_pending() {
+            return;
         }
-        Ok(())
+        self.status = format!("fetching body for uid {}…", msg.uid);
+        let account = self.account.clone();
+        let store = self.store.clone();
+        let tx = self.task_tx.0.clone();
+        tokio::spawn(async move {
+            let result = do_fetch_body(
+                account,
+                store,
+                folder_name,
+                msg.uid,
+                msg.uidvalidity,
+                msg.flags,
+            )
+            .await;
+            let _ = tx.send(result);
+        });
     }
 
     pub(super) async fn oauth_login(&mut self) -> Result<()> {
@@ -1239,91 +1215,62 @@ impl App {
     }
 
     /// Connect to ManageSieve, list scripts, open a picker (`<Space>S`).
-    /// Spawns a tokio task so the TUI is not blocked during the connect.
-    /// `active_picker` is set to `ActivePicker::Sieve` once the task returns.
-    pub(super) async fn open_sieve_picker(&mut self) -> Result<()> {
-        let account = self.account.clone();
-        match inbx_net::sieve::SieveClient::connect(&account).await {
-            Ok(mut client) => match client.list_scripts().await {
-                Ok(scripts) => {
-                    let _ = client.logout().await;
-                    if scripts.is_empty() {
-                        self.status = "sieve: no scripts found".into();
-                        return Ok(());
-                    }
-                    let (p, slot) = super::picker::sieve_picker(scripts);
-                    self.active_picker = Some(ActivePicker::Sieve(p, slot));
-                    self.status = "<Space>S sieve: Enter edit · Esc cancel".into();
-                }
-                Err(e) => {
-                    self.status = format!("sieve list failed: {e}");
-                }
-            },
-            Err(e) => {
-                self.status = format!("sieve connect failed: {e}");
-            }
+    /// Spawns a background task; result comes back as `TaskResult::SieveScripts`.
+    pub(super) fn open_sieve_picker(&mut self) {
+        if !self.spawn_pending() {
+            return;
         }
-        Ok(())
+        self.status = "sieve: connecting…".into();
+        let account = self.account.clone();
+        let tx = self.task_tx.0.clone();
+        tokio::spawn(async move {
+            let result = do_sieve_list(account).await;
+            let _ = tx.send(result);
+        });
     }
 
     /// Fetch a sieve script body and open the edit wizard.
-    pub(super) async fn open_sieve_edit(&mut self, name: String) -> Result<()> {
-        let account = self.account.clone();
-        match inbx_net::sieve::SieveClient::connect(&account).await {
-            Ok(mut client) => match client.get_script(&name).await {
-                Ok(body) => {
-                    let _ = client.logout().await;
-                    self.active_sieve_wizard =
-                        Some(super::wizard::SieveEditWizard::new(name.clone(), body));
-                    self.status = format!("sieve: editing '{name}' — <Space>s save · Esc cancel");
-                }
-                Err(e) => {
-                    self.status = format!("sieve get failed: {e}");
-                }
-            },
-            Err(e) => {
-                self.status = format!("sieve connect failed: {e}");
-            }
+    /// Spawns a background task; result comes back as `TaskResult::SieveBody`.
+    pub(super) fn open_sieve_edit(&mut self, name: String) {
+        if !self.spawn_pending() {
+            return;
         }
-        Ok(())
+        self.status = format!("sieve: fetching '{name}'…");
+        let account = self.account.clone();
+        let tx = self.task_tx.0.clone();
+        tokio::spawn(async move {
+            let result = do_sieve_get(account, name).await;
+            let _ = tx.send(result);
+        });
     }
 
     /// Save the current sieve wizard to the server.
-    pub(super) async fn save_sieve_wizard(&mut self) -> Result<()> {
+    /// Spawns a background task; result comes back as `TaskResult::SieveSaved`.
+    pub(super) fn save_sieve_wizard(&mut self) {
         let Some(wiz) = self.active_sieve_wizard.take() else {
-            return Ok(());
+            return;
         };
         match wiz.build() {
             Ok((name, body)) => {
-                let account = self.account.clone();
-                match inbx_net::sieve::SieveClient::connect(&account).await {
-                    Ok(mut client) => {
-                        match client.put_script(&name, &body).await {
-                            Ok(()) => {
-                                let _ = client.logout().await;
-                                self.status = format!("sieve: saved {name}");
-                            }
-                            Err(e) => {
-                                self.status = format!("sieve: save failed: {e}");
-                                // Restore wizard so user can retry.
-                                self.active_sieve_wizard =
-                                    Some(super::wizard::SieveEditWizard::new(name, body));
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        self.status = format!("sieve: save failed: {e}");
-                        self.active_sieve_wizard =
-                            Some(super::wizard::SieveEditWizard::new(name, body));
-                    }
+                if !self.spawn_pending() {
+                    // Restore wizard so user isn't left hanging.
+                    self.active_sieve_wizard =
+                        Some(super::wizard::SieveEditWizard::new(name, body));
+                    return;
                 }
+                self.status = format!("sieve: saving '{name}'…");
+                let account = self.account.clone();
+                let tx = self.task_tx.0.clone();
+                tokio::spawn(async move {
+                    let result = do_sieve_put(account, name, body).await;
+                    let _ = tx.send(result);
+                });
             }
             Err(e) => {
                 self.status = format!("sieve: {e}");
                 self.active_sieve_wizard = Some(wiz);
             }
         }
-        Ok(())
     }
 
     pub(super) async fn switch_account(&mut self, target: Account) -> Result<()> {
@@ -1418,30 +1365,20 @@ impl App {
         Ok(())
     }
 
-    pub(super) async fn drain_outbox(&mut self) -> Result<()> {
-        let entries = self.store.outbox_list().await?;
-        let total = entries.len();
-        let mut sent = 0usize;
-        let mut failed = 0usize;
-        self.busy = true;
-        for row in entries {
-            match inbx_net::send_message(&self.account, &row.raw).await {
-                Ok(()) => {
-                    self.store.outbox_delete(row.id).await?;
-                    sent += 1;
-                }
-                Err(e) => {
-                    self.store
-                        .outbox_record_failure(row.id, &e.to_string())
-                        .await?;
-                    failed += 1;
-                }
-            }
+    /// Drain all outbox entries. Spawns a background task; result comes
+    /// back as `TaskResult::OutboxDrained`.
+    pub(super) fn drain_outbox(&mut self) {
+        if !self.spawn_pending() {
+            return;
         }
-        self.busy = false;
-        self.reload_outbox().await?;
-        self.status = format!("outbox drain: {sent}/{total} sent, {failed} failed");
-        Ok(())
+        self.status = "draining outbox…".into();
+        let account = self.account.clone();
+        let store = self.store.clone();
+        let tx = self.task_tx.0.clone();
+        tokio::spawn(async move {
+            let result = do_drain_outbox(account, store).await;
+            let _ = tx.send(result);
+        });
     }
 
     pub(super) async fn drain_outbox_one(&mut self) -> Result<()> {
@@ -1492,6 +1429,11 @@ impl App {
             }
         }
         Ok(())
+    }
+
+    /// Public wrapper around `reload_outbox` for use from the event-loop.
+    pub(super) async fn reload_outbox_pub(&mut self) -> Result<()> {
+        self.reload_outbox().await
     }
 
     pub(super) fn picker_targets(&self) -> Vec<String> {
@@ -1621,6 +1563,199 @@ impl App {
             (Pane::Preview, false) => Pane::Messages,
         };
     }
+}
+
+// ---------------------------------------------------------------------------
+// Free async helpers for background tasks
+// ---------------------------------------------------------------------------
+
+/// Perform a full folder sync off the event-loop thread.
+async fn do_manual_sync(
+    account: inbx_config::Account,
+    store: Store,
+    folder_name: String,
+) -> super::tasks::TaskResult {
+    use super::tasks::TaskResult;
+    let result: anyhow::Result<(i64, usize, usize)> = async {
+        let mut session = inbx_net::connect_imap(&account).await?;
+        let (uidvalidity, rows) = inbx_net::fetch_headers(&mut session, &folder_name).await?;
+        let prev = store.folder_uidvalidity(&folder_name).await?;
+        if let Some(prev) = prev
+            && prev as u32 != uidvalidity
+        {
+            store.wipe_folder_messages(&folder_name).await?;
+        }
+        store
+            .upsert_folder(&inbx_store::FolderRow {
+                name: folder_name.clone(),
+                delim: None,
+                special_use: None,
+                attrs: None,
+                uidvalidity: Some(uidvalidity as i64),
+                uidnext: None,
+                delta_link: None,
+            })
+            .await?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let pre_max = store
+            .folder_max_uid(&folder_name, uidvalidity as i64)
+            .await?
+            .unwrap_or(0);
+        let mut new_count = 0usize;
+        for h in &rows {
+            if (h.uid as i64) > pre_max {
+                new_count += 1;
+            }
+            store
+                .upsert_message(&inbx_store::MessageRow {
+                    folder: folder_name.clone(),
+                    uid: h.uid as i64,
+                    uidvalidity: h.uidvalidity as i64,
+                    message_id: h.message_id.clone(),
+                    subject: h.subject.clone(),
+                    from_addr: h.from_addr.clone(),
+                    to_addrs: h.to_addrs.clone(),
+                    date_unix: h.date_unix,
+                    flags: h.flags.clone(),
+                    maildir_path: None,
+                    headers_only: 1,
+                    fetched_at_unix: now,
+                    in_reply_to: None,
+                    refs: None,
+                    thread_id: None,
+                })
+                .await?;
+        }
+        let _ = session.logout().await;
+        Ok((now, new_count, rows.len()))
+    }
+    .await;
+    match result {
+        Ok((now, new_count, total)) => TaskResult::SyncDone {
+            last_sync_unix: Some(now),
+            error: None,
+            new_messages: new_count,
+            folder_name,
+            total_messages: total,
+        },
+        Err(e) => TaskResult::SyncDone {
+            last_sync_unix: None,
+            error: Some(e.to_string()),
+            new_messages: 0,
+            folder_name,
+            total_messages: 0,
+        },
+    }
+}
+
+/// Fetch a single message body off the event-loop thread.
+async fn do_fetch_body(
+    account: inbx_config::Account,
+    store: Store,
+    folder_name: String,
+    uid: i64,
+    uidvalidity: i64,
+    flags: String,
+) -> super::tasks::TaskResult {
+    use super::tasks::TaskResult;
+    let result: anyhow::Result<()> = async {
+        let mut session = inbx_net::connect_imap(&account).await?;
+        let bodies = inbx_net::fetch_bodies(&mut session, &folder_name, &[uid as u32]).await?;
+        let _ = session.logout().await;
+        if let Some((_fetched_uid, raw)) = bodies.into_iter().next() {
+            let path = store.write_maildir(&folder_name, &raw, &flags)?;
+            store
+                .set_maildir_path(&folder_name, uid, uidvalidity, &path.to_string_lossy())
+                .await?;
+        }
+        Ok(())
+    }
+    .await;
+    TaskResult::BodyFetched {
+        uid,
+        error: result.err().map(|e| e.to_string()),
+    }
+}
+
+/// Drain the outbox off the event-loop thread.
+async fn do_drain_outbox(account: inbx_config::Account, store: Store) -> super::tasks::TaskResult {
+    use super::tasks::TaskResult;
+    let entries = match store.outbox_list().await {
+        Ok(e) => e,
+        Err(_) => {
+            return TaskResult::OutboxDrained { sent: 0, failed: 0 };
+        }
+    };
+    let mut sent = 0usize;
+    let mut failed = 0usize;
+    for row in entries {
+        match inbx_net::send_message(&account, &row.raw).await {
+            Ok(()) => {
+                let _ = store.outbox_delete(row.id).await;
+                sent += 1;
+            }
+            Err(e) => {
+                let _ = store.outbox_record_failure(row.id, &e.to_string()).await;
+                failed += 1;
+            }
+        }
+    }
+    TaskResult::OutboxDrained { sent, failed }
+}
+
+/// Connect to ManageSieve and list scripts off the event-loop thread.
+async fn do_sieve_list(account: inbx_config::Account) -> super::tasks::TaskResult {
+    use super::tasks::TaskResult;
+    let result = async {
+        let mut client = inbx_net::sieve::SieveClient::connect(&account)
+            .await
+            .map_err(|e| e.to_string())?;
+        let scripts = client.list_scripts().await.map_err(|e| e.to_string())?;
+        let _ = client.logout().await;
+        Ok(scripts)
+    }
+    .await;
+    TaskResult::SieveScripts(result)
+}
+
+/// Fetch a sieve script body off the event-loop thread.
+async fn do_sieve_get(account: inbx_config::Account, name: String) -> super::tasks::TaskResult {
+    use super::tasks::TaskResult;
+    let body = async {
+        let mut client = inbx_net::sieve::SieveClient::connect(&account)
+            .await
+            .map_err(|e| e.to_string())?;
+        let body = client.get_script(&name).await.map_err(|e| e.to_string())?;
+        let _ = client.logout().await;
+        Ok(body)
+    }
+    .await;
+    TaskResult::SieveBody { name, body }
+}
+
+/// Save a sieve script off the event-loop thread.
+async fn do_sieve_put(
+    account: inbx_config::Account,
+    name: String,
+    body: String,
+) -> super::tasks::TaskResult {
+    use super::tasks::TaskResult;
+    let result = async {
+        let mut client = inbx_net::sieve::SieveClient::connect(&account)
+            .await
+            .map_err(|e| e.to_string())?;
+        client
+            .put_script(&name, &body)
+            .await
+            .map_err(|e| e.to_string())?;
+        let _ = client.logout().await;
+        Ok(())
+    }
+    .await;
+    TaskResult::SieveSaved { name, body, result }
 }
 
 fn extract_list_unsubscribe(raw: &[u8]) -> Option<String> {

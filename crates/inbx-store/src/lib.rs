@@ -66,6 +66,7 @@ pub struct MessageRow {
     pub thread_id: Option<String>,
 }
 
+#[derive(Clone)]
 pub struct Store {
     pool: SqlitePool,
     root: PathBuf,

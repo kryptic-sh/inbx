@@ -57,7 +57,7 @@ pub(super) async fn handle_list_key(app: &mut App, key: KeyEvent) -> Result<bool
             }
             KeyCode::Char('S') => {
                 // Connect to ManageSieve, list scripts, open sieve picker.
-                app.open_sieve_picker().await?;
+                app.open_sieve_picker();
                 return Ok(false);
             }
             _ => {
@@ -93,7 +93,7 @@ pub(super) async fn handle_list_key(app: &mut App, key: KeyEvent) -> Result<bool
 
     // Mutation shortcuts on the messages pane.
     if key.code == KeyCode::Char('F') {
-        app.manual_sync().await?;
+        app.manual_sync();
         return Ok(false);
     }
 
@@ -266,12 +266,13 @@ pub(super) async fn handle_list_key(app: &mut App, key: KeyEvent) -> Result<bool
                 app.pane = Pane::Messages;
                 app.status = format!("loaded {} messages", app.messages.len());
             } else if app.pane == Pane::Messages {
-                // Lazy body fetch: if local body is missing, pull it from
-                // IMAP before switching to preview.
+                // Lazy body fetch: if local body is missing, spawn a
+                // background fetch. The preview pane will update when the
+                // task result arrives.
                 if let Some(m) = app.current_message()
                     && m.maildir_path.is_none()
                 {
-                    app.fetch_current_body().await?;
+                    app.fetch_current_body();
                 }
                 app.refresh_body();
                 app.pane = Pane::Preview;
@@ -444,7 +445,7 @@ pub(super) async fn handle_outbox_key(app: &mut App, key: KeyEvent) -> Result<()
             app.outbox = None;
         }
         KeyCode::Char('D') => {
-            app.drain_outbox().await?;
+            app.drain_outbox();
         }
         KeyCode::Char('d') => {
             app.drain_outbox_one().await?;
@@ -866,7 +867,7 @@ pub(super) async fn handle_active_picker_key(app: &mut App, key: KeyEvent) -> Re
                 }
                 ActivePicker::Sieve(_, slot) => {
                     if let Some(name) = slot.lock().ok().and_then(|mut g| g.take()) {
-                        app.open_sieve_edit(name).await?;
+                        app.open_sieve_edit(name);
                     }
                 }
             }
@@ -912,7 +913,7 @@ pub(super) async fn handle_sieve_wizard_key(app: &mut App, key: KeyEvent) -> Res
         if app.pending_leader == Some(super::app::LeaderState::Pending) {
             app.pending_leader = None;
             if key.code == KeyCode::Char('s') {
-                app.save_sieve_wizard().await?;
+                app.save_sieve_wizard();
                 return Ok(());
             }
         }
