@@ -8,8 +8,71 @@ patch bumps.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-05-04
+
 ### Added
 
+- **JMAP backend (M21).** New `MailProvider` async trait in `inbx-net::provider`
+  abstracts the hot-path mail operations (list folders, fetch headers / body,
+  set flags, move, send, append draft) over IMAP and JMAP. `JmapClient`
+  implements the trait via `Email/query` + `Email/get` + `Email/set` +
+  `Email/import` + `Blob/download`. Per-account opt-in via
+  `[transport] kind = "jmap"`; existing IMAP-only accounts unchanged. TUI hot
+  path (sync, body fetch, flag toggle, move, draft append) routed through
+  `connect_provider` so JMAP accounts skip the IMAP path automatically.
+- **MS Graph backend (M11).** Third backend over `MailProvider` — `GraphClient`
+  implements list_folders / fetch_headers / fetch_body / set_flags (`isRead`,
+  `flag.flagStatus`) / move (`/me/messages/{id}/move`) / send (`/me/sendMail`) /
+  append_draft. `well_known` mailbox roles map to IMAP special-use. Opt-in via
+  `[transport] kind = "graph"`.
+- **`provider_id` column on `messages`.** Eliminates the 500-row scan in
+  `resolve_jmap_id` / `resolve_graph_id` — backends stash the opaque provider id
+  directly. New migration `0006_provider_id.sql` with a partial index (only IS
+  NOT NULL rows indexed, IMAP rows pay nothing). `Store::provider_id_for`
+  helper; `connect_provider` gains `store: Option<&Store>` so clients carry a
+  Store handle for the fast lookup, with a slow-path scan fallback for
+  pre-migration rows (logged via `tracing::debug!`).
+- **mbox / .eml import-export hardening (M19).** Extracted helpers into
+  `apps/inbx/src/mbox.rs`. Real RFC 4155 asctime date formatter (Hinnant
+  civil-from-days, no chrono dep) replaces the broken stub that always
+  emitted 1970. Bidirectional `Status:` / `X-Status:` ↔ IMAP flag translation
+  (R=Seen, F=Flagged, A=Answered, D=Deleted, T=Draft per mutt convention) so
+  flags survive a round-trip. `inbx export --eml --uid N` exports a single
+  message as raw RFC 5322. `--since` / `--limit` filters on bulk export. Import
+  derives flags from headers when present, no longer hardcodes `\Seen`.
+- **TUI data-driven key dispatch + auto-rendered help overlay.** New
+  `tui::binds` module owns `Action` (~70 variants), `BINDS` static table (action
+  / key / desc / category / contexts / gate), `Action::from_key` /
+  `Action::invoke` / `Action::all_rows_in`. `handle_list_key` shrank from ~290
+  to ~100 lines; pane / receipt / preview gates moved from inline `if` blocks
+  into `gate: Option<fn(&App) -> bool>` on each row. Help overlay walks the same
+  table — no more hardcoded help text. As a side effect, `N` in Preview now
+  actually declines a pending read receipt instead of silently stepping search
+  backward (latent bug).
+- **Autocrypt 1.1 §4 mutual-mode end-to-end.** New
+  `AutocryptPreference { Nopreference, Mutual }` enum. Outbound `Autocrypt:`
+  header emits `prefer-encrypt=mutual` when the local
+  `PgpConfig.prefer_encrypt_mutual` is set (default true). Incoming parse
+  exposes `prefer_encrypt` on the parsed header. Composer auto-encrypt: when the
+  peer's stored Autocrypt advertises `Mutual` AND the local account also opts
+  in, pre-set `pgp.encrypt + pgp.sign` on a reply.
+- **JWZ mailing-list bracket-tag stripping.** `normalize_subject` alternates
+  bracket-tag stripping with `Re:` / `Fwd:` / `Re[N]:` prefix stripping in a
+  loop, so `Re: [list-foo] Re: [list-bar] hello` collapses to `hello`. Mid-
+  string brackets like `Build [#1234] failed` stay intact.
+- **WKD positive integration test.** Network-free unit test generates a real
+  inbx-managed OpenPGP key, serialises to binary, parses through
+  `parse_key_bytes`, asserts the round-trip.
+- **`SieveSession` type + `connect_and_auth` factory.** Scaffolding for
+  ManageSieve session reuse (TUI overlay-state caching is a follow-up).
+- **`cargo deny` CI job.** Runs alongside fmt / clippy / test on every push and
+  pull request via `EmbarkStudios/cargo-deny-action`. Surfaces licence +
+  advisory regressions at PR time instead of release time.
+- **Windows in CI test matrix.** `windows-latest` joins ubuntu + macos as a
+  blocking job after first run passed cleanly.
+- **`cargo run` launches the TUI by default.** Workspace
+  `default-members = ["apps/inbx"]`. `cargo build` / `cargo test` continue to
+  act on the whole workspace via `--workspace`.
 - **PGP / OpenPGP support (M22).** New `inbx-pgp` crate with a `KeySource` trait
   and two backends:
   - `gnupg`: shells out to `gpg --export` / `--sign` / `--decrypt`, preserving
@@ -108,6 +171,16 @@ patch bumps.
 
 ### Changed
 
+- **README brought current** for the cycle: PGP / WKD / Autocrypt highlights,
+  RFC 8098 read receipts, JWZ §2 with bracket-tag stripping, mbox/.eml
+  import-export, sieve wizard, Graph + JMAP noted as also reachable via the
+  default `[transport]` setting.
+- **`cmd_import` UID generation** now resumes from `MAX(uid)` for the folder
+  instead of restarting at 1 — a second import into the same folder no longer
+  collides with prior rows.
+- **`zbase32` dep replaced with an inlined encoder** in `inbx-pgp::wkd`. Removes
+  the LGPL-3.0+ taint from the binary; the encoder is ~25 lines of standard
+  5-bit MSB chunking.
 - **TUI event loop refactor.** Long ops (manual sync, body fetch, outbox drain,
   Sieve list / get / put) now spawn onto background tokio tasks and post results
   back via an mpsc channel. Event loop `tokio::select!`s over key events / task
@@ -135,6 +208,10 @@ patch bumps.
 
 ### Removed
 
+- **`apps/inbx-gui` crate.** GUI front-end deferred to a unified kryptic-sh GUI
+  shell that will land once `hjkl-editor-gui` (hjkl#8) ships. Workspace member,
+  `eframe` / `egui` deps, and release-workflow build steps all dropped. M20
+  marked deferred in PLAN.
 - **Empty `inbx-core` crate.** Held a single 11-line `Error` enum that was never
   imported. Domain types live in `inbx-config` (`Account`, `AuthMethod`) and
   `inbx-store` (`FolderRow`, `MessageRow`, `OutboxRow`) and that's working.
@@ -260,7 +337,8 @@ patch bumps.
   Actions release-plz workflow (publish gated off until first dry-run pass
   clears).
 
-[Unreleased]: https://github.com/kryptic-sh/inbx/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/kryptic-sh/inbx/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/kryptic-sh/inbx/releases/tag/v0.2.0
 [0.1.2]: https://github.com/kryptic-sh/inbx/releases/tag/v0.1.2
 [0.1.1]: https://github.com/kryptic-sh/inbx/releases/tag/v0.1.1
 [0.1.0]: https://github.com/kryptic-sh/inbx/releases/tag/v0.1.0
