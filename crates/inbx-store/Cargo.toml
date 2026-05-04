@@ -16,3 +16,11 @@ tracing.workspace = true
 tokio.workspace = true
 sqlx.workspace = true
 gethostname.workspace = true
+
+[dev-dependencies]
+criterion = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+
+[[bench]]
+name = "store"
+harness = false

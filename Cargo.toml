@@ -74,6 +74,9 @@ base64 = "0.22"
 # Storage
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "sqlite", "macros", "migrate"] }
 
+# Benchmarking
+criterion = { version = "0.5", features = ["async_tokio"] }
+
 # CLI helpers
 rpassword = "7"
 gethostname = "0.5"
