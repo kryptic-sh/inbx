@@ -39,6 +39,7 @@ keyring = { version = "3", features = [
     "windows-native",
     "sync-secret-service",
     "crypto-rust",
+    "vendored",
 ] }
 clap = { version = "4", features = ["derive"] }
 clap_complete = "4"

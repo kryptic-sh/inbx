@@ -1,0 +1,5 @@
+# Keep only the template; rendered APKBUILD lives in CI.
+*
+!.gitignore
+!APKBUILD.in
+!LICENSE
