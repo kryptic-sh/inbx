@@ -16,7 +16,7 @@ members = [
 default-members = ["apps/inbx"]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.95"
 license = "MIT"
@@ -78,14 +78,14 @@ rpassword = "7"
 gethostname = "0.5"
 notify-rust = "4"
 
-inbx-net = { version = "0.2.0", path = "crates/inbx-net" }
-inbx-store = { version = "0.2.0", path = "crates/inbx-store" }
-inbx-config = { version = "0.2.0", path = "crates/inbx-config" }
-inbx-pgp = { version = "0.2.0", path = "crates/inbx-pgp" }
-inbx-render = { version = "0.2.0", path = "crates/inbx-render" }
-inbx-contacts = { version = "0.2.0", path = "crates/inbx-contacts" }
-inbx-ical = { version = "0.2.0", path = "crates/inbx-ical" }
-inbx-composer = { version = "0.2.0", path = "crates/inbx-composer" }
+inbx-net = { version = "0.3.0", path = "crates/inbx-net" }
+inbx-store = { version = "0.3.0", path = "crates/inbx-store" }
+inbx-config = { version = "0.3.0", path = "crates/inbx-config" }
+inbx-pgp = { version = "0.3.0", path = "crates/inbx-pgp" }
+inbx-render = { version = "0.3.0", path = "crates/inbx-render" }
+inbx-contacts = { version = "0.3.0", path = "crates/inbx-contacts" }
+inbx-ical = { version = "0.3.0", path = "crates/inbx-ical" }
+inbx-composer = { version = "0.3.0", path = "crates/inbx-composer" }
 
 # PGP
 pgp = "0.19"

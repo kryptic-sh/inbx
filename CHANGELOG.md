@@ -8,6 +8,8 @@ patch bumps.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-05-04
+
 ### Added
 
 - **CalDAV pull (M24).** New `inbx-ical::caldav` module mirrors the CardDAV
@@ -417,7 +419,8 @@ patch bumps.
   Actions release-plz workflow (publish gated off until first dry-run pass
   clears).
 
-[Unreleased]: https://github.com/kryptic-sh/inbx/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/kryptic-sh/inbx/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/kryptic-sh/inbx/releases/tag/v0.3.0
 [0.2.0]: https://github.com/kryptic-sh/inbx/releases/tag/v0.2.0
 [0.1.2]: https://github.com/kryptic-sh/inbx/releases/tag/v0.1.2
 [0.1.1]: https://github.com/kryptic-sh/inbx/releases/tag/v0.1.1
