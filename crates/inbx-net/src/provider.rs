@@ -254,6 +254,7 @@ pub fn fastmail_jmap_session_url(imap_host: &str) -> Option<&'static str> {
 /// ```
 pub async fn connect_provider(
     account: &Account,
+    store: Option<&inbx_store::Store>,
 ) -> std::result::Result<Box<dyn MailProvider>, Error> {
     match &account.transport {
         Transport::Imap => {
@@ -261,11 +262,13 @@ pub async fn connect_provider(
             Ok(Box::new(ImapProvider { session }))
         }
         Transport::Jmap { session_url } => {
-            let client = jmap::JmapClient::connect(account, session_url).await?;
+            let mut client = jmap::JmapClient::connect(account, session_url).await?;
+            client.store = store.cloned();
             Ok(Box::new(client))
         }
         Transport::Graph => {
-            let client = graph::GraphClient::connect(account).await?;
+            let mut client = graph::GraphClient::connect(account).await?;
+            client.store = store.cloned();
             Ok(Box::new(client))
         }
     }
@@ -382,5 +385,66 @@ mod tests {
             },
             Transport::Graph
         ));
+    }
+
+    /// Confirm the Store-aware resolve fast path: `provider_id_for` returns the
+    /// stored value when the row exists, and `None` when it doesn't (the latter
+    /// triggers the slow-path scan in the real resolve helpers).
+    #[tokio::test]
+    async fn store_provider_id_fast_path() {
+        use inbx_store::{MessageRow, Store};
+        use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+
+        // Build an in-memory store with all migrations applied.
+        let opts = SqliteConnectOptions::new().in_memory(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(opts)
+            .await
+            .unwrap();
+        sqlx::migrate!("../inbx-store/migrations")
+            .run(&pool)
+            .await
+            .unwrap();
+        let store = Store::from_pool(pool);
+
+        // Insert a row that mimics a JMAP-synced message with provider_id set.
+        let jmap_pid = "M99abc-opaque-jmap-id";
+        store
+            .upsert_message(&MessageRow {
+                folder: "Inbox".to_string(),
+                uid: 12345,
+                uidvalidity: 0,
+                message_id: None,
+                subject: None,
+                from_addr: None,
+                to_addrs: None,
+                date_unix: None,
+                flags: String::new(),
+                maildir_path: None,
+                headers_only: 1,
+                fetched_at_unix: 0,
+                in_reply_to: None,
+                refs: None,
+                thread_id: None,
+                provider_id: Some(jmap_pid.to_string()),
+            })
+            .await
+            .unwrap();
+
+        // Fast path: row present → returns provider_id.
+        let found = store.provider_id_for("Inbox", 12345).await.unwrap();
+        assert_eq!(
+            found,
+            Some(jmap_pid.to_string()),
+            "fast path must return stored provider_id"
+        );
+
+        // Slow-path trigger: unknown uid → None.
+        let missing = store.provider_id_for("Inbox", 99999).await.unwrap();
+        assert_eq!(
+            missing, None,
+            "unknown uid must return None, triggering slow-path fallback"
+        );
     }
 }

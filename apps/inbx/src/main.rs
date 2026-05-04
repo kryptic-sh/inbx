@@ -1672,6 +1672,7 @@ async fn cmd_import(
             in_reply_to: None,
             refs: None,
             thread_id: None,
+            provider_id: None,
         };
         store.upsert_message(&row).await?;
         index_message(&store, &folder, next_uid, 0, &raw).await?;
@@ -1972,6 +1973,7 @@ async fn cmd_jmap(action: JmapCmd) -> Result<()> {
                         in_reply_to: None,
                         refs: None,
                         thread_id: None,
+                        provider_id: Some(e.id.clone()),
                     })
                     .await?;
             }
@@ -2142,6 +2144,7 @@ async fn cmd_graph(action: GraphCmd) -> Result<()> {
                     in_reply_to: None,
                     refs: None,
                     thread_id: None,
+                    provider_id: Some(m.id.clone()),
                 };
                 store.upsert_message(&row).await?;
                 if bodies {
@@ -3261,6 +3264,7 @@ async fn cmd_fetch(
                 in_reply_to: None,
                 refs: None,
                 thread_id: None,
+                provider_id: h.provider_id.clone(),
             })
             .await?;
     }

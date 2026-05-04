@@ -131,6 +131,9 @@ pub struct JmapClient {
     auth: JmapAuth,
     pub session: Session,
     pub account_id: String,
+    /// Optional store reference for fast provider_id lookups. When `None`,
+    /// `resolve_jmap_id` falls back to the slow 500-message scan.
+    pub store: Option<inbx_store::Store>,
 }
 
 impl JmapClient {
@@ -167,6 +170,7 @@ impl JmapClient {
             auth,
             session,
             account_id,
+            store: None,
         })
     }
 
@@ -929,20 +933,14 @@ impl crate::provider::MailProvider for JmapClient {
                 crate::imap::HeaderRow {
                     uid: uid as u32,
                     uidvalidity: 0,
-                    message_id: e
-                        .message_id
-                        .as_ref()
-                        .and_then(|v| v.first())
-                        .cloned()
-                        // Stash the JMAP id in message_id when RFC 5322 id is absent,
-                        // so callers that need to call Email/set can recover it.
-                        .or_else(|| Some(e.id.clone())),
+                    message_id: e.message_id.as_ref().and_then(|v| v.first()).cloned(),
                     subject: e.subject,
                     from_addr,
                     to_addrs,
                     date_unix,
                     flags,
                     fetched_at_unix: now,
+                    provider_id: Some(e.id.clone()),
                 }
             })
             .collect();
@@ -950,84 +948,34 @@ impl crate::provider::MailProvider for JmapClient {
         Ok(rows)
     }
 
-    async fn fetch_body(&mut self, _folder: &str, uid: i64) -> crate::provider::Result<Vec<u8>> {
-        // We need the JMAP id.  Reconstruct from UID via reverse hash is
-        // infeasible — but the caller always has the message_id stashed in the
-        // store.  For now we use the session's `downloadUrl` if available, else
-        // fall back to the Email/get-body-values path.
-        //
-        // To recover the JMAP id we'd need to query the store, which the
-        // provider doesn't own.  The practical workaround: the TUI stores the
-        // jmap_id in the `message_id` column when there's no RFC 5322 id (see
-        // fetch_headers above).  The TUI's `do_fetch_body` passes `uid` only —
-        // so we do an Email/query to resolve it back.
-        //
-        // This is the abstraction leak mentioned in the deliverable.  A cleaner
-        // fix (separate `provider_id` column) is left for follow-up.
-        //
-        // Fallback: Email/query with `limit:1` at `position: <uid-derived-offset>`
-        // is fragile.  Better: Email/get by id.  We need the id.
-        // Resolution path: store message_id == jmap_id (set above when no
-        // RFC id), but the provider can't access the store directly.
-        //
-        // Pragmatic choice: treat `uid` as an opaque handle and do a full
-        // mailbox scan to find the matching hash.  This is O(n) but only called
-        // on single-message lazy fetches (not the sync loop).  Cap at 500.
+    async fn fetch_body(&mut self, folder: &str, uid: i64) -> crate::provider::Result<Vec<u8>> {
+        // Resolve uid → JMAP id via store (fast) or 500-message scan (slow).
+        let jmap_id = self
+            .resolve_jmap_id(folder, uid)
+            .await
+            .map_err(crate::provider::Error::Jmap)?;
+
+        // Fetch blobId for the resolved id.
         let v = self
             .invoke(
-                vec![
-                    json!([
-                        "Email/query",
-                        {
-                            "accountId": self.account_id,
-                            "sort": [{"property": "receivedAt", "isAscending": false}],
-                            "limit": 500_u32,
-                        },
-                        "q"
-                    ]),
-                    json!([
-                        "Email/get",
-                        {
-                            "accountId": self.account_id,
-                            "#ids": {
-                                "resultOf": "q",
-                                "name": "Email/query",
-                                "path": "/ids"
-                            },
-                            "properties": ["id", "blobId"]
-                        },
-                        "g"
-                    ]),
-                ],
+                vec![json!([
+                    "Email/get",
+                    {
+                        "accountId": self.account_id,
+                        "ids": [&jmap_id],
+                        "properties": ["id", "blobId"]
+                    },
+                    "b"
+                ])],
                 vec![CORE_CAPABILITY, MAIL_CAPABILITY],
             )
             .await
             .map_err(crate::provider::Error::Jmap)?;
 
-        let list = v["methodResponses"][1][1]["list"]
-            .as_array()
-            .cloned()
-            .unwrap_or_default();
-
-        let entry = list.iter().find(|e| {
-            e["id"]
-                .as_str()
-                .map(|id| jmap_id_to_uid(id) == uid)
-                .unwrap_or(false)
-        });
-
-        let (jmap_id, blob_id) = match entry {
-            Some(e) => (
-                e["id"].as_str().unwrap_or("").to_string(),
-                e["blobId"].as_str().unwrap_or("").to_string(),
-            ),
-            None => {
-                return Err(crate::provider::Error::Jmap(Error::Server {
-                    status: 0,
-                    body: format!("JMAP: uid {uid} not found in recent 500 messages"),
-                }));
-            }
-        };
+        let blob_id = v["methodResponses"][0][1]["list"][0]["blobId"]
+            .as_str()
+            .unwrap_or("")
+            .to_string();
 
         // Prefer the downloadUrl template from the session for a lossless fetch.
         // The current `Session` struct only stores apiUrl, so we derive the
@@ -1063,14 +1011,14 @@ impl crate::provider::MailProvider for JmapClient {
 
     async fn set_flags(
         &mut self,
-        _folder: &str,
+        folder: &str,
         uid: i64,
         add: &[&str],
         remove: &[&str],
     ) -> crate::provider::Result<()> {
-        // Resolve uid → JMAP id (same scan as fetch_body; cap at 500).
+        // Resolve uid → JMAP id via store (fast) or scan (slow).
         let jmap_id = self
-            .resolve_jmap_id(uid)
+            .resolve_jmap_id(folder, uid)
             .await
             .map_err(crate::provider::Error::Jmap)?;
         self.set_email_flags(&jmap_id, add, remove)
@@ -1085,7 +1033,7 @@ impl crate::provider::MailProvider for JmapClient {
         dest: &str,
     ) -> crate::provider::Result<()> {
         let jmap_id = self
-            .resolve_jmap_id(uid)
+            .resolve_jmap_id(folder, uid)
             .await
             .map_err(crate::provider::Error::Jmap)?;
         let mailboxes = self
@@ -1159,10 +1107,25 @@ impl crate::provider::MailProvider for JmapClient {
 
 impl JmapClient {
     /// Resolve a local uid (FNV-1a hash of JMAP id) back to the JMAP string id.
-    /// Scans the most recent 500 messages.  This is the abstraction leak noted
-    /// in the provider design docs — a `provider_id` column would eliminate
-    /// the scan, left for follow-up.
-    async fn resolve_jmap_id(&self, uid: i64) -> Result<String> {
+    ///
+    /// Fast path: query `provider_id` from the store when a `Store` is attached.
+    /// Slow path (pre-migration or no store): scan the most recent 500 messages
+    /// and re-hash each id. A `tracing::debug!` is emitted whenever the slow
+    /// path is taken so production instances can verify the fast path is hit.
+    async fn resolve_jmap_id(&self, folder: &str, uid: i64) -> Result<String> {
+        // Fast path: store lookup.
+        if let Some(store) = &self.store {
+            if let Ok(Some(pid)) = store.provider_id_for(folder, uid).await {
+                return Ok(pid);
+            }
+            tracing::debug!(
+                folder,
+                uid,
+                "resolve_jmap_id: provider_id not in store, falling back to 500-message scan"
+            );
+        }
+
+        // Slow path: scan recent messages and find by hash.
         let v = self
             .invoke(
                 vec![

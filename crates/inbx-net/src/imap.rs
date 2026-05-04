@@ -226,6 +226,9 @@ pub struct HeaderRow {
     pub date_unix: Option<i64>,
     pub flags: String,
     pub fetched_at_unix: i64,
+    /// Provider-specific opaque message id (JMAP/Graph only). Always `None`
+    /// for IMAP rows; those use the integer UID directly.
+    pub provider_id: Option<String>,
 }
 
 /// UID SEARCH SINCE <date>. `days_ago` of 0 means no filter (all messages).
@@ -326,6 +329,7 @@ pub async fn fetch_headers_uids(
             date_unix,
             flags,
             fetched_at_unix: now,
+            provider_id: None,
         });
     }
     Ok((uidvalidity, out))
@@ -381,6 +385,7 @@ pub async fn fetch_headers(
             date_unix,
             flags,
             fetched_at_unix: now,
+            provider_id: None,
         });
     }
     Ok((uidvalidity, out))

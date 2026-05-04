@@ -679,7 +679,7 @@ impl App {
         };
         let raw = composer.to_mime()?;
         // Hot-path: use MailProvider so JMAP accounts use Email/import.
-        let mut provider = inbx_net::connect_provider(&self.account).await?;
+        let mut provider = inbx_net::connect_provider(&self.account, Some(&self.store)).await?;
         let folders = provider.list_folders().await?;
         let drafts = inbx_net::find_drafts_folder(&folders);
         match drafts {
@@ -895,7 +895,7 @@ impl App {
             (vec![flag], vec![])
         };
         // Hot-path: use MailProvider so JMAP accounts get Email/set.
-        let mut provider = inbx_net::connect_provider(&self.account).await?;
+        let mut provider = inbx_net::connect_provider(&self.account, Some(&self.store)).await?;
         provider
             .set_flags(&folder_name, msg.uid, &add, &remove)
             .await?;
@@ -1030,7 +1030,7 @@ impl App {
             return Ok(());
         };
         // Hot-path: use MailProvider so JMAP accounts get Email/set move.
-        let mut provider = inbx_net::connect_provider(&self.account).await?;
+        let mut provider = inbx_net::connect_provider(&self.account, Some(&self.store)).await?;
         provider.move_message(&source, msg.uid, target).await?;
         drop(provider);
         self.store.delete_messages(&source, &[msg.uid]).await?;
@@ -1586,7 +1586,7 @@ async fn do_manual_sync(
 ) -> super::tasks::TaskResult {
     use super::tasks::TaskResult;
     let result: anyhow::Result<(i64, usize, usize)> = async {
-        let mut provider = inbx_net::connect_provider(&account).await?;
+        let mut provider = inbx_net::connect_provider(&account, Some(&store)).await?;
         let rows = provider.fetch_headers(&folder_name, None, 500).await?;
         // JMAP uses uidvalidity=0; IMAP rows carry real uidvalidity but
         // HeaderRow.uidvalidity is already u32→i64 clean.
@@ -1639,6 +1639,7 @@ async fn do_manual_sync(
                     in_reply_to: None,
                     refs: None,
                     thread_id: None,
+                    provider_id: h.provider_id.clone(),
                 })
                 .await?;
         }
@@ -1678,7 +1679,7 @@ async fn do_fetch_body(
 ) -> super::tasks::TaskResult {
     use super::tasks::TaskResult;
     let result: anyhow::Result<()> = async {
-        let mut provider = inbx_net::connect_provider(&account).await?;
+        let mut provider = inbx_net::connect_provider(&account, Some(&store)).await?;
         let raw = provider.fetch_body(&folder_name, uid).await?;
         drop(provider);
         let path = store.write_maildir(&folder_name, &raw, &flags)?;
@@ -1963,6 +1964,7 @@ mod tests {
             in_reply_to: None,
             refs: None,
             thread_id: None,
+            provider_id: None,
         }
     }
 

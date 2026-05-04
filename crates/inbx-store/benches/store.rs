@@ -65,6 +65,7 @@ fn get_seeded_store(rt: &Runtime) -> Store {
                         in_reply_to: None,
                         refs: None,
                         thread_id: None,
+                        provider_id: None,
                     };
                     store.upsert_message(&m).await.unwrap();
                     store
@@ -269,6 +270,7 @@ async fn seed_threader_pool(n: u32) -> Store {
                 Some(refs.join("\n"))
             },
             thread_id: None,
+            provider_id: None,
         };
         store.upsert_message(&m).await.unwrap();
         store

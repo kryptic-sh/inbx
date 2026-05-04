@@ -187,6 +187,7 @@ async fn sync_once(
                 in_reply_to: None,
                 refs: None,
                 thread_id: None,
+                provider_id: h.provider_id.clone(),
             })
             .await?;
     }

@@ -64,6 +64,8 @@ pub struct MessageRow {
     pub refs: Option<String>,
     #[sqlx(default)]
     pub thread_id: Option<String>,
+    #[sqlx(default)]
+    pub provider_id: Option<String>,
 }
 
 #[derive(Clone)]
@@ -190,8 +192,8 @@ impl Store {
             "INSERT INTO messages
                 (folder, uid, uidvalidity, message_id, subject, from_addr, to_addrs,
                  date_unix, flags, maildir_path, headers_only, fetched_at_unix,
-                 in_reply_to, refs, thread_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+                 in_reply_to, refs, thread_id, provider_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
              ON CONFLICT(folder, uid, uidvalidity) DO UPDATE SET
                 message_id = excluded.message_id,
                 subject = excluded.subject,
@@ -204,7 +206,8 @@ impl Store {
                 fetched_at_unix = excluded.fetched_at_unix,
                 in_reply_to = COALESCE(excluded.in_reply_to, messages.in_reply_to),
                 refs = COALESCE(excluded.refs, messages.refs),
-                thread_id = COALESCE(excluded.thread_id, messages.thread_id)",
+                thread_id = COALESCE(excluded.thread_id, messages.thread_id),
+                provider_id = COALESCE(excluded.provider_id, messages.provider_id)",
         )
         .bind(&m.folder)
         .bind(m.uid)
@@ -221,9 +224,26 @@ impl Store {
         .bind(&m.in_reply_to)
         .bind(&m.refs)
         .bind(&m.thread_id)
+        .bind(&m.provider_id)
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    /// Look up the provider's opaque string id for a message row.
+    /// Returns `None` when the row was synced before migration 0006 (IMAP rows
+    /// always stay `None`).
+    pub async fn provider_id_for(&self, folder: &str, uid: i64) -> Result<Option<String>> {
+        let row: Option<(Option<String>,)> = sqlx::query_as(
+            "SELECT provider_id FROM messages
+             WHERE folder = ?1 AND uid = ?2 AND provider_id IS NOT NULL
+             LIMIT 1",
+        )
+        .bind(folder)
+        .bind(uid)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.and_then(|(v,)| v))
     }
 
     /// Update threading columns and resolve thread_id via the JWZ algorithm.
@@ -634,5 +654,98 @@ mod tests {
         assert_eq!(maildir_info("\\Seen \\Flagged"), "FS");
         assert_eq!(maildir_info("\\Answered"), "R");
         assert_eq!(maildir_info(""), "");
+    }
+
+    async fn make_in_memory_store() -> Store {
+        use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+        let opts = SqliteConnectOptions::new().in_memory(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(opts)
+            .await
+            .expect("pool");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("migrate");
+        Store::from_pool(pool)
+    }
+
+    fn make_row(folder: &str, uid: i64, provider_id: Option<&str>) -> MessageRow {
+        MessageRow {
+            folder: folder.to_string(),
+            uid,
+            uidvalidity: 0,
+            message_id: None,
+            subject: None,
+            from_addr: None,
+            to_addrs: None,
+            date_unix: None,
+            flags: String::new(),
+            maildir_path: None,
+            headers_only: 1,
+            fetched_at_unix: 0,
+            in_reply_to: None,
+            refs: None,
+            thread_id: None,
+            provider_id: provider_id.map(|s| s.to_string()),
+        }
+    }
+
+    /// Migration 0006 runs cleanly on a fresh store (implicit in make_in_memory_store).
+    /// Verify provider_id round-trips through upsert_message.
+    #[tokio::test]
+    async fn provider_id_round_trips() {
+        let store = make_in_memory_store().await;
+        let pid = "AAMkAGE1M2IyNGNm-test-graph-id";
+        let row = make_row("Inbox", 42, Some(pid));
+        store.upsert_message(&row).await.unwrap();
+
+        // provider_id_for returns the stored value.
+        let got = store.provider_id_for("Inbox", 42).await.unwrap();
+        assert_eq!(got, Some(pid.to_string()));
+    }
+
+    /// IMAP rows (provider_id = None) return None from provider_id_for.
+    #[tokio::test]
+    async fn provider_id_none_for_imap_rows() {
+        let store = make_in_memory_store().await;
+        let row = make_row("INBOX", 1, None);
+        store.upsert_message(&row).await.unwrap();
+
+        let got = store.provider_id_for("INBOX", 1).await.unwrap();
+        assert_eq!(got, None);
+    }
+
+    /// provider_id is preserved (not overwritten to NULL) by a subsequent upsert
+    /// that doesn't set it, thanks to COALESCE in the ON CONFLICT clause.
+    #[tokio::test]
+    async fn provider_id_preserved_on_flag_update() {
+        let store = make_in_memory_store().await;
+        let pid = "jmap-id-xyz";
+        // First upsert with provider_id.
+        store
+            .upsert_message(&make_row("Inbox", 7, Some(pid)))
+            .await
+            .unwrap();
+        // Second upsert (e.g. flag refresh) without provider_id.
+        let mut refresh = make_row("Inbox", 7, None);
+        refresh.flags = "\\Seen".to_string();
+        store.upsert_message(&refresh).await.unwrap();
+
+        let got = store.provider_id_for("Inbox", 7).await.unwrap();
+        assert_eq!(
+            got,
+            Some(pid.to_string()),
+            "provider_id must survive flag refresh"
+        );
+    }
+
+    /// Missing uid returns None.
+    #[tokio::test]
+    async fn provider_id_missing_uid_returns_none() {
+        let store = make_in_memory_store().await;
+        let got = store.provider_id_for("Inbox", 9999).await.unwrap();
+        assert_eq!(got, None);
     }
 }

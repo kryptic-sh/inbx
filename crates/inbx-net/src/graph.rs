@@ -32,6 +32,9 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub struct GraphClient {
     http: reqwest::Client,
     token: String,
+    /// Optional store reference for fast provider_id lookups. When `None`,
+    /// `resolve_graph_id` falls back to the slow 500-message scan.
+    pub store: Option<inbx_store::Store>,
 }
 
 impl GraphClient {
@@ -47,7 +50,11 @@ impl GraphClient {
         let token =
             oauth::refresh(&account.auth, &provider, &refresh, account.proxy.as_ref()).await?;
         let http = proxy::build_reqwest_client(account.proxy.as_ref(), 30)?;
-        Ok(Self { http, token })
+        Ok(Self {
+            http,
+            token,
+            store: None,
+        })
     }
 
     async fn get(&self, url: &str) -> Result<reqwest::Response> {
@@ -310,9 +317,24 @@ impl GraphClient {
     }
 
     /// Resolve uid (FNV-1a of Graph id) back to the raw Graph message id.
-    /// Scans the most recent 500 messages in `folder` (same abstraction leak
-    /// as JMAP's `resolve_jmap_id` — a provider_id column would fix this).
+    ///
+    /// Fast path: query `provider_id` from the store when a `Store` is attached.
+    /// Slow path (pre-migration or no store): scan the most recent 500 messages.
+    /// A `tracing::debug!` is emitted whenever the slow path is taken.
     async fn resolve_graph_id(&self, folder_display_name: &str, uid: i64) -> Result<String> {
+        // Fast path: store lookup.
+        if let Some(store) = &self.store {
+            if let Ok(Some(pid)) = store.provider_id_for(folder_display_name, uid).await {
+                return Ok(pid);
+            }
+            tracing::debug!(
+                folder = folder_display_name,
+                uid,
+                "resolve_graph_id: provider_id not in store, falling back to 500-message scan"
+            );
+        }
+
+        // Slow path: list messages and match by hash.
         let folder_id = self.resolve_folder_id(folder_display_name).await?;
         let msgs = self.list_messages(&folder_id, 500).await?;
         msgs.into_iter()
@@ -435,19 +457,17 @@ impl crate::provider::MailProvider for GraphClient {
                 } else {
                     String::new()
                 };
-                // Stash raw Graph id in message_id when no RFC 5322 id present,
-                // so callers can recover it for set_flags / move_message.
-                let message_id = msg.message_id.or_else(|| Some(msg.id.clone()));
                 crate::imap::HeaderRow {
                     uid: uid as u32,
                     uidvalidity: 0, // Graph has no UIDVALIDITY equivalent
-                    message_id,
+                    message_id: msg.message_id,
                     subject: msg.subject,
                     from_addr,
                     to_addrs,
                     date_unix,
                     flags,
                     fetched_at_unix: now,
+                    provider_id: Some(msg.id.clone()),
                 }
             })
             .collect();
