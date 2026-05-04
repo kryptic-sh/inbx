@@ -80,13 +80,7 @@ async fn main() -> Result<()> {
                     tokio::time::sleep(Duration::from_secs(30)).await;
                     continue;
                 }
-                match inbx_net::idle::wait_for_new_in(&acct, &folder).await {
-                    Ok(_) => tracing::info!(account = %acct.name, "idle signal"),
-                    Err(e) => {
-                        tracing::warn!(account = %acct.name, %e, "idle error; sleeping 30s");
-                        tokio::time::sleep(Duration::from_secs(30)).await;
-                    }
-                }
+                wait_for_change(&acct, &folder).await;
             }
         });
     }
@@ -102,6 +96,63 @@ async fn main() -> Result<()> {
         } => {}
     }
     Ok(())
+}
+
+/// Wait for the server to signal new data.  Dispatches on `account.transport`:
+/// - IMAP → RFC 2177 IDLE (25-min keepalive window).
+/// - JMAP → RFC 8620 EventSource; first event or stream close signals a cycle.
+/// - Graph → no push path today; sleeps 5 min before the next poll cycle.
+///
+/// Any error backs off 30 s before returning, matching the outer loop pattern.
+async fn wait_for_change(account: &Account, folder: &str) {
+    use inbx_config::Transport;
+
+    const BACKOFF: Duration = Duration::from_secs(30);
+
+    match &account.transport {
+        Transport::Imap => match inbx_net::idle::wait_for_new_in(account, folder).await {
+            Ok(_) => tracing::info!(account = %account.name, "idle signal"),
+            Err(e) => {
+                tracing::warn!(account = %account.name, %e, "idle error; sleeping 30s");
+                tokio::time::sleep(BACKOFF).await;
+            }
+        },
+        Transport::Jmap { session_url } => {
+            let client = match inbx_net::jmap::JmapClient::connect(account, session_url).await {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::warn!(account = %account.name, %e, "JMAP connect failed; sleeping 30s");
+                    tokio::time::sleep(BACKOFF).await;
+                    return;
+                }
+            };
+            let mut stream = match client.open_event_source().await {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!(account = %account.name, %e, "JMAP EventSource open failed; sleeping 30s");
+                    tokio::time::sleep(BACKOFF).await;
+                    return;
+                }
+            };
+            match stream.next_event().await {
+                Ok(Some(payload)) => {
+                    tracing::info!(account = %account.name, %payload, "JMAP push event");
+                }
+                Ok(None) => {
+                    tracing::debug!(account = %account.name, "JMAP EventSource closed; reconnecting");
+                }
+                Err(e) => {
+                    tracing::warn!(account = %account.name, %e, "JMAP EventSource error; sleeping 30s");
+                    tokio::time::sleep(BACKOFF).await;
+                }
+            }
+        }
+        Transport::Graph => {
+            // No push path for Graph today. TODO: delta-link poll.
+            tracing::debug!(account = %account.name, "Graph: polling every 5 min");
+            tokio::time::sleep(Duration::from_secs(5 * 60)).await;
+        }
+    }
 }
 
 async fn sync_once(

@@ -243,6 +243,11 @@ async fn handle_task_result(app: &mut App, result: tasks::TaskResult) -> Result<
             app.active_sieve_wizard = Some(wizard::SieveEditWizard::new(name, body));
             app.status = format!("sieve save failed: {e}");
         }
+        TaskResult::WatchSignal => {
+            // Background watch (IMAP IDLE or JMAP EventSource) fired.
+            // Kick off a manual sync on the current folder, same as `F`.
+            app.manual_sync();
+        }
     }
     Ok(())
 }

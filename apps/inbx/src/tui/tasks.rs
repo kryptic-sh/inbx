@@ -40,6 +40,11 @@ pub(super) enum TaskResult {
         body: String,
         result: std::result::Result<(), String>,
     },
+    /// Background watch loop (IMAP IDLE or JMAP EventSource) detected new
+    /// data. The event loop should trigger a `manual_sync` on the current
+    /// folder. No pending-op counter is decremented — the watch loop is
+    /// long-lived and does not participate in the busy/spinner cycle.
+    WatchSignal,
 }
 
 #[derive(Clone)]

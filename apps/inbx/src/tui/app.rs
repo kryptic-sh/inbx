@@ -324,6 +324,19 @@ impl App {
             current_receipt: None,
         };
         app.reload_messages().await?;
+
+        // Spawn the long-lived background watch task (IDLE for IMAP, EventSource
+        // for JMAP).  It posts `TaskResult::WatchSignal` whenever the server
+        // signals new data; the event loop translates that into a `manual_sync`.
+        // The task exits cleanly when the channel receiver is dropped (TUI exit).
+        let watch_account = app.account.clone();
+        let watch_folder = app
+            .current_folder()
+            .map(|f| f.name.clone())
+            .unwrap_or_else(|| "INBOX".into());
+        let watch_tx = app.task_tx.0.clone();
+        tokio::spawn(do_watch(watch_account, watch_folder, watch_tx));
+
         Ok(app)
     }
 
@@ -1909,6 +1922,106 @@ fn open_url(url: &str) -> std::io::Result<()> {
         .stderr(Stdio::null())
         .spawn()
         .map(|_| ())
+}
+
+// ---------------------------------------------------------------------------
+// Background watch loop
+// ---------------------------------------------------------------------------
+
+/// Long-lived background task: waits for the server to signal new data, then
+/// posts `TaskResult::WatchSignal` so the TUI event loop triggers a sync.
+///
+/// Dispatches on `account.transport`:
+/// - `Transport::Imap` → RFC 2177 IDLE via `inbx_net::idle::wait_for_new_in`.
+/// - `Transport::Jmap` → RFC 8620 EventSource (`open_event_source`).  Any
+///   SSE event (or stream close + reopen) is treated as a signal.
+/// - `Transport::Graph` → no push path today; loop sleeps 5 min and signals.
+///   (A delta-link poll is tracked as a separate TODO.)
+///
+/// Reconnect / backoff: any error backs off 30 s before retrying, matching the
+/// CLI `inbx watch` and `inbx-sync` patterns.
+///
+/// The task runs for the lifetime of the TUI session. `tx.send` errors (the
+/// receiver was dropped because the TUI exited) terminate the loop cleanly.
+async fn do_watch(
+    account: inbx_config::Account,
+    folder: String,
+    tx: tokio::sync::mpsc::UnboundedSender<super::tasks::TaskResult>,
+) {
+    use super::tasks::TaskResult;
+    use inbx_config::Transport;
+
+    const BACKOFF: std::time::Duration = std::time::Duration::from_secs(30);
+
+    loop {
+        match &account.transport {
+            Transport::Imap => {
+                match inbx_net::idle::wait_for_new_in(&account, &folder).await {
+                    Ok(inbx_net::idle::IdleEvent::NewData) => {
+                        tracing::debug!("watch: IMAP IDLE new data");
+                    }
+                    Ok(inbx_net::idle::IdleEvent::Timeout) => {
+                        // Keepalive cycle — re-issue IDLE without triggering sync.
+                        tracing::debug!("watch: IMAP IDLE keepalive");
+                        continue;
+                    }
+                    Err(e) => {
+                        tracing::warn!(%e, "watch: IMAP IDLE error; backing off 30s");
+                        tokio::time::sleep(BACKOFF).await;
+                        continue;
+                    }
+                }
+            }
+            Transport::Jmap { session_url } => {
+                // Connect and open the EventSource.  Any SSE event signals new
+                // data; stream close is treated as a signal too (reconnect loop).
+                let client = match inbx_net::jmap::JmapClient::connect(&account, session_url).await
+                {
+                    Ok(c) => c,
+                    Err(e) => {
+                        tracing::warn!(%e, "watch: JMAP connect failed; backing off 30s");
+                        tokio::time::sleep(BACKOFF).await;
+                        continue;
+                    }
+                };
+                let mut stream = match client.open_event_source().await {
+                    Ok(s) => s,
+                    Err(e) => {
+                        tracing::warn!(%e, "watch: JMAP EventSource open failed; backing off 30s");
+                        tokio::time::sleep(BACKOFF).await;
+                        continue;
+                    }
+                };
+                tracing::debug!("watch: JMAP EventSource open");
+                // Block until the first event arrives (or the stream closes).
+                match stream.next_event().await {
+                    Ok(Some(payload)) => {
+                        tracing::debug!(%payload, "watch: JMAP push event");
+                    }
+                    Ok(None) => {
+                        // Stream closed; reconnect on next iteration.
+                        tracing::debug!("watch: JMAP EventSource closed; reconnecting");
+                    }
+                    Err(e) => {
+                        tracing::warn!(%e, "watch: JMAP EventSource error; backing off 30s");
+                        tokio::time::sleep(BACKOFF).await;
+                        continue;
+                    }
+                }
+            }
+            Transport::Graph => {
+                // No push path for Graph today.  Poll every 5 min.
+                // TODO: replace with delta-link polling once Graph watch lands.
+                tracing::debug!("watch: Graph — polling every 5 min");
+                tokio::time::sleep(std::time::Duration::from_secs(5 * 60)).await;
+            }
+        }
+
+        // Signal the TUI; exit cleanly if the receiver is gone.
+        if tx.send(TaskResult::WatchSignal).is_err() {
+            break;
+        }
+    }
 }
 
 #[cfg(test)]
