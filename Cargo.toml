@@ -90,6 +90,8 @@ inbx-composer = { path = "crates/inbx-composer" }
 
 # PGP
 pgp = "0.19"
+sha1 = "0.10"
+zbase32 = "0.1"
 async-trait = "0.1"
 tempfile = "3"
 which = "8"

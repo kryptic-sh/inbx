@@ -685,6 +685,17 @@ enum PgpCmd {
         account: Option<String>,
         path: std::path::PathBuf,
     },
+    /// Look up a recipient's public key via WKD and write it to disk.
+    LookupWkd {
+        /// Email to look up.
+        email: String,
+        /// Output path. Defaults to <email>.pub.asc in the current account's
+        /// inbx-managed dir (so it's auto-discovered as an encrypt recipient).
+        #[arg(long)]
+        out: Option<std::path::PathBuf>,
+        #[arg(long)]
+        account: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -2480,6 +2491,11 @@ async fn cmd_pgp(cmd: PgpCmd) -> Result<()> {
             out,
         } => cmd_pgp_encrypt(account, path, recipient, out).await,
         PgpCmd::Decrypt { account, path } => cmd_pgp_decrypt(account, path).await,
+        PgpCmd::LookupWkd {
+            email,
+            out,
+            account,
+        } => cmd_pgp_lookup_wkd(account, email, out).await,
     }
 }
 
@@ -2732,6 +2748,47 @@ async fn cmd_pgp_decrypt(account: Option<String>, path: std::path::PathBuf) -> R
     use std::io::Write as _;
     std::io::stdout().write_all(&plain.0)?;
     Ok(())
+}
+
+async fn cmd_pgp_lookup_wkd(
+    account: Option<String>,
+    email: String,
+    out: Option<std::path::PathBuf>,
+) -> Result<()> {
+    let cfg = inbx_config::load()?;
+    let acct = pick_account(&cfg, account.as_deref())?;
+    let client = inbx_net::proxy::build_reqwest_client(acct.proxy.as_ref(), 10)
+        .with_context(|| "build wkd http client")?;
+    match inbx_pgp::wkd::lookup_with_client(&client, &email).await {
+        Ok(Some(key)) => {
+            // Resolve output path: explicit --out, or <managed_dir>/<fpr>.pub.asc
+            // (matches keygen's filename convention so the encrypt path's
+            // "load all *.pub.asc" picks it up consistently).
+            let out_path = match out {
+                Some(p) => p,
+                None => {
+                    let dir = managed_dir_for(acct);
+                    std::fs::create_dir_all(&dir)
+                        .with_context(|| format!("create {}", dir.display()))?;
+                    dir.join(format!("{}.pub.asc", key.fingerprint))
+                }
+            };
+            std::fs::write(&out_path, key.armored.0.as_bytes())
+                .with_context(|| format!("write {}", out_path.display()))?;
+            println!("fingerprint: {}", key.fingerprint);
+            println!("email:       {}", email);
+            println!("written to:  {}", out_path.display());
+            Ok(())
+        }
+        Ok(None) => {
+            eprintln!("no WKD key found for {email}");
+            std::process::exit(1);
+        }
+        Err(e) => {
+            eprintln!("WKD parse error for {email}: {e}");
+            std::process::exit(1);
+        }
+    }
 }
 
 // ── end PGP handlers ──────────────────────────────────────────────────────────
