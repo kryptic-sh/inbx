@@ -23,5 +23,6 @@ hjkl-clipboard.workspace = true
 hjkl-form.workspace = true
 
 [dev-dependencies]
+async-trait.workspace = true
 tempfile.workspace = true
 tokio.workspace = true

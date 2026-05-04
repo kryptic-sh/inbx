@@ -6,7 +6,7 @@ use hjkl_clipboard::{Clipboard, MimeType as ClipMime, Selection};
 use hjkl_picker::Picker;
 use inbx_composer::{Composer, FocusedEditor, Identity};
 use inbx_config::Account;
-use inbx_contacts::{Contact, ContactsStore};
+use inbx_contacts::{Contact, ContactsStore, PubkeyLookup};
 use inbx_render::RemotePolicy;
 use inbx_store::{FolderRow, MessageRow, OutboxRow, Store};
 use ratatui::widgets::ListState;
@@ -28,6 +28,8 @@ pub(super) enum ActivePicker {
     Account(Picker, Arc<Mutex<Option<String>>>),
     Message(Picker, Arc<Mutex<Option<i64>>>),
     Attachment(Picker, Arc<Mutex<Option<usize>>>, Vec<(String, Vec<u8>)>),
+    /// Sieve script picker — payload is the script name.
+    Sieve(Picker, Arc<Mutex<Option<String>>>),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -104,6 +106,8 @@ pub(super) struct App {
     pub(super) active_picker: Option<ActivePicker>,
     /// Active account-creation wizard. `None` when not open.
     pub(super) active_wizard: Option<super::wizard::AccountWizard>,
+    /// Active Sieve-script edit wizard. `None` when not open.
+    pub(super) active_sieve_wizard: Option<super::wizard::SieveEditWizard>,
     /// True while an async operation (manual sync, fetch, outbox drain) is
     /// in flight. The event loop forces redraws at 120 ms while busy so the
     /// spinner in the status line animates.
@@ -297,6 +301,7 @@ impl App {
             last_sync_unix: None,
             active_picker: None,
             active_wizard: None,
+            active_sieve_wizard: None,
             busy: false,
             receipt_responded: HashSet::new(),
             current_receipt: None,
@@ -356,7 +361,23 @@ impl App {
             return Ok(());
         };
         let raw = std::fs::read(&path)?;
-        match Composer::new_reply(Identity::from_account(&self.account), &raw, all) {
+        // Use the async variant with PGP lookup when a contacts store is
+        // available — enables Autocrypt 1.1 §4 mutual-mode auto-encrypt.
+        let contacts_store = ContactsStore::open(&self.account.name).await.ok();
+        let result = if let Some(ref store) = contacts_store {
+            Composer::new_reply_with_pgp_lookup(
+                Identity::from_account(&self.account),
+                &raw,
+                all,
+                Some(store as &dyn PubkeyLookup),
+            )
+            .await
+            .map_err(anyhow::Error::from)
+        } else {
+            Composer::new_reply(Identity::from_account(&self.account), &raw, all)
+                .map_err(anyhow::Error::from)
+        };
+        match result {
             Ok(c) => {
                 self.composer = Some(c);
                 self.status = if all {
@@ -1192,6 +1213,94 @@ impl App {
         let (p, slot) = super::picker::attachment_picker(&parts);
         self.active_picker = Some(ActivePicker::Attachment(p, slot, parts));
         self.status = "<Space>a attachments: Enter save · Esc cancel".into();
+    }
+
+    /// Connect to ManageSieve, list scripts, open a picker (`<Space>S`).
+    /// Spawns a tokio task so the TUI is not blocked during the connect.
+    /// `active_picker` is set to `ActivePicker::Sieve` once the task returns.
+    pub(super) async fn open_sieve_picker(&mut self) -> Result<()> {
+        let account = self.account.clone();
+        match inbx_net::sieve::SieveClient::connect(&account).await {
+            Ok(mut client) => match client.list_scripts().await {
+                Ok(scripts) => {
+                    let _ = client.logout().await;
+                    if scripts.is_empty() {
+                        self.status = "sieve: no scripts found".into();
+                        return Ok(());
+                    }
+                    let (p, slot) = super::picker::sieve_picker(scripts);
+                    self.active_picker = Some(ActivePicker::Sieve(p, slot));
+                    self.status = "<Space>S sieve: Enter edit · Esc cancel".into();
+                }
+                Err(e) => {
+                    self.status = format!("sieve list failed: {e}");
+                }
+            },
+            Err(e) => {
+                self.status = format!("sieve connect failed: {e}");
+            }
+        }
+        Ok(())
+    }
+
+    /// Fetch a sieve script body and open the edit wizard.
+    pub(super) async fn open_sieve_edit(&mut self, name: String) -> Result<()> {
+        let account = self.account.clone();
+        match inbx_net::sieve::SieveClient::connect(&account).await {
+            Ok(mut client) => match client.get_script(&name).await {
+                Ok(body) => {
+                    let _ = client.logout().await;
+                    self.active_sieve_wizard =
+                        Some(super::wizard::SieveEditWizard::new(name.clone(), body));
+                    self.status = format!("sieve: editing '{name}' — <Space>s save · Esc cancel");
+                }
+                Err(e) => {
+                    self.status = format!("sieve get failed: {e}");
+                }
+            },
+            Err(e) => {
+                self.status = format!("sieve connect failed: {e}");
+            }
+        }
+        Ok(())
+    }
+
+    /// Save the current sieve wizard to the server.
+    pub(super) async fn save_sieve_wizard(&mut self) -> Result<()> {
+        let Some(wiz) = self.active_sieve_wizard.take() else {
+            return Ok(());
+        };
+        match wiz.build() {
+            Ok((name, body)) => {
+                let account = self.account.clone();
+                match inbx_net::sieve::SieveClient::connect(&account).await {
+                    Ok(mut client) => {
+                        match client.put_script(&name, &body).await {
+                            Ok(()) => {
+                                let _ = client.logout().await;
+                                self.status = format!("sieve: saved {name}");
+                            }
+                            Err(e) => {
+                                self.status = format!("sieve: save failed: {e}");
+                                // Restore wizard so user can retry.
+                                self.active_sieve_wizard =
+                                    Some(super::wizard::SieveEditWizard::new(name, body));
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        self.status = format!("sieve: save failed: {e}");
+                        self.active_sieve_wizard =
+                            Some(super::wizard::SieveEditWizard::new(name, body));
+                    }
+                }
+            }
+            Err(e) => {
+                self.status = format!("sieve: {e}");
+                self.active_sieve_wizard = Some(wiz);
+            }
+        }
+        Ok(())
     }
 
     pub(super) async fn switch_account(&mut self, target: Account) -> Result<()> {

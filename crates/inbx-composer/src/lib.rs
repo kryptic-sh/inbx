@@ -264,6 +264,23 @@ impl Composer {
         Ok(composer)
     }
 
+    /// Like [`new_reply`] but, after building the reply, checks whether the
+    /// original sender has a stored pubkey via `pubkey_lookup`. If yes,
+    /// pre-enables `pgp.encrypt` and `pgp.sign` (Autocrypt 1.1 §4 mutual mode).
+    ///
+    /// `new_reply` itself stays sync; this async peer is the upgrade path for
+    /// callers that have a contacts store available.
+    pub async fn new_reply_with_pgp_lookup(
+        identity: Identity,
+        raw: &[u8],
+        reply_all: bool,
+        pubkey_lookup: Option<&dyn inbx_pgp::PubkeyLookup>,
+    ) -> Result<Self> {
+        let mut composer = Self::new_reply(identity, raw, reply_all)?;
+        maybe_enable_autocrypt(&mut composer, raw, pubkey_lookup).await;
+        Ok(composer)
+    }
+
     pub fn new_forward(identity: Identity, raw: &[u8]) -> Result<Self> {
         let parsed = MessageParser::default().parse(raw).ok_or(Error::Parse)?;
         let mut composer = Self::new_blank(identity);
@@ -727,6 +744,39 @@ fn new_vim_editor() -> Editor {
     ed
 }
 
+/// Autocrypt 1.1 §4 mutual-mode heuristic: if the original sender has a stored
+/// pubkey, pre-enable `pgp.encrypt` and `pgp.sign` on the composer.
+///
+/// Private to this module; called only from `new_reply_with_pgp_lookup`.
+async fn maybe_enable_autocrypt(
+    composer: &mut Composer,
+    raw: &[u8],
+    pubkey_lookup: Option<&dyn inbx_pgp::PubkeyLookup>,
+) {
+    let Some(lookup) = pubkey_lookup else {
+        return;
+    };
+    // Extract the original sender's address.
+    let Some(parsed) = mail_parser::MessageParser::default().parse(raw) else {
+        return;
+    };
+    let sender_email = parsed
+        .from()
+        .and_then(|a| a.first())
+        .and_then(|a| a.address())
+        .unwrap_or("")
+        .to_string();
+    if sender_email.is_empty() {
+        return;
+    }
+    let Ok(Some(_)) = lookup.lookup(&sender_email).await else {
+        return;
+    };
+    // Sender has a stored pubkey — they're using PGP. Pre-toggle encrypt+sign.
+    composer.pgp.encrypt = true;
+    composer.pgp.sign = true;
+}
+
 fn parse_addresses(s: &str) -> Vec<(String, String)> {
     s.split(',')
         .map(|piece| piece.trim())
@@ -1071,5 +1121,64 @@ mod tests {
             matches!(err, Error::Missing(_)),
             "must error Missing when source is None but sign=true"
         );
+    }
+
+    // ── Auto-encrypt heuristic tests ──────────────────────────────────────────
+
+    /// A minimal in-test `PubkeyLookup` that returns `Some` for one email.
+    struct MockLookup {
+        known_email: String,
+    }
+
+    #[async_trait::async_trait]
+    impl inbx_pgp::PubkeyLookup for MockLookup {
+        async fn lookup(&self, email: &str) -> inbx_pgp::Result<Option<inbx_pgp::ArmoredKey>> {
+            if email.eq_ignore_ascii_case(&self.known_email) {
+                Ok(Some(inbx_pgp::ArmoredKey("mock-key".to_string())))
+            } else {
+                Ok(None)
+            }
+        }
+    }
+
+    const REPLY_RAW: &[u8] = b"Message-Id: <orig@x>\r\n\
+        From: bob@x.com\r\n\
+        To: alice@example.com\r\n\
+        Subject: Hello\r\n\
+        Date: Mon, 01 Jan 2026 12:00:00 +0000\r\n\
+        \r\n\
+        body\r\n";
+
+    #[tokio::test]
+    async fn auto_encrypt_when_sender_has_pubkey() {
+        let lookup = MockLookup {
+            known_email: "bob@x.com".to_string(),
+        };
+        let c = Composer::new_reply_with_pgp_lookup(id(), REPLY_RAW, false, Some(&lookup))
+            .await
+            .unwrap();
+        assert!(c.pgp.encrypt, "encrypt should be pre-enabled");
+        assert!(c.pgp.sign, "sign should be pre-enabled");
+    }
+
+    #[tokio::test]
+    async fn auto_encrypt_off_when_sender_unknown() {
+        let lookup = MockLookup {
+            known_email: "someone-else@x.com".to_string(),
+        };
+        let c = Composer::new_reply_with_pgp_lookup(id(), REPLY_RAW, false, Some(&lookup))
+            .await
+            .unwrap();
+        assert!(!c.pgp.encrypt, "encrypt should stay off for unknown sender");
+        assert!(!c.pgp.sign, "sign should stay off for unknown sender");
+    }
+
+    #[tokio::test]
+    async fn auto_encrypt_off_when_no_lookup() {
+        let c = Composer::new_reply_with_pgp_lookup(id(), REPLY_RAW, false, None)
+            .await
+            .unwrap();
+        assert!(!c.pgp.encrypt, "encrypt should stay off when no lookup");
+        assert!(!c.pgp.sign, "sign should stay off when no lookup");
     }
 }
