@@ -1158,12 +1158,13 @@ async fn cmd_draft_save(account: Option<String>) -> Result<()> {
         bail!("empty input on stdin");
     }
     let raw = normalize_crlf(raw);
-    let mut session = inbx_net::connect_imap(&acct).await?;
-    let folders = inbx_net::list_folders(&mut session).await?;
+    let store = inbx_store::Store::open(&acct.name).await?;
+    let mut provider = inbx_net::connect_provider(&acct, Some(&store)).await?;
+    let folders = provider.list_folders().await?;
     let drafts = inbx_net::find_drafts_folder(&folders)
         .with_context(|| "no Drafts folder discovered on server")?;
-    inbx_net::append_draft(&mut session, &drafts, &raw).await?;
-    let _ = session.logout().await;
+    provider.append_draft(&drafts, &raw).await?;
+    drop(provider);
     println!("saved to {drafts}");
     Ok(())
 }
@@ -1336,24 +1337,33 @@ async fn cmd_mark(
 ) -> Result<()> {
     let cfg = inbx_config::load()?;
     let acct = pick_account(&cfg, account.as_deref())?.clone();
-    let mut session = inbx_net::connect_imap(&acct).await?;
-    let (op, flags) = match verb.as_str() {
-        "read" => ("+FLAGS", "\\Seen"),
-        "unread" => ("-FLAGS", "\\Seen"),
-        "star" => ("+FLAGS", "\\Flagged"),
-        "unstar" => ("-FLAGS", "\\Flagged"),
-        "trash" => ("+FLAGS", "\\Deleted"),
+    let (add_flag, remove_flag): (&str, &str) = match verb.as_str() {
+        "read" => ("\\Seen", ""),
+        "unread" => ("", "\\Seen"),
+        "star" => ("\\Flagged", ""),
+        "unstar" => ("", "\\Flagged"),
+        "trash" => ("\\Deleted", ""),
         _ => unreachable!(),
     };
-    inbx_net::store_flags(&mut session, &folder, &uids, op, flags).await?;
-    let _ = session.logout().await;
-    let store = inbx_store::Store::open(&acct.name).await?;
-    let local_uids: Vec<i64> = uids.iter().map(|u| *u as i64).collect();
-    let (add, remove): (Vec<&str>, Vec<&str>) = if op == "+FLAGS" {
-        (vec![flags], vec![])
+    let add: Vec<&str> = if add_flag.is_empty() {
+        vec![]
     } else {
-        (vec![], vec![flags])
+        vec![add_flag]
     };
+    let remove: Vec<&str> = if remove_flag.is_empty() {
+        vec![]
+    } else {
+        vec![remove_flag]
+    };
+    let store = inbx_store::Store::open(&acct.name).await?;
+    let mut provider = inbx_net::connect_provider(&acct, Some(&store)).await?;
+    for &uid in &uids {
+        provider
+            .set_flags(&folder, uid as i64, &add, &remove)
+            .await?;
+    }
+    drop(provider);
+    let local_uids: Vec<i64> = uids.iter().map(|u| *u as i64).collect();
     store
         .mutate_flags(&folder, &local_uids, &add, &remove)
         .await?;
@@ -1382,18 +1392,28 @@ async fn cmd_move_or_copy(
 ) -> Result<()> {
     let cfg = inbx_config::load()?;
     let acct = pick_account(&cfg, account.as_deref())?.clone();
-    let mut session = inbx_net::connect_imap(&acct).await?;
     if copy {
+        // UID COPY has no cross-protocol equivalent on JMAP/Graph — bail unless IMAP.
+        if !matches!(acct.transport, inbx_config::Transport::Imap) {
+            bail!(
+                "inbx cp not yet supported on JMAP/Graph; use inbx mv or the provider-specific subcommand"
+            );
+        }
+        let mut session = inbx_net::connect_imap(&acct).await?;
         inbx_net::uid_copy(&mut session, &from, &uids, &to).await?;
+        let _ = session.logout().await;
         println!("copied {} message(s) {from} → {to}", uids.len());
     } else {
-        inbx_net::uid_move(&mut session, &from, &uids, &to).await?;
         let store = inbx_store::Store::open(&acct.name).await?;
+        let mut provider = inbx_net::connect_provider(&acct, Some(&store)).await?;
+        for &uid in &uids {
+            provider.move_message(&from, uid as i64, &to).await?;
+        }
+        drop(provider);
         let local: Vec<i64> = uids.iter().map(|u| *u as i64).collect();
         store.delete_messages(&from, &local).await?;
         println!("moved {} message(s) {from} → {to}", uids.len());
     }
-    let _ = session.logout().await;
     Ok(())
 }
 
@@ -1409,18 +1429,17 @@ async fn cmd_flag(
     }
     let cfg = inbx_config::load()?;
     let acct = pick_account(&cfg, account.as_deref())?.clone();
-    let mut session = inbx_net::connect_imap(&acct).await?;
-    if !add.is_empty() {
-        inbx_net::store_flags(&mut session, &folder, &uids, "+FLAGS", &add.join(" ")).await?;
-    }
-    if !del.is_empty() {
-        inbx_net::store_flags(&mut session, &folder, &uids, "-FLAGS", &del.join(" ")).await?;
-    }
-    let _ = session.logout().await;
-    let store = inbx_store::Store::open(&acct.name).await?;
-    let local: Vec<i64> = uids.iter().map(|u| *u as i64).collect();
     let add_refs: Vec<&str> = add.iter().map(|s| s.as_str()).collect();
     let del_refs: Vec<&str> = del.iter().map(|s| s.as_str()).collect();
+    let store = inbx_store::Store::open(&acct.name).await?;
+    let mut provider = inbx_net::connect_provider(&acct, Some(&store)).await?;
+    for &uid in &uids {
+        provider
+            .set_flags(&folder, uid as i64, &add_refs, &del_refs)
+            .await?;
+    }
+    drop(provider);
+    let local: Vec<i64> = uids.iter().map(|u| *u as i64).collect();
     store
         .mutate_flags(&folder, &local, &add_refs, &del_refs)
         .await?;

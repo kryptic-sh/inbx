@@ -42,6 +42,12 @@ patch bumps.
   `delta_messages` poll cycle (75 s sleep on no-change, immediate fetch on
   changes) via the new `graph_delta_tick` helper, matching `inbx-sync` and
   `tui::do_watch`. JMAP still forwards to `inbx jmap push`.
+- **`inbx draft save` / `mark` / `flag` / `mv` route through `MailProvider`.**
+  Four CLI ops ported from raw IMAP to `connect_provider` so JMAP and Graph
+  accounts work without erroring. `mark`'s verb → flag mapping was restructured
+  to produce `add`/`remove` slices directly. `inbx cp` keeps the raw IMAP
+  `UID COPY` path and bails on JMAP / Graph with a clear message —
+  `MailProvider` has no copy method (deferred).
 
 ## [0.2.0] - 2026-05-04
 
