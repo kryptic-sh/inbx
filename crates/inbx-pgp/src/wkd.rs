@@ -24,9 +24,33 @@ pub struct WkdKey {
 
 // ── URL derivation ─────────────────────────────────────────────────────────────
 
-/// Encode `bytes` using the z-base-32 alphabet (RFC 6189).
+/// z-base-32 alphabet (Zooko's human-oriented base-32, used by WKD).
+const ZBASE32_ALPHABET: &[u8; 32] = b"ybndrfg8ejkmcpqxot1uwisza345h769";
+
+/// Encode `bytes` using the z-base-32 alphabet, no padding.
+///
+/// Standard 5-bit MSB-first chunking. For a 20-byte SHA-1 (160 bits) the
+/// output is exactly 32 chars; for inputs whose bit length isn't a
+/// multiple of 5, the trailing chunk is left-zero-padded.
 fn zbase32_encode(bytes: &[u8]) -> String {
-    zbase32::encode_full_bytes(bytes)
+    let total_bits = bytes.len() * 8;
+    let mut out = String::with_capacity(total_bits.div_ceil(5));
+    let mut buf: u32 = 0;
+    let mut bits: u32 = 0;
+    for &b in bytes {
+        buf = (buf << 8) | b as u32;
+        bits += 8;
+        while bits >= 5 {
+            bits -= 5;
+            let idx = ((buf >> bits) & 0x1f) as usize;
+            out.push(ZBASE32_ALPHABET[idx] as char);
+        }
+    }
+    if bits > 0 {
+        let idx = ((buf << (5 - bits)) & 0x1f) as usize;
+        out.push(ZBASE32_ALPHABET[idx] as char);
+    }
+    out
 }
 
 /// Derive the WKD hash string for a local-part.

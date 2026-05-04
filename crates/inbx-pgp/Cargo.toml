@@ -23,7 +23,6 @@ rand = "0.8"
 smallvec = "1"
 base64.workspace = true
 sha1.workspace = true
-zbase32.workspace = true
 reqwest = { workspace = true }
 
 [dev-dependencies]

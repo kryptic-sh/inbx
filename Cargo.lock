@@ -3285,7 +3285,6 @@ dependencies = [
  "toml 0.8.23",
  "tracing",
  "which",
- "zbase32",
 ]
 
 [[package]]
@@ -8548,12 +8547,6 @@ dependencies = [
  "syn 2.0.117",
  "synstructure",
 ]
-
-[[package]]
-name = "zbase32"
-version = "0.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0f9079049688da5871a7558ddacb7f04958862c703e68258594cb7a862b5e33f"
 
 [[package]]
 name = "zbus"
