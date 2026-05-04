@@ -119,6 +119,10 @@ pub(super) struct App {
     /// Populated by `refresh_body`; cleared when the user responds or the
     /// message changes.
     pub(super) current_receipt: Option<inbx_render::ReadReceiptRequest>,
+    /// Cached `ContactsStore` opened lazily on first access (open is async +
+    /// hits the disk; reused across reply / contacts-pane / pubkey-lookup).
+    /// `Some(None)` after a failed open so we don't keep retrying.
+    contacts_store: Option<Option<Arc<ContactsStore>>>,
 }
 
 #[derive(Clone, Copy)]
@@ -303,6 +307,7 @@ impl App {
             active_wizard: None,
             active_sieve_wizard: None,
             busy: false,
+            contacts_store: None,
             receipt_responded: HashSet::new(),
             current_receipt: None,
         };
@@ -315,8 +320,26 @@ impl App {
         self.status = "compose: new draft".into();
     }
 
+    /// Lazily open + cache the per-account `ContactsStore`. Returns `None`
+    /// when the open fails (logged once).
+    pub(super) async fn contacts_store(&mut self) -> Option<Arc<ContactsStore>> {
+        if self.contacts_store.is_none() {
+            self.contacts_store = Some(
+                ContactsStore::open(&self.account.name)
+                    .await
+                    .map(Arc::new)
+                    .map_err(|e| tracing::warn!("contacts store open failed: {e}"))
+                    .ok(),
+            );
+        }
+        self.contacts_store.as_ref().and_then(|o| o.clone())
+    }
+
     pub(super) async fn open_contacts(&mut self) -> Result<()> {
-        let store = ContactsStore::open(&self.account.name).await?;
+        let store = self
+            .contacts_store()
+            .await
+            .ok_or_else(|| anyhow::anyhow!("contacts store unavailable"))?;
         let all = store.list(u32::MAX).await?;
         let n = all.len();
         self.contacts = Some(ContactsState::new(all));
@@ -363,8 +386,8 @@ impl App {
         let raw = std::fs::read(&path)?;
         // Use the async variant with PGP lookup when a contacts store is
         // available — enables Autocrypt 1.1 §4 mutual-mode auto-encrypt.
-        let contacts_store = ContactsStore::open(&self.account.name).await.ok();
-        let result = if let Some(ref store) = contacts_store {
+        let store = self.contacts_store().await;
+        let result = if let Some(store) = store.as_deref() {
             Composer::new_reply_with_pgp_lookup(
                 Identity::from_account(&self.account),
                 &raw,
