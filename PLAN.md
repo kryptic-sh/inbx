@@ -252,7 +252,8 @@ inbx/
   MDN (`multipart/report; report-type=disposition-notification`) via
   `inbx_net::build_mdn` only on explicit `Y` keystroke. Responded UIDs tracked
   in-memory per session (not persisted).
-- **Encryption at rest**: deferred. Threat model documented.
+- **Encryption at rest**: deferred. Threat model documented at
+  [`docs/threat-model.md`](docs/threat-model.md).
 - **Sandbox HTML**: GUI uses sanitized blob in webview; TUI text-only.
 
 ## Notifications & Integration
