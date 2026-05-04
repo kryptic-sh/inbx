@@ -8,6 +8,14 @@ patch bumps.
 
 ## [Unreleased]
 
+### Added
+
+- **AUR `inbx-bin` package + auto-publish.** Tag-driven release workflow now
+  renders `pkg/aur/PKGBUILD-bin.in` against the just-uploaded x86_64-linux-gnu
+  tarball checksum and pushes to the `inbx-bin` AUR repo over SSH. Mirrors the
+  hjkl pattern. Requires the org `AUR_SSH_KEY` secret to be granted to this
+  repo + the AUR repo itself bootstrapped before the first publish succeeds.
+
 ## [0.3.0] - 2026-05-04
 
 ### Added

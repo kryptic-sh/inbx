@@ -134,3 +134,108 @@ jobs:
           prerelease: ${{ contains(github.ref_name, '-') }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # AUR auto-publish for `inbx-bin`. Pulls the just-uploaded tarball
+  # checksums off the release, renders pkg/aur/PKGBUILD-bin.in,
+  # generates .SRCINFO, and pushes to the AUR repo over SSH. Lives in
+  # release.yml (not a separate workflow) because GITHUB_TOKEN-created
+  # releases don't fire downstream `on: release` triggers; running as a
+  # `needs: [build]` job sidesteps the cascade entirely.
+  #
+  # Required org/repo secret:
+  #   AUR_SSH_KEY  — ed25519 private key whose public half is registered
+  #                  on the AUR account that owns the `inbx-bin` package.
+  aur-bin:
+    name: Publish inbx-bin to AUR
+    needs: [build]
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    steps:
+      - name: Install build deps
+        run: |
+          set -euo pipefail
+          # base-devel pulls in makepkg + fakeroot. openssh + git for
+          # the AUR push. curl fetches the sha256 sidecars off the
+          # release without needing the GitHub CLI.
+          pacman -Sy --noconfirm --needed base-devel git openssh curl
+
+      - uses: actions/checkout@v6
+
+      - name: Resolve version
+        id: tag
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          VERSION="${TAG#v}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "release tag: $TAG (pkgver=$VERSION)"
+
+      - name: Fetch tarball sha256 sidecars
+        id: sha
+        run: |
+          set -euo pipefail
+          V="${{ steps.tag.outputs.version }}"
+          BASE="https://github.com/kryptic-sh/inbx/releases/download/v${V}"
+          # The build job uploaded the x86_64 archive before this job ran
+          # (we `needs: [build]`), so the sidecar is guaranteed to exist.
+          curl -fsSL "$BASE/inbx-v${V}-x86_64-unknown-linux-gnu.tar.gz.sha256" -o "sha.x86_64-unknown-linux-gnu"
+          # sidecar format: `<hash>  <filename>` — keep first column.
+          echo "x86_64=$(awk '{print $1}' sha.x86_64-unknown-linux-gnu)" >> "$GITHUB_OUTPUT"
+
+      - name: Render PKGBUILD
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          sed \
+            -e "s/{VERSION}/${{ steps.tag.outputs.version }}/g" \
+            -e "s/{SHA256_X86_64}/${{ steps.sha.outputs.x86_64 }}/g" \
+            pkg/aur/PKGBUILD-bin.in > out/PKGBUILD
+          echo "--- rendered PKGBUILD ---"
+          cat out/PKGBUILD
+
+      - name: Generate .SRCINFO
+        run: |
+          set -euo pipefail
+          # makepkg refuses to run as root. The archlinux:latest image's
+          # `nobody` user has an expired password (`su: User account has
+          # expired`), so we provision a fresh build user instead.
+          useradd -m builder
+          chown -R builder:builder out
+          # `su` parses options BEFORE the username; anything after gets
+          # passed to the shell. Put `-s` first so it's interpreted as
+          # the shell flag, not stdin-mode for bash.
+          su -s /bin/bash builder -c 'cd out && makepkg --printsrcinfo > .SRCINFO'
+          echo "--- .SRCINFO ---"
+          cat out/.SRCINFO
+
+      - name: Configure SSH for AUR
+        env:
+          AUR_SSH_KEY: ${{ secrets.AUR_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          install -dm700 ~/.ssh
+          printf '%s\n' "$AUR_SSH_KEY" > ~/.ssh/aur
+          chmod 600 ~/.ssh/aur
+
+      - name: Push to AUR
+        # `GIT_SSH_COMMAND` injects ssh options inline so we don't depend
+        # on `~/.ssh/config` parsing. `accept-new` writes the AUR host
+        # key to known_hosts on first connect; subsequent connects
+        # strict-verify.
+        env:
+          GIT_SSH_COMMAND: "ssh -i ~/.ssh/aur -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=~/.ssh/known_hosts"
+        run: |
+          set -euo pipefail
+          git config --global user.name  "inbx-ci"
+          git config --global user.email "ci@kryptic.sh"
+          git clone ssh://aur@aur.archlinux.org/inbx-bin.git aur-repo
+          cp out/PKGBUILD out/.SRCINFO aur-repo/
+          cp pkg/aur/LICENSE pkg/aur/.gitignore aur-repo/
+          cd aur-repo
+          git add PKGBUILD .SRCINFO LICENSE .gitignore
+          if git diff --cached --quiet; then
+            echo "no changes vs current AUR head; nothing to push"
+            exit 0
+          fi
+          git commit -m "inbx-bin ${{ steps.tag.outputs.version }}-1"
+          git push origin master
