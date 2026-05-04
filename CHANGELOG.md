@@ -8,6 +8,21 @@ patch bumps.
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-05-04
+
+### Fixed
+
+- **Keyring stored to mock in-memory backend on every platform.** Workspace
+  declared `keyring = "3"` with no features enabled — keyring v3 with no backend
+  selected falls back to a mock keystore that disappears on process exit.
+  `inbx accounts add` printed "password stored in keyring" and succeeded, but a
+  separate process (`inbx-sync`, next `inbx tui` invocation) found nothing and
+  errored `keyring: No matching entry found in secure storage`. Enables
+  `apple-native` (macOS Keychain), `windows-native` (Credential Manager),
+  `sync-secret-service` + `crypto-rust` (Linux Secret Service via D-Bus,
+  pure-Rust crypto). Existing accounts must re-run `inbx accounts add` after
+  upgrade to write a real keyring entry.
+
 ## [0.3.1] - 2026-05-04
 
 ### Added
@@ -429,7 +444,8 @@ patch bumps.
   Actions release-plz workflow (publish gated off until first dry-run pass
   clears).
 
-[Unreleased]: https://github.com/kryptic-sh/inbx/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/kryptic-sh/inbx/compare/v0.3.2...HEAD
+[0.3.2]: https://github.com/kryptic-sh/inbx/releases/tag/v0.3.2
 [0.3.1]: https://github.com/kryptic-sh/inbx/releases/tag/v0.3.1
 [0.3.0]: https://github.com/kryptic-sh/inbx/releases/tag/v0.3.0
 [0.2.0]: https://github.com/kryptic-sh/inbx/releases/tag/v0.2.0

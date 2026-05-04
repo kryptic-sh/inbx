@@ -16,7 +16,7 @@ members = [
 default-members = ["apps/inbx"]
 
 [workspace.package]
-version = "0.3.1"
+version = "0.3.2"
 edition = "2024"
 rust-version = "1.95"
 license = "MIT"
@@ -34,7 +34,12 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
 hjkl-config = "0.2"
-keyring = "3"
+keyring = { version = "3", features = [
+    "apple-native",
+    "windows-native",
+    "sync-secret-service",
+    "crypto-rust",
+] }
 clap = { version = "4", features = ["derive"] }
 clap_complete = "4"
 tokio = { version = "1", features = ["full"] }
@@ -78,14 +83,14 @@ rpassword = "7"
 gethostname = "0.5"
 notify-rust = "4"
 
-inbx-net = { version = "0.3.1", path = "crates/inbx-net" }
-inbx-store = { version = "0.3.1", path = "crates/inbx-store" }
-inbx-config = { version = "0.3.1", path = "crates/inbx-config" }
-inbx-pgp = { version = "0.3.1", path = "crates/inbx-pgp" }
-inbx-render = { version = "0.3.1", path = "crates/inbx-render" }
-inbx-contacts = { version = "0.3.1", path = "crates/inbx-contacts" }
-inbx-ical = { version = "0.3.1", path = "crates/inbx-ical" }
-inbx-composer = { version = "0.3.1", path = "crates/inbx-composer" }
+inbx-net = { version = "0.3.2", path = "crates/inbx-net" }
+inbx-store = { version = "0.3.2", path = "crates/inbx-store" }
+inbx-config = { version = "0.3.2", path = "crates/inbx-config" }
+inbx-pgp = { version = "0.3.2", path = "crates/inbx-pgp" }
+inbx-render = { version = "0.3.2", path = "crates/inbx-render" }
+inbx-contacts = { version = "0.3.2", path = "crates/inbx-contacts" }
+inbx-ical = { version = "0.3.2", path = "crates/inbx-ical" }
+inbx-composer = { version = "0.3.2", path = "crates/inbx-composer" }
 
 # PGP
 pgp = "0.19"
