@@ -3186,18 +3186,18 @@ async fn cmd_fetch_all(
     notify: bool,
 ) -> Result<()> {
     let cfg = inbx_config::load()?;
-    let acct_name = pick_account(&cfg, account.as_deref())?.name.clone();
-    let mut session =
-        inbx_net::connect_imap(cfg.accounts.iter().find(|a| a.name == acct_name).unwrap()).await?;
-    let folders = inbx_net::list_folders(&mut session).await?;
-    let _ = session.logout().await;
+    let acct = pick_account(&cfg, account.as_deref())?.clone();
+    let store = inbx_store::Store::open(&acct.name).await?;
+    let mut provider = inbx_net::connect_provider(&acct, Some(&store)).await?;
+    let folders = provider.list_folders().await?;
+    drop(provider);
     let mut total = 0usize;
     for f in folders {
         if !f.selectable {
             continue;
         }
         match cmd_fetch(
-            Some(acct_name.clone()),
+            Some(acct.name.clone()),
             f.name.clone(),
             since,
             bodies,
@@ -3227,34 +3227,12 @@ async fn cmd_fetch(
     let cfg = inbx_config::load()?;
     let acct = pick_account(&cfg, account.as_deref())?.clone();
 
-    // Transport dispatch — Graph and JMAP have their own fetch paths.
-    match &acct.transport {
-        inbx_config::Transport::Imap => {} // fall through
-        inbx_config::Transport::Graph => {
-            return cmd_graph(GraphCmd::Fetch {
-                account: Some(acct.name.clone()),
-                limit: 100,
-                bodies: fetch_bodies,
-            })
-            .await;
-        }
-        inbx_config::Transport::Jmap { session_url } => {
-            return cmd_jmap(JmapCmd::Fetch {
-                account: Some(acct.name.clone()),
-                session: session_url.clone(),
-                limit: 100,
-            })
-            .await;
-        }
-    }
-    let _ = (folder.as_str(), since, body_limit, notify); // silence unused-warn fallthrough on non-IMAP
-
-    tracing::info!(account = %acct.name, "connecting");
-    let mut session = inbx_net::connect_imap(&acct).await?;
+    tracing::info!(account = %acct.name, transport = ?acct.transport, "connecting");
     let store = inbx_store::Store::open(&acct.name).await?;
+    let mut provider = inbx_net::connect_provider(&acct, Some(&store)).await?;
 
     tracing::info!("listing folders");
-    let folders = inbx_net::list_folders(&mut session).await?;
+    let folders = provider.list_folders().await?;
     for f in &folders {
         store
             .upsert_folder(&inbx_store::FolderRow {
@@ -3275,21 +3253,37 @@ async fn cmd_fetch(
     println!("folders: {}", folders.len());
 
     tracing::info!(folder = %folder, since, "fetching headers");
-    let (uidvalidity, rows) = if since > 0 {
+    let (uidvalidity, rows) = if since > 0 && matches!(acct.transport, inbx_config::Transport::Imap)
+    {
+        // Date-filtered fast path — UID SEARCH SINCE <date> then fetch
+        // only those UIDs.  The MailProvider trait has no days-ago filter,
+        // so we drop to a raw IMAP session just for this step.
+        let mut session = inbx_net::connect_imap(&acct).await?;
         let uids = inbx_net::search_since(&mut session, &folder, since).await?;
-        inbx_net::fetch_headers_uids(&mut session, &folder, Some(&uids)).await?
+        let (uv, fetched) =
+            inbx_net::fetch_headers_uids(&mut session, &folder, Some(&uids)).await?;
+        let _ = session.logout().await;
+        (uv as i64, fetched)
     } else {
-        inbx_net::fetch_headers(&mut session, &folder).await?
+        if since > 0 {
+            tracing::warn!("--since ignored: not yet supported on JMAP / Graph");
+        }
+        let rows = provider.fetch_headers(&folder, None, body_limit).await?;
+        // Derive UIDVALIDITY from first row; JMAP/Graph rows carry uidvalidity=1.
+        let uv: i64 = rows.first().map(|r| r.uidvalidity as i64).unwrap_or(1);
+        (uv, rows)
     };
+
     let prev = store.folder_uidvalidity(&folder).await?;
     if let Some(prev) = prev
-        && prev as u32 != uidvalidity
+        && prev != uidvalidity
+        && uidvalidity != 0
     {
         tracing::warn!(prev, new = uidvalidity, %folder, "UIDVALIDITY changed; wiping");
         store.wipe_folder_messages(&folder).await?;
     }
     let pre_max = store
-        .folder_max_uid(&folder, uidvalidity as i64)
+        .folder_max_uid(&folder, uidvalidity)
         .await?
         .unwrap_or(0);
     store
@@ -3298,7 +3292,7 @@ async fn cmd_fetch(
             delim: None,
             special_use: None,
             attrs: None,
-            uidvalidity: Some(uidvalidity as i64),
+            uidvalidity: Some(uidvalidity),
             uidnext: None,
             delta_link: None,
         })
@@ -3357,21 +3351,15 @@ async fn cmd_fetch(
         let pending = store.list_unfetched(&folder, body_limit).await?;
         if !pending.is_empty() {
             tracing::info!(count = pending.len(), "fetching bodies");
-            let uids: Vec<u32> = pending.iter().map(|u| *u as u32).collect();
-            let bodies = inbx_net::fetch_bodies(&mut session, &folder, &uids).await?;
             // Open contacts store once for Autocrypt harvest (best-effort).
             let contacts = inbx_contacts::ContactsStore::open(&acct.name).await.ok();
-            for (uid, raw) in bodies {
+            for uid in pending {
+                let raw = provider.fetch_body(&folder, uid).await?;
                 let path = store.write_maildir(&folder, &raw, "\\Seen")?;
                 store
-                    .set_maildir_path(
-                        &folder,
-                        uid as i64,
-                        uidvalidity as i64,
-                        &path.to_string_lossy(),
-                    )
+                    .set_maildir_path(&folder, uid, uidvalidity, &path.to_string_lossy())
                     .await?;
-                index_message(&store, &folder, uid as i64, uidvalidity as i64, &raw).await?;
+                index_message(&store, &folder, uid, uidvalidity, &raw).await?;
                 // Harvest Autocrypt: header into contacts (best-effort).
                 if let Some(cs) = &contacts
                     && let Ok(rendered) = inbx_render::render_message_with_pgp(
@@ -3393,7 +3381,7 @@ async fn cmd_fetch(
         }
     }
 
-    let _ = session.logout().await;
+    drop(provider);
     Ok(())
 }
 

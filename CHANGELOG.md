@@ -48,6 +48,15 @@ patch bumps.
   to produce `add`/`remove` slices directly. `inbx cp` keeps the raw IMAP
   `UID COPY` path and bails on JMAP / Graph with a clear message —
   `MailProvider` has no copy method (deferred).
+- **`inbx fetch` / `inbx fetch --all` unified over `MailProvider`.** Drops the
+  special-case forwarding to `cmd_jmap(Fetch)` / `cmd_graph(Fetch)` — the same
+  `provider.list_folders` + `provider.fetch_headers` + `provider.fetch_body`
+  flow now drives all three transports. `--since N` (days-ago) keeps its IMAP
+  `UID SEARCH SINCE` fast path (`MailProvider` has no days-ago filter) and
+  warns + falls through on JMAP / Graph. Body fetch is now per-UID via
+  `provider.fetch_body` rather than IMAP's bulk `fetch_bodies` — slightly more
+  round-trips on IMAP, equivalent elsewhere; `MailProvider::fetch_bodies` is a
+  possible pass 2c.
 
 ## [0.2.0] - 2026-05-04
 
