@@ -222,15 +222,19 @@ inbx/
 - **DKIM/SPF/DMARC** verify, display result badge.
 - **Phishing heuristics** on display.
 - **No auto-execute** attachments. Sniff MIME, never trust extension.
-- **S/MIME** + **PGP** (sequoia-openpgp) for sign + encrypt. Two key sources,
-  account-configurable:
-  - **`gnupg`** — read keys from the system GPG keyring at `~/.gnupg/`. Default
-    for users who already manage keys via `gpg` and don't want a parallel store.
-    Sign/decrypt operations shell out to `gpg` (no private-key extraction).
-  - **`inbx-managed`** — keypair lives at `~/.local/share/inbx/<acct>/pgp/` with
-    the secret key passphrase in the OS keyring. For users who want a
-    per-account email key separate from their identity-grade GPG key, or who are
-    GPG-free.
+- **S/MIME** + **PGP** for sign + encrypt. Crate: **`pgp`** (rpgp, pure Rust,
+  RFC 9580, MIT/Apache-2.0) — covers v4+v6 keys, sign/verify/encrypt/decrypt,
+  key gen, ASCII armor, passphrase-protected secrets, Autocrypt 1.1.
+  Production-tested by himalaya + Delta Chat. No `sequoia-openpgp` (heavy C deps
+  via nettle/openssl). Two key sources, account-configurable:
+  - **`gnupg`** — keys live in the system GPG keyring at `~/.gnupg/`. Default
+    for users who already manage keys via `gpg`. inbx shells out to
+    `gpg --export`, `gpg --decrypt`, `gpg --sign` — preserves gpg-agent,
+    pinentry, smartcard / OpenPGP card support; no private-key extraction.
+  - **`inbx-managed`** — keypair lives at `~/.local/share/inbx/<acct>/pgp/`
+    (armored), passphrase in the OS keyring. Crypto runs through `pgp` directly.
+    For users who want a per-account email key separate from their
+    identity-grade GPG key, or who are GPG-free.
 
   Per-account TOML field `pgp.key_source = "gnupg" | "inbx-managed"` with
   `key_id` / `key_fingerprint` to pick the specific key when the source has
