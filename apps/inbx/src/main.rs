@@ -1612,7 +1612,10 @@ async fn cmd_import(
         mbox::split_mbox(&buf)
     };
 
-    let mut next_uid = 1i64;
+    // Start UIDs after the highest existing one in this folder so re-imports
+    // don't collide with prior rows. uidvalidity = 0 for locally-imported
+    // folders (matches the upsert_folder call above).
+    let mut next_uid = store.folder_max_uid(&folder, 0).await?.unwrap_or(0) + 1;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
