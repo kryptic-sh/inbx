@@ -85,13 +85,13 @@ jobs:
 
       - name: Build binaries (zigbuild)
         if: matrix.glibc != ''
-        run: cargo zigbuild --release --locked --target ${{ matrix.target }}.${{ matrix.glibc }} --bin inbx --bin inbx-sync
+        run: cargo zigbuild --release --locked --target ${{ matrix.target }}.${{ matrix.glibc }} -p inbx -p inbx-sync --bin inbx --bin inbx-sync
 
       - name: Build binaries
         if: matrix.glibc == ''
         env:
           MACOSX_DEPLOYMENT_TARGET: ${{ matrix.macos_min }}
-        run: cargo build --release --locked --target ${{ matrix.target }} --bin inbx --bin inbx-sync
+        run: cargo build --release --locked --target ${{ matrix.target }} -p inbx -p inbx-sync --bin inbx --bin inbx-sync
 
       - name: Package (Linux / macOS)
         if: matrix.archive == 'tar.gz'
