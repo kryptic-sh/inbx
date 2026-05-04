@@ -1,0 +1,28 @@
+[package]
+name = "inbx-pgp"
+description = "inbx PGP/OpenPGP support: gnupg shell-out + pure-Rust rpgp backend"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[dependencies]
+serde.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tokio.workspace = true
+keyring.workspace = true
+async-trait.workspace = true
+pgp.workspace = true
+which.workspace = true
+tempfile.workspace = true
+rand = "0.8"
+smallvec = "1"
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["rt", "macros"] }
+toml.workspace = true

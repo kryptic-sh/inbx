@@ -157,6 +157,7 @@ impl AccountWizard {
             username,
             auth: AuthMethod::AppPassword,
             transport: Transport::Imap,
+            pgp: None,
         };
 
         Ok((account, password))

@@ -5,6 +5,8 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+pub use inbx_pgp::config::PgpConfig;
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("xdg dirs unavailable: {0}")]
@@ -105,6 +107,8 @@ pub struct Account {
     pub auth: AuthMethod,
     #[serde(default)]
     pub transport: Transport,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pgp: Option<PgpConfig>,
 }
 
 fn default_imap_port() -> u16 {
@@ -204,6 +208,7 @@ mod tests {
                 username: "me".into(),
                 auth: AuthMethod::AppPassword,
                 transport: Transport::Imap,
+                pgp: None,
             }],
         };
         let raw = toml::to_string_pretty(&cfg).unwrap();

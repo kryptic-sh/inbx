@@ -2552,6 +2552,7 @@ fn cmd_accounts_add(oauth: Option<String>) -> Result<()> {
         username,
         auth,
         transport: inbx_config::Transport::Imap,
+        pgp: None,
     });
     inbx_config::save(&cfg)?;
     if oauth.is_some() {

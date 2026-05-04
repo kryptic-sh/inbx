@@ -4,6 +4,7 @@ members = [
     "crates/inbx-net",
     "crates/inbx-store",
     "crates/inbx-config",
+    "crates/inbx-pgp",
     "crates/inbx-render",
     "crates/inbx-contacts",
     "crates/inbx-ical",
@@ -80,10 +81,17 @@ notify-rust = "4"
 inbx-net = { path = "crates/inbx-net" }
 inbx-store = { path = "crates/inbx-store" }
 inbx-config = { path = "crates/inbx-config" }
+inbx-pgp = { path = "crates/inbx-pgp" }
 inbx-render = { path = "crates/inbx-render" }
 inbx-contacts = { path = "crates/inbx-contacts" }
 inbx-ical = { path = "crates/inbx-ical" }
 inbx-composer = { path = "crates/inbx-composer" }
+
+# PGP
+pgp = "0.19"
+async-trait = "0.1"
+tempfile = "3"
+which = "8"
 
 # hjkl deps use caret-minor pins; consumers track minor bumps from crates.io.
 hjkl-editor = "0.3"
