@@ -12,7 +12,8 @@ Sibling to [sqeel](https://github.com/kryptic-sh/sqeel),
 
 ## Status
 
-Working CLI + TUI + GUI. Real-account dogfood pending.
+Working CLI + TUI. Real-account dogfood pending. (Native GUI deferred —
+will join the unified kryptic-sh GUI shell once `hjkl-editor-gui` lands.)
 
 ## Providers
 
@@ -37,14 +38,13 @@ crates/
   inbx-composer   hjkl-editor wrapper, MIME builder, templates
 apps/
   inbx            CLI + TUI binary (ratatui)
-  inbx-gui        GUI binary (egui)
+  inbx-sync       background sync daemon
 ```
 
 ## Highlights
 
 - **TUI** with vim navigation (j/k, h/l, gg/G, Tab) and a modal composer overlay
   (`c`/`r`/`R`/`f`, Ctrl-S send, Ctrl-D save draft)
-- **GUI** (eframe + egui) — read-only three-pane: folders / messages / preview
 - **Auth** — app password via OS keyring, OAuth2 (Gmail + Microsoft) with PKCE +
   auth-code loopback flow, refresh tokens stored in the keyring
 - **Render** — HTML sanitized via ammonia, remote content blocked by default,
@@ -103,7 +103,6 @@ inbx jmap folders|fetch|send         # Fastmail / Stalwart
 inbx sieve list|get|put|activate|delete|vacation
 
 inbx tui                              # ratatui TUI
-inbx-gui                              # egui GUI
 inbx completion fish > ~/.config/fish/completions/inbx.fish
 ```
 

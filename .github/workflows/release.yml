@@ -28,28 +28,24 @@ jobs:
             macos_min: ""
             suffix: ""
             archive: tar.gz
-            gui: true
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             glibc: ""
             macos_min: ""
             suffix: ".exe"
             archive: zip
-            gui: false
           - os: macos-latest
             target: aarch64-apple-darwin
             glibc: ""
             macos_min: "11.0"
             suffix: ""
             archive: tar.gz
-            gui: true
           - os: macos-latest
             target: x86_64-apple-darwin
             glibc: ""
             macos_min: "10.15"
             suffix: ""
             archive: tar.gz
-            gui: true
 
     steps:
       - uses: actions/checkout@v6
@@ -87,18 +83,12 @@ jobs:
         with:
           tool: cargo-zigbuild
 
-      - name: Build binaries with GUI (zigbuild)
-        if: matrix.glibc != '' && matrix.gui
-        run: cargo zigbuild --release --locked --target ${{ matrix.target }}.${{ matrix.glibc }} --bin inbx --bin inbx-gui --bin inbx-sync
+      - name: Build binaries (zigbuild)
+        if: matrix.glibc != ''
+        run: cargo zigbuild --release --locked --target ${{ matrix.target }}.${{ matrix.glibc }} --bin inbx --bin inbx-sync
 
-      - name: Build binaries with GUI
-        if: matrix.glibc == '' && matrix.gui
-        env:
-          MACOSX_DEPLOYMENT_TARGET: ${{ matrix.macos_min }}
-        run: cargo build --release --locked --target ${{ matrix.target }} --bin inbx --bin inbx-gui --bin inbx-sync
-
-      - name: Build binaries (no GUI)
-        if: matrix.glibc == '' && !matrix.gui
+      - name: Build binaries
+        if: matrix.glibc == ''
         env:
           MACOSX_DEPLOYMENT_TARGET: ${{ matrix.macos_min }}
         run: cargo build --release --locked --target ${{ matrix.target }} --bin inbx --bin inbx-sync
@@ -111,9 +101,6 @@ jobs:
           mkdir -p dist
           cp target/${{ matrix.target }}/release/inbx${{ matrix.suffix }} dist/
           cp target/${{ matrix.target }}/release/inbx-sync${{ matrix.suffix }} dist/
-          if [ "${{ matrix.gui }}" = "true" ]; then
-            cp target/${{ matrix.target }}/release/inbx-gui${{ matrix.suffix }} dist/
-          fi
           cp README.md LICENSE dist/
           tar -czf "$ARCHIVE" -C dist .
           if command -v sha256sum >/dev/null 2>&1; then
@@ -131,9 +118,6 @@ jobs:
           New-Item -ItemType Directory -Force dist
           Copy-Item "target/${{ matrix.target }}/release/inbx${{ matrix.suffix }}" dist/
           Copy-Item "target/${{ matrix.target }}/release/inbx-sync${{ matrix.suffix }}" dist/
-          if ("${{ matrix.gui }}" -eq "true") {
-            Copy-Item "target/${{ matrix.target }}/release/inbx-gui${{ matrix.suffix }}" dist/
-          }
           Copy-Item README.md, LICENSE dist/
           Compress-Archive -Path dist/* -DestinationPath $ARCHIVE
           $hash = (Get-FileHash -Algorithm SHA256 $ARCHIVE).Hash.ToLower()

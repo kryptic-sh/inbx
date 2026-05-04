@@ -60,7 +60,6 @@ inbx/
 │   └── inbx-composer/         # hjkl-editor wrapper, MIME builder, drafts
 ├── apps/
 │   ├── inbx/                  # TUI binary (ratatui)
-│   ├── inbx-gui/              # GUI binary (egui + eframe)
 │   └── inbx-sync/             # background sync daemon (optional)
 ├── xtask/                     # release / asset / dev tasks
 ├── README.md
@@ -158,7 +157,8 @@ inbx/
 
 ### inbx-render
 
-- HTML → terminal text via `html2text` (TUI) or sanitized HTML for GUI.
+- HTML → terminal text via `html2text` (TUI). Sanitized-HTML branch for the
+  future GUI shell stays available behind a feature flag.
 - Sanitize via `ammonia` allow-list. Strip `<script>`, event handlers,
   `<meta http-equiv>`, external CSS.
 - **Remote content blocked by default.** Per-sender allow-list. Tracking-pixel
@@ -206,11 +206,12 @@ inbx/
 - Markdown render: `pulldown-cmark` for plaintext alt; HTML → text via
   `html2text`.
 
-### apps/inbx-gui (GUI)
+### GUI (deferred)
 
-- `egui` 0.31 + `eframe` 0.31 (match sqeel-gui).
-- Same three-pane plus native file picker for attachments.
-- Optional later milestone — TUI first.
+GUI front-end was removed from this workspace. A unified GUI shell will
+ship across kryptic-sh apps (sqeel, inbx, etc.) once the shared
+`hjkl-editor-gui` adapter (hjkl#8) lands. inbx will plug into that
+shell rather than maintaining its own egui glue.
 
 ### apps/inbx-sync (daemon)
 
@@ -363,7 +364,7 @@ inbx/
 | M17 | Sieve (server-side filters) + vacation responder                                              | net                   |
 | M18 | Notifications (`notify-rust`)                                                                 | app/inbx              |
 | M19 | Import/export (mbox, .eml)                                                                    | store, app/inbx       |
-| M20 | GUI MVP                                                                                       | app/inbx-gui          |
+| ~~M20~~ | ~~GUI MVP~~ — deferred; will join the unified kryptic-sh GUI shell once `hjkl-editor-gui` (hjkl#8) lands | —                     |
 | M21 | JMAP. Client-side rules.                                                                      | net, core             |
 | M22 | PGP + S/MIME (sign + encrypt; dual key source: gnupg keyring or inbx-managed)                 | net, composer, render |
 | M23 | CardDAV contacts sync                                                                         | contacts, net         |

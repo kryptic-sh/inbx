@@ -23,8 +23,7 @@ cargo test --workspace
 - `crates/inbx-contacts` — address book
 - `crates/inbx-config` — config loading (no auto-write defaults)
 - `crates/inbx-ical` — calendar attachment handling
-- `apps/inbx` — TUI binary
-- `apps/inbx-gui` — GUI binary
+- `apps/inbx` — CLI + TUI binary
 - `apps/inbx-sync` — background sync daemon
 
 ## MSRV policy
