@@ -259,36 +259,71 @@ impl<'a> Threader<'a> {
     }
 }
 
-/// Strip Re:/Fwd:/Re[2]: variants and leading/trailing whitespace; lowercase.
-/// Used by Subject grouping.
+/// Strip Re:/Fwd:/Re[2]: variants and leading mailing-list `[tag]` brackets;
+/// lowercase.  Used by Subject grouping (JWZ §2 normalisation).
+///
+/// Stripping alternates between bracket-tags and reply prefixes in a loop so
+/// that `Re: [list] Re: hello` collapses all the way to `hello`.  Only
+/// *leading* `[tag]` groups are stripped; mid-string brackets like
+/// `Build [#1234] failed` are left intact.
 pub fn normalize_subject(s: &str) -> String {
     let mut result = s.trim();
     loop {
+        let mut stripped = false;
+
+        // Strip leading [tag] brackets (with optional surrounding whitespace).
+        // Only strip when the bracket group is at the start of the remaining string.
+        while result.starts_with('[') {
+            if let Some(close) = result.find(']') {
+                result = result[close + 1..].trim();
+                stripped = true;
+            } else {
+                break;
+            }
+        }
+
+        // Strip leading Re:/Fwd:/Fw:/Re[N]: prefixes.
         let lower = result.to_ascii_lowercase();
         if lower.starts_with("re:") {
             result = result[3..].trim();
+            stripped = true;
         } else if lower.starts_with("fwd:") {
             result = result[4..].trim();
+            stripped = true;
         } else if lower.starts_with("fw:") {
             result = result[3..].trim();
+            stripped = true;
         } else if lower.starts_with("re[") {
             // Handle Re[N]: patterns
             if let Some(bracket_end) = lower.find("]:") {
                 let skip = bracket_end + 2;
                 result = result[skip..].trim();
-            } else {
-                break;
+                stripped = true;
             }
-        } else {
+        }
+
+        if !stripped {
             break;
         }
     }
     result.to_ascii_lowercase()
 }
 
-/// Returns true if the subject line starts with a Re: or Fwd: prefix.
+/// Returns true if the subject line starts with a Re:/Fwd: prefix, optionally
+/// preceded by mailing-list bracket tags like `[list-foo]`.
 fn is_reply_or_fwd(s: &str) -> bool {
-    let lower = s.trim().to_ascii_lowercase();
+    // Strip any leading [tag] prefixes first, then check for reply indicators.
+    let mut rest = s.trim();
+    loop {
+        if rest.starts_with('[')
+            && let Some(close) = rest.find(']')
+        {
+            rest = rest[close + 1..].trim();
+            continue;
+        }
+        break;
+    }
+    let lower = rest.to_ascii_lowercase();
     lower.starts_with("re:")
         || lower.starts_with("fwd:")
         || lower.starts_with("fw:")

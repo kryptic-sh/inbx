@@ -258,3 +258,29 @@ fn subject_normalize() {
     assert_eq!(normalize_subject("Hello"), "hello");
     assert_eq!(normalize_subject("  Re: Hello  "), "hello");
 }
+
+// -----------------------------------------------------------------------
+// subject_normalize_mailing_list_brackets
+// -----------------------------------------------------------------------
+#[test]
+fn subject_normalize_mailing_list_brackets() {
+    use inbx_store::normalize_subject;
+
+    // Single bracket tag before Re:
+    assert_eq!(normalize_subject("[list] Re: foo"), "foo");
+    // Re: before bracket tag
+    assert_eq!(normalize_subject("Re: [list] foo"), "foo");
+    // Two bracket tags then Re:
+    assert_eq!(normalize_subject("[list-a] [list-b] Re: foo"), "foo");
+    // Bracket tag only
+    assert_eq!(normalize_subject("[django-users] hello"), "hello");
+    // Interleaved: Re: [list] Re: [list2] foo
+    assert_eq!(normalize_subject("Re: [list] Re: [list2] foo"), "foo");
+    // Mid-string bracket must NOT be stripped
+    assert_eq!(
+        normalize_subject("Build [#1234] failed"),
+        "build [#1234] failed"
+    );
+    // Mailing list with rust-internals style name
+    assert_eq!(normalize_subject("[rust-internals] Re: foo"), "foo");
+}

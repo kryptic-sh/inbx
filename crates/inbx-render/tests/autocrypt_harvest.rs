@@ -18,7 +18,7 @@ async fn render_surfaces_autocrypt_header() {
     let armored = src.export_public(&key_id).await.unwrap();
 
     // Build the Autocrypt header value.
-    let ac_value = autocrypt_header_value("alice@example.com", &armored.0).unwrap();
+    let ac_value = autocrypt_header_value("alice@example.com", &armored.0, false).unwrap();
 
     // Assemble a minimal RFC 5322 message with the Autocrypt header.
     // We embed the (possibly folded) value; use OuterHeaders to get a real message.

@@ -205,6 +205,16 @@ fn write_outer_headers(buf: &mut Vec<u8>, h: &OuterHeaders) {
     }
 }
 
+/// The `prefer-encrypt` attribute from an Autocrypt 1.1 header (§4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AutocryptPreference {
+    /// Attribute absent, or set to `nopreference` — default per spec.
+    #[default]
+    Nopreference,
+    /// Sender advertises `prefer-encrypt=mutual`.
+    Mutual,
+}
+
 /// Parsed representation of an `Autocrypt:` header.
 #[derive(Debug, Clone)]
 pub struct AutocryptHeader {
@@ -214,6 +224,8 @@ pub struct AutocryptHeader {
     pub keydata_armored: String,
     /// Lowercase hex fingerprint of the primary key.
     pub fingerprint: String,
+    /// Autocrypt 1.1 §4 preference; `Nopreference` when the attribute is absent.
+    pub prefer_encrypt: AutocryptPreference,
 }
 
 /// Parse an `Autocrypt:` header value (everything AFTER `"Autocrypt: "`).
@@ -262,6 +274,7 @@ pub fn parse_autocrypt_header(value: &str) -> Result<AutocryptHeader> {
 
     let mut addr: Option<String> = None;
     let mut keydata_b64: Option<String> = None;
+    let mut prefer_encrypt = AutocryptPreference::Nopreference;
 
     for part in unfolded.split(';') {
         let part = part.trim();
@@ -278,7 +291,10 @@ pub fn parse_autocrypt_header(value: &str) -> Result<AutocryptHeader> {
                     let clean: String = val.chars().filter(|c| !c.is_ascii_whitespace()).collect();
                     keydata_b64 = Some(clean);
                 }
-                _ => {} // ignore unknown attrs (prefer-encrypt, etc.)
+                "prefer-encrypt" if val.eq_ignore_ascii_case("mutual") => {
+                    prefer_encrypt = AutocryptPreference::Mutual;
+                }
+                _ => {} // ignore other unknown attrs
             }
         }
     }
@@ -309,6 +325,7 @@ pub fn parse_autocrypt_header(value: &str) -> Result<AutocryptHeader> {
         addr,
         keydata_armored,
         fingerprint,
+        prefer_encrypt,
     })
 }
 
@@ -318,11 +335,17 @@ pub fn parse_autocrypt_header(value: &str) -> Result<AutocryptHeader> {
 /// The `keydata` segment is folded at 78 cols (per RFC 5322 §2.2.3) by
 /// inserting `"\r\n "` after every 76 base64 chars.
 ///
+/// When `prefer_encrypt_mutual` is `true`, the header includes
+/// `; prefer-encrypt=mutual` per Autocrypt 1.1 §4.
+///
 /// # Note
-/// `prefer-encrypt=mutual` is optional in Autocrypt 1.1; this implementation
-/// omits it. The gnupg key-source path is not supported here — see the
+/// The gnupg key-source path is not supported here — see the
 /// `// TODO: gnupg-source autocrypt` comment in `inbx-composer`.
-pub fn autocrypt_header_value(addr: &str, armored_pubkey: &str) -> Result<String> {
+pub fn autocrypt_header_value(
+    addr: &str,
+    armored_pubkey: &str,
+    prefer_encrypt_mutual: bool,
+) -> Result<String> {
     use base64::{Engine, engine::general_purpose::STANDARD};
     use pgp::composed::Deserializable;
     use std::io::BufReader;
@@ -352,7 +375,12 @@ pub fn autocrypt_header_value(addr: &str, armored_pubkey: &str) -> Result<String
         .collect::<Vec<_>>()
         .join("\r\n ");
 
-    Ok(format!("addr={addr}; keydata=\r\n {folded_keydata}"))
+    let pe = if prefer_encrypt_mutual {
+        "; prefer-encrypt=mutual"
+    } else {
+        ""
+    };
+    Ok(format!("addr={addr}{pe}; keydata=\r\n {folded_keydata}"))
 }
 
 /// Base64-encode binary data with 76-char line wrapping (RFC 2045 MIME style).
@@ -390,7 +418,7 @@ mod tests {
         let src = crate::inbx_managed::InbxManagedSource::new(tmp.path().to_path_buf());
         let armored = src.export_public(&key_id).await.unwrap();
 
-        let value = autocrypt_header_value("bob@example.com", &armored.0).unwrap();
+        let value = autocrypt_header_value("bob@example.com", &armored.0, false).unwrap();
 
         // Extract the keydata= portion (after "keydata="), strip fold whitespace.
         let keydata_raw = value.split("keydata=").nth(1).expect("keydata= present");
@@ -415,7 +443,7 @@ mod tests {
         let src = crate::inbx_managed::InbxManagedSource::new(tmp.path().to_path_buf());
         let armored = src.export_public(&key_id).await.unwrap();
 
-        let value = autocrypt_header_value("carol@example.com", &armored.0).unwrap();
+        let value = autocrypt_header_value("carol@example.com", &armored.0, false).unwrap();
 
         for line in value.split("\r\n") {
             assert!(
@@ -438,7 +466,7 @@ mod tests {
         let src = crate::inbx_managed::InbxManagedSource::new(tmp.path().to_path_buf());
         let armored = src.export_public(&key_id).await.unwrap();
 
-        let header_value = autocrypt_header_value("dave@example.com", &armored.0).unwrap();
+        let header_value = autocrypt_header_value("dave@example.com", &armored.0, false).unwrap();
         let parsed = parse_autocrypt_header(&header_value).unwrap();
 
         assert_eq!(parsed.addr, "dave@example.com");
@@ -461,7 +489,7 @@ mod tests {
         let armored = src.export_public(&key_id).await.unwrap();
 
         // Build unfolded value, then manually re-fold at 76 chars with CRLF + space.
-        let value = autocrypt_header_value("eve@example.com", &armored.0).unwrap();
+        let value = autocrypt_header_value("eve@example.com", &armored.0, false).unwrap();
         // Replace existing folds with a different fold length to test robustness.
         let unfolded: String = value.replace("\r\n ", "");
         let refolded = unfolded
@@ -488,5 +516,72 @@ mod tests {
             "expected error when addr= is missing, got: {:?}",
             result
         );
+    }
+
+    /// Parsing `prefer-encrypt=mutual` yields `AutocryptPreference::Mutual`.
+    #[tokio::test]
+    async fn parse_prefer_encrypt_mutual() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (key_id, _) = keygen(tmp.path(), "Frank", "frank@example.com", "")
+            .await
+            .unwrap();
+        let src = crate::inbx_managed::InbxManagedSource::new(tmp.path().to_path_buf());
+        let armored = src.export_public(&key_id).await.unwrap();
+
+        // Build header with prefer-encrypt=mutual.
+        let value = autocrypt_header_value("frank@example.com", &armored.0, true).unwrap();
+        assert!(
+            value.contains("prefer-encrypt=mutual"),
+            "emitted header should contain prefer-encrypt=mutual: {value}"
+        );
+        let parsed = parse_autocrypt_header(&value).unwrap();
+        assert_eq!(
+            parsed.prefer_encrypt,
+            AutocryptPreference::Mutual,
+            "parsed prefer_encrypt should be Mutual"
+        );
+    }
+
+    /// Parsing a header without `prefer-encrypt` yields `AutocryptPreference::Nopreference`.
+    #[tokio::test]
+    async fn parse_prefer_encrypt_absent_is_nopreference() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (key_id, _) = keygen(tmp.path(), "Grace", "grace@example.com", "")
+            .await
+            .unwrap();
+        let src = crate::inbx_managed::InbxManagedSource::new(tmp.path().to_path_buf());
+        let armored = src.export_public(&key_id).await.unwrap();
+
+        // Build header without prefer-encrypt.
+        let value = autocrypt_header_value("grace@example.com", &armored.0, false).unwrap();
+        assert!(
+            !value.contains("prefer-encrypt"),
+            "header should not contain prefer-encrypt when disabled"
+        );
+        let parsed = parse_autocrypt_header(&value).unwrap();
+        assert_eq!(
+            parsed.prefer_encrypt,
+            AutocryptPreference::Nopreference,
+            "parsed prefer_encrypt should be Nopreference when attribute absent"
+        );
+    }
+
+    /// Round-trip: emit with mutual, parse back, verify the value is preserved.
+    #[tokio::test]
+    async fn prefer_encrypt_mutual_round_trip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (key_id, _) = keygen(tmp.path(), "Heidi", "heidi@example.com", "")
+            .await
+            .unwrap();
+        let src = crate::inbx_managed::InbxManagedSource::new(tmp.path().to_path_buf());
+        let armored = src.export_public(&key_id).await.unwrap();
+
+        let value = autocrypt_header_value("heidi@example.com", &armored.0, true).unwrap();
+        let parsed = parse_autocrypt_header(&value).unwrap();
+
+        // fingerprint matches
+        assert_eq!(parsed.fingerprint, key_id.0.to_lowercase());
+        // preference preserved
+        assert_eq!(parsed.prefer_encrypt, AutocryptPreference::Mutual);
     }
 }

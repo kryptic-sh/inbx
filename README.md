@@ -12,8 +12,7 @@ Sibling to [sqeel](https://github.com/kryptic-sh/sqeel),
 
 ## Status
 
-Working CLI + TUI. Real-account dogfood pending. (Native GUI deferred —
-will join the unified kryptic-sh GUI shell once `hjkl-editor-gui` lands.)
+Working CLI + TUI. Real-account dogfood pending.
 
 ## Providers
 
@@ -50,12 +49,17 @@ apps/
 - **Render** — HTML sanitized via ammonia, remote content blocked by default,
   tracker pixels surfaced, SPF/DKIM/DMARC + phishing heuristics, PGP / S/MIME
   presence detection
-- **Search + threading** — SQLite FTS5 over subject / from / to / body,
-  In-Reply-To walk for thread grouping
+- **PGP** — sign/encrypt via rpgp; gnupg keyring or inbx-managed key source; WKD
+  public key lookup; Autocrypt 1.1 header harvest; `prefer-encrypt=mutual`
+  auto-encrypt on replies
+- **Read receipts** — RFC 8098 MDN (Message Disposition Notification) support
+- **Search + threading** — SQLite FTS5 over subject / from / to / body, JWZ §2
+  threading with mailing-list bracket-tag stripping
+- **Import/export** — mbox and single `.eml` with flag round-trip
 - **Sync** — IMAP IDLE watch loop, offline outbox queue with exponential
   backoff, Microsoft Graph delta sync
 - **Server-side filters** — ManageSieve client (RFC 5804) + vacation responder
-  generator
+  wizard
 - **Calendar** — `.ics` invite parsing + METHOD:REPLY for accept/decline
 - **Mailbox ops** — UID STORE flags (`mark read/unread/star/trash`), UID
   MOVE/COPY (RFC 6851), EXPUNGE, mailbox CRUD, SUBSCRIBE
@@ -96,11 +100,15 @@ inbx contacts list|search|add|harvest|card-dav --url ...
 inbx ical show|reply
 inbx unsubscribe <uid>
 inbx outbox list|drain|remove
+inbx export [--format mbox|eml] [--uid ...]
+inbx import --folder NAME [path.mbox | path.eml]
 
 inbx oauth login|set-client|logout
-inbx graph folders|fetch|send       # Microsoft 365
-inbx jmap folders|fetch|send         # Fastmail / Stalwart
+inbx graph folders|fetch|send       # Microsoft 365 (also via default [transport])
+inbx jmap folders|fetch|send|watch|push  # Fastmail / Stalwart (also via default [transport])
 inbx sieve list|get|put|activate|delete|vacation
+
+inbx pgp keygen|list|export|sign|verify|encrypt|decrypt|lookup-wkd
 
 inbx tui                              # ratatui TUI
 inbx completion fish > ~/.config/fish/completions/inbx.fish
@@ -110,7 +118,7 @@ inbx completion fish > ~/.config/fish/completions/inbx.fish
 
 ```
 cargo build --workspace
-cargo test --workspace
+cargo test --workspace --all-features
 ```
 
 ## Theme
@@ -122,9 +130,7 @@ built-in dark palette.
 ## hjkl tracking
 
 The composer is built on [hjkl-editor](https://github.com/kryptic-sh/hjkl)
-`runtime::*`. A Claude routine polls hourly for new hjkl releases and opens an
-integration PR on this repo when one lands; if 0.1.0 ships its `spec::*` trait
-surface, the routine performs the migration in the PR.
+`runtime::*`.
 
 See [PLAN.md](PLAN.md) for full design.
 

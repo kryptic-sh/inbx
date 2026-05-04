@@ -2540,6 +2540,7 @@ async fn cmd_pgp_keygen(
             key_source: inbx_pgp::KeySourceKind::InbxManaged,
             key_fingerprint: None,
             managed_dir: None,
+            prefer_encrypt_mutual: true,
         });
         inbx_config::save(&cfg)?;
         let cfg_path = inbx_config::config_path()?;

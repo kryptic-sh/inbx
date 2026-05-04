@@ -12,7 +12,7 @@ pub enum KeySourceKind {
 }
 
 /// Per-account PGP configuration.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PgpConfig {
     /// Which backend to use for this account.
     #[serde(default)]
@@ -27,6 +27,27 @@ pub struct PgpConfig {
     /// When `None`, defaults to `~/.local/share/inbx/<account>/pgp/`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub managed_dir: Option<std::path::PathBuf>,
+
+    /// Emit `prefer-encrypt=mutual` in outbound Autocrypt headers per
+    /// Autocrypt 1.1 §4.  When both peers advertise `mutual`, the composer
+    /// auto-enables encryption on replies.  Defaults to `true`.
+    #[serde(default = "default_prefer_encrypt_mutual")]
+    pub prefer_encrypt_mutual: bool,
+}
+
+fn default_prefer_encrypt_mutual() -> bool {
+    true
+}
+
+impl Default for PgpConfig {
+    fn default() -> Self {
+        Self {
+            key_source: KeySourceKind::default(),
+            key_fingerprint: None,
+            managed_dir: None,
+            prefer_encrypt_mutual: true,
+        }
+    }
 }
 
 /// Detect a sensible default key source for first-time setup.

@@ -103,7 +103,7 @@ fn percent_encode(s: &str) -> String {
 // ── HTTP fetch + parse ─────────────────────────────────────────────────────────
 
 /// Parse raw OpenPGP binary bytes into a `WkdKey`.
-fn parse_key_bytes(email: &str, bytes: &[u8]) -> Result<WkdKey> {
+pub(crate) fn parse_key_bytes(email: &str, bytes: &[u8]) -> Result<WkdKey> {
     let key = pgp::composed::SignedPublicKey::from_bytes(std::io::BufReader::new(bytes))
         .map_err(|e| Error::Rpgp(format!("WKD key parse: {e}")))?;
 
@@ -243,5 +243,56 @@ mod tests {
         let result = lookup("test@nonexistent.invalid").await;
         assert!(result.is_ok());
         assert!(result.unwrap().is_none());
+    }
+
+    /// Positive test for `parse_key_bytes`: generate an inbx-managed key,
+    /// serialise its public part to binary OpenPGP packets, then feed the raw
+    /// bytes to `parse_key_bytes` and assert the returned `WkdKey` has the
+    /// correct email and a non-empty fingerprint matching the original key.
+    ///
+    /// This exercises the WKD parse path without needing a real HTTP server.
+    #[tokio::test]
+    async fn parse_key_bytes_positive() {
+        use crate::KeySource as _;
+        use pgp::composed::Deserializable as _;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let (key_id, _) =
+            crate::inbx_managed::keygen(tmp.path(), "WKD Test", "wkd-test@example.com", "")
+                .await
+                .expect("keygen");
+
+        let src = crate::inbx_managed::InbxManagedSource::new(tmp.path().to_path_buf());
+        let armored = src.export_public(&key_id).await.expect("export_public");
+
+        // Decode the armor to raw binary OpenPGP packets (what WKD serves).
+        let (pubkey, _) = pgp::composed::SignedPublicKey::from_armor_single(
+            std::io::BufReader::new(armored.0.as_bytes()),
+        )
+        .expect("armor parse");
+        let mut binary = Vec::new();
+        pgp::ser::Serialize::to_writer(&pubkey, &mut binary).expect("serialize");
+
+        // Call parse_key_bytes with the raw binary — no HTTP involved.
+        let wkd_key = parse_key_bytes("wkd-test@example.com", &binary)
+            .expect("parse_key_bytes should succeed on valid binary key");
+
+        assert_eq!(
+            wkd_key.email, "wkd-test@example.com",
+            "email should be passed through"
+        );
+        assert!(
+            !wkd_key.fingerprint.is_empty(),
+            "fingerprint should be non-empty"
+        );
+        assert_eq!(
+            wkd_key.fingerprint,
+            key_id.0.to_lowercase(),
+            "fingerprint should match the generated key"
+        );
+        assert!(
+            wkd_key.armored.0.contains("BEGIN PGP PUBLIC KEY BLOCK"),
+            "armored output should be valid ASCII armor"
+        );
     }
 }

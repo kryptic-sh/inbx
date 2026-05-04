@@ -258,6 +258,7 @@ async fn harvest_autocrypt(contacts: &inbx_contacts::ContactsStore, raw: &[u8]) 
                 addr,
                 keydata_armored,
                 fingerprint,
+                ..
             }) = rendered.autocrypt
             {
                 if let Err(e) = contacts

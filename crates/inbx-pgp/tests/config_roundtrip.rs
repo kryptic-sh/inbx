@@ -6,6 +6,7 @@ fn gnupg_roundtrip() {
         key_source: KeySourceKind::Gnupg,
         key_fingerprint: Some("AABBCCDDEEFF00112233445566778899AABBCCDD".into()),
         managed_dir: None,
+        prefer_encrypt_mutual: true,
     };
     let raw = toml::to_string_pretty(&cfg).unwrap();
     let parsed: PgpConfig = toml::from_str(&raw).unwrap();
@@ -15,6 +16,7 @@ fn gnupg_roundtrip() {
         Some("AABBCCDDEEFF00112233445566778899AABBCCDD")
     );
     assert!(parsed.managed_dir.is_none());
+    assert!(parsed.prefer_encrypt_mutual);
 }
 
 #[test]
@@ -23,6 +25,7 @@ fn inbx_managed_roundtrip() {
         key_source: KeySourceKind::InbxManaged,
         key_fingerprint: None,
         managed_dir: Some("/home/user/.local/share/inbx/pgp".into()),
+        prefer_encrypt_mutual: false,
     };
     let raw = toml::to_string_pretty(&cfg).unwrap();
     let parsed: PgpConfig = toml::from_str(&raw).unwrap();
@@ -32,6 +35,7 @@ fn inbx_managed_roundtrip() {
         parsed.managed_dir.as_deref(),
         Some(std::path::Path::new("/home/user/.local/share/inbx/pgp"))
     );
+    assert!(!parsed.prefer_encrypt_mutual);
 }
 
 #[test]

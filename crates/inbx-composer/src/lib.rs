@@ -121,6 +121,9 @@ pub struct Composer {
     /// the caller (TUI/CLI) after loading the armored pubkey via the inbx-managed source.
     // TODO: gnupg-source autocrypt
     pub autocrypt_pubkey: Option<(String, inbx_pgp::ArmoredKey)>,
+    /// Emit `prefer-encrypt=mutual` in the outbound Autocrypt header (Autocrypt 1.1 §4).
+    /// Mirrors `PgpConfig::prefer_encrypt_mutual`. Defaults to `true`.
+    pub prefer_encrypt_mutual: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -192,6 +195,7 @@ impl Composer {
             attachments: Vec::new(),
             pgp: PgpFlags::default(),
             autocrypt_pubkey: None,
+            prefer_encrypt_mutual: true,
         }
     }
 
@@ -545,7 +549,11 @@ impl Composer {
                 builder.attachment(a.content_type.clone(), a.filename.clone(), a.bytes.clone());
         }
         if let Some((addr, armored)) = &self.autocrypt_pubkey {
-            match inbx_pgp::mime::autocrypt_header_value(addr, &armored.0) {
+            match inbx_pgp::mime::autocrypt_header_value(
+                addr,
+                &armored.0,
+                self.prefer_encrypt_mutual,
+            ) {
                 Ok(value) => {
                     builder =
                         builder.header("Autocrypt", mail_builder::headers::raw::Raw::new(value));
@@ -652,8 +660,9 @@ impl Composer {
                 }
             })
             .collect();
+        let prefer_encrypt_mutual = self.prefer_encrypt_mutual;
         let autocrypt = self.autocrypt_pubkey.as_ref().and_then(|(addr, armored)| {
-            inbx_pgp::mime::autocrypt_header_value(addr, &armored.0)
+            inbx_pgp::mime::autocrypt_header_value(addr, &armored.0, prefer_encrypt_mutual)
                 .map_err(|e| {
                     tracing::warn!("autocrypt header build failed: {e}");
                     e
@@ -745,7 +754,16 @@ fn new_vim_editor() -> Editor {
 }
 
 /// Autocrypt 1.1 §4 mutual-mode heuristic: if the original sender has a stored
-/// pubkey, pre-enable `pgp.encrypt` and `pgp.sign` on the composer.
+/// pubkey AND both sides advertise `prefer-encrypt=mutual`, pre-enable
+/// `pgp.encrypt` and `pgp.sign` on the composer.
+///
+/// Policy:
+///  - If the original message carries `Autocrypt: … prefer-encrypt=mutual`
+///    AND the local account also has `prefer_encrypt_mutual = true` (the
+///    default), auto-enable encrypt+sign — this is the full §4 mutual path.
+///  - If the peer has a stored pubkey but no `prefer-encrypt=mutual` header,
+///    still enable encrypt+sign (legacy behaviour: pubkey presence implies
+///    intent).
 ///
 /// Private to this module; called only from `new_reply_with_pgp_lookup`.
 async fn maybe_enable_autocrypt(
@@ -772,6 +790,24 @@ async fn maybe_enable_autocrypt(
     let Ok(Some(_)) = lookup.lookup(&sender_email).await else {
         return;
     };
+
+    // Check if the incoming message carries prefer-encrypt=mutual.
+    // Per Autocrypt 1.1 §4: only auto-encrypt when both sides are mutual.
+    let peer_prefers_mutual = parsed
+        .header("Autocrypt")
+        .and_then(|v| v.as_text())
+        .and_then(|text| inbx_pgp::mime::parse_autocrypt_header(text).ok())
+        .map(|h| h.prefer_encrypt == inbx_pgp::mime::AutocryptPreference::Mutual)
+        .unwrap_or(false);
+
+    // Full §4 mutual: both sides must want mutual encryption.
+    // Fallback: if no prefer-encrypt in the incoming message but peer has a key,
+    // still enable (preserves legacy behaviour).
+    if peer_prefers_mutual && !composer.prefer_encrypt_mutual {
+        // Local account has opted out of mutual — don't auto-enable.
+        return;
+    }
+
     // Sender has a stored pubkey — they're using PGP. Pre-toggle encrypt+sign.
     composer.pgp.encrypt = true;
     composer.pgp.sign = true;
