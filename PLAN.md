@@ -49,7 +49,6 @@ inbx/
 ├── rust-toolchain.toml        # channel "1.95.0" (match buffr) or "stable"
 ├── rustfmt.toml               # edition 2021, max_width 100
 ├── deny.toml                  # license/advisory gate (match hjkl)
-├── release-plz.toml
 ├── crates/
 │   ├── inbx-net/              # IMAP / SMTP / JMAP / Graph / OAuth2
 │   ├── inbx-store/            # Maildir + SQLite index + tantivy search
@@ -68,7 +67,7 @@ inbx/
 ├── CONTRIBUTING.md
 ├── CODE_OF_CONDUCT.md
 ├── SECURITY.md
-└── .github/workflows/         # ci.yml, release-plz.yml, cron.yml
+└── .github/workflows/         # ci.yml, release.yml, pages.yml
 ```
 
 ## Crate Roles
@@ -208,10 +207,10 @@ inbx/
 
 ### GUI (deferred)
 
-GUI front-end was removed from this workspace. A unified GUI shell will
-ship across kryptic-sh apps (sqeel, inbx, etc.) once the shared
-`hjkl-editor-gui` adapter (hjkl#8) lands. inbx will plug into that
-shell rather than maintaining its own egui glue.
+GUI front-end was removed from this workspace. A unified GUI shell will ship
+across kryptic-sh apps (sqeel, inbx, etc.) once the shared `hjkl-editor-gui`
+adapter (hjkl#8) lands. inbx will plug into that shell rather than maintaining
+its own egui glue.
 
 ### apps/inbx-sync (daemon)
 
@@ -341,55 +340,17 @@ shell rather than maintaining its own egui glue.
 - `release.profile`: lto thin, codegen-units 1, strip.
 - Errors: `thiserror` per crate, `anyhow` at app boundary.
 
-## Milestones
+## Tracking
 
-| #   | Goal                                                                                          | Crates touched        |
-| --- | --------------------------------------------------------------------------------------------- | --------------------- |
-| M1  | Workspace skeleton, config, keyring                                                           | core, config          |
-| M2  | IMAP fetch → Maildir + SQLite. CLI list.                                                      | net, store, app/inbx  |
-| M3  | SMTP send + Sent folder append. CLI send.                                                     | net, store, app/inbx  |
-| M4  | TUI: folder/thread/preview panes (read-only), hjkl-ratatui adapters wired                     | app/inbx              |
-| M5  | HTML render + sanitize + remote-content gate                                                  | render, app/inbx      |
-| M6  | Composer: hjkl-editor body + hjkl-form headers + hjkl-clipboard paste, identities, signatures | composer, app/inbx    |
-| M7  | Drafts sync (server append, UIDPLUS)                                                          | net, store, composer  |
-| M8  | Contacts + hjkl-picker recipient autocomplete                                                 | contacts, composer    |
-| M9  | OAuth2 Gmail. Token refresh.                                                                  | net, config           |
-| M10 | Microsoft OAuth2 + Outlook via IMAP+SMTP                                                      | net, config           |
-| M11 | MS Graph API backend                                                                          | net                   |
-| M12 | Search (tantivy) + threading (JWZ)                                                            | store                 |
-| M13 | IDLE push, offline queue, rate limit/backoff                                                  | net, core             |
-| M14 | Calendar invites (.ics display + reply)                                                       | ical, render          |
-| M15 | DKIM/SPF/DMARC verify + phishing heuristics                                                   | net, render           |
-| M16 | List-Unsubscribe (RFC 8058 one-click)                                                         | net, render           |
-| M17 | Sieve (server-side filters) + vacation responder                                              | net                   |
-| M18 | Notifications (`notify-rust`)                                                                 | app/inbx              |
-| M19 | Import/export (mbox, .eml)                                                                    | store, app/inbx       |
-| ~~M20~~ | ~~GUI MVP~~ — deferred; will join the unified kryptic-sh GUI shell once `hjkl-editor-gui` (hjkl#8) lands | —                     |
-| M21 | JMAP. Client-side rules.                                                                      | net, core             |
-| M22 | PGP + S/MIME (sign + encrypt; dual key source: gnupg keyring or inbx-managed)                 | net, composer, render |
-| M23 | CardDAV contacts sync                                                                         | contacts, net         |
-| M24 | Templates / canned replies                                                                    | composer              |
-| M25 | hjkl-picker overlays in TUI (folder, account, message-jump, attachment)                       | app/inbx              |
-| M26 | hjkl-form wizards: account-add, OAuth-link, Sieve-edit                                        | app/inbx, config, net |
-| M27 | hjkl-bonsai tree-sitter highlight for `text/x-patch` + code attachments (post-v1)             | render                |
+Concrete work items live in
+[GitHub Issues](https://github.com/kryptic-sh/inbx/issues). Shipped milestones
+live in [`CHANGELOG.md`](CHANGELOG.md). This document is the design index —
+architecture, conventions, and rationale.
 
 ## Open Questions
 
 - HTML render: `html2text` (terse) or embed `wry` webview (heavy)? Lean
   `html2text` for TUI, optional webview pane for GUI.
-- Sync daemon now or v2? Lean v2 — keep TUI self-contained first.
-- Per-account encryption-at-rest for Maildir? Defer.
-- ~~hjkl `runtime::*` vs `spec::*`?~~ **Resolved at hjkl 0.1.0.**
-  `runtime::Editor` is now generic over `<B: Buffer, H: Host>` with
-  `DefaultHost` default; consumers no longer need to chase `spec::*` separately.
-  inbx tracks the hjkl-\* crates by minor caret.
-- ~~OAuth from day 1?~~ **Decided: app password for MVP.** OAuth at M9.
-- ~~Custom header-field input vs hjkl-form?~~ **Adopt `hjkl-form`.** Writing N
-  single-line `Editor`s by hand duplicates the FSM and focus rotation that
-  `hjkl-form` already ships.
-- ~~`arboard` vs `hjkl-clipboard`?~~ **`hjkl-clipboard`.** OSC 52 fallback
-  matters for SSH users — TUI mail clients run on remote boxes more often than
-  not.
 
 ## Non-Goals (v1)
 
@@ -404,17 +365,11 @@ shell rather than maintaining its own egui glue.
 
 No `kryptic-ui` / `krui` extraction now. Reasons:
 
-- Only sqeel is a working impl; buffr early scaffold; inbx unstarted. Need 2–3
-  real apps before the shared shape is visible.
 - Domains diverge (schema browser ≠ folder tree ≠ browser tabs). Forced
   unification fights each app later.
 - `hjkl` already extracts the genuinely shared piece (modal input + buffer).
-- Extraction cost now: refactor sqeel + delay inbx + crate version churn.
-
-**Approach:** copy sqeel patterns into inbx (mouse capture, three-pane render
-loop, command palette). Free to diverge. Reassess after inbx M5.
+- Extraction cost: refactor sqeel + delay inbx + crate version churn.
 
 **Rule of three.** Extract on evidence: when sqeel + inbx + buffr show the same
-widget, pull it into `krui`. Likely candidates _eventually_: ratatui mouse
-capture wrapper, command palette widget, ratatui+egui dual-frontend trait,
-theme/config loader.
+widget, pull it into `krui`. Tracked at
+[#5](https://github.com/kryptic-sh/inbx/issues/5).
