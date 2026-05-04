@@ -4,6 +4,10 @@ on:
   push:
     tags:
       - "v*"
+  # Manual re-runs for partial-failure recovery (e.g. AUR/Alpine job
+  # added after a tag already shipped).  Re-firing build is safe — the
+  # softprops/action-gh-release@v3 upload step overwrites by default.
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
