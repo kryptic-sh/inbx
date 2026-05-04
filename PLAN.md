@@ -246,7 +246,12 @@ inbx/
   multiple. Default: `gnupg` if `~/.gnupg/` exists at first PGP enable, else
   `inbx-managed` with a generate-on-first-use prompt.
 
-- **Read receipts**: never auto-send; user prompt only.
+- **Read receipts**: never auto-send; user prompt only. Implemented at v0.1.x
+  via `Y` (send) / `N` (decline) in the Preview pane. Detects
+  `Disposition-Notification-To:` on render (`inbx-render`); generates RFC 8098
+  MDN (`multipart/report; report-type=disposition-notification`) via
+  `inbx_net::build_mdn` only on explicit `Y` keystroke. Responded UIDs tracked
+  in-memory per session (not persisted).
 - **Encryption at rest**: deferred. Threat model documented.
 - **Sandbox HTML**: GUI uses sanitized blob in webview; TUI text-only.
 

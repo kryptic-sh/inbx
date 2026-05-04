@@ -87,6 +87,7 @@ fn draw_help(f: &mut ratatui::Frame, area: Rect) {
         "    T           — thread view",
         "    U           — list-unsubscribe",
         "    i           — accept/decline invite",
+        "    Y / N       — send / decline read receipt (preview pane)",
         "",
         "  compose",
         "    c           — new draft",
@@ -214,6 +215,17 @@ fn draw_status(f: &mut ratatui::Frame, app: &App, area: Rect) {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
+    // Prepend read-receipt indicator when applicable.
+    let receipt_hint;
+    let message = if app.pane == Pane::Preview && app.current_receipt.is_some() {
+        receipt_hint = format!(
+            "[receipt requested — Y to send / N to decline]  {}",
+            app.status
+        );
+        receipt_hint.as_str()
+    } else {
+        app.status.as_str()
+    };
     let ctx = StatusCtx {
         mode: app.mode(),
         pane: app.pane,
@@ -222,7 +234,7 @@ fn draw_status(f: &mut ratatui::Frame, app: &App, area: Rect) {
         unread: app.unread_in_current_folder(),
         last_sync_unix: app.last_sync_unix,
         now_unix: now,
-        message: app.status.as_str(),
+        message,
         busy: app.busy,
     };
     let text = format_status_line(&ctx);

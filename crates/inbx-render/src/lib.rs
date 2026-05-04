@@ -9,6 +9,17 @@ use mail_parser::{MessageParser, MimeHeaders, PartType};
 pub use inbx_pgp::mime::AutocryptHeader;
 pub use pgp::{SecureKind, SecurityInfo};
 
+/// Parsed read-receipt request from a `Disposition-Notification-To:` header.
+#[derive(Debug, Clone)]
+pub struct ReadReceiptRequest {
+    /// Address(es) to send the MDN to (from Disposition-Notification-To).
+    pub notify_to: Vec<String>,
+    /// Original Message-ID, needed for the MDN's Original-Message-ID field.
+    pub original_message_id: Option<String>,
+    /// Original From address — for the MDN's "Original-Recipient" hint.
+    pub original_from: Option<String>,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("parse: could not parse RFC 5322 input")]
@@ -62,6 +73,9 @@ pub struct Rendered {
     /// Parsed Autocrypt header from the incoming message, if present.
     /// Callers should pass this to `ContactsStore::store_autocrypt` for harvest.
     pub autocrypt: Option<AutocryptHeader>,
+    /// Populated when the message contains a `Disposition-Notification-To:` header.
+    /// Never auto-sent; the TUI must obtain explicit user confirmation.
+    pub read_receipt_request: Option<ReadReceiptRequest>,
 }
 
 const TRACKER_HOSTS: &[&str] = &[
@@ -517,6 +531,8 @@ fn render_message_inner(raw: &[u8], policy: RemotePolicy) -> Result<Rendered> {
     let phishing_warnings = phishing::analyze(raw, sanitized_html.as_deref());
     let security = pgp::detect(raw);
 
+    let read_receipt_request = extract_read_receipt_request(raw);
+
     Ok(Rendered {
         plain,
         html: sanitized_html,
@@ -527,6 +543,53 @@ fn render_message_inner(raw: &[u8], policy: RemotePolicy) -> Result<Rendered> {
         security,
         pgp_verify: None,
         autocrypt: None,
+        read_receipt_request,
+    })
+}
+
+/// Extract `Disposition-Notification-To:` addresses, Message-ID, and From from a raw message.
+/// Returns `None` when the header is absent.
+fn extract_read_receipt_request(raw: &[u8]) -> Option<ReadReceiptRequest> {
+    let parsed = MessageParser::default().parse(raw)?;
+    // Check for Disposition-Notification-To header.
+    let dnt_value = parsed.header_values("Disposition-Notification-To").next()?;
+    let raw_value = dnt_value.as_text().unwrap_or("").trim().to_string();
+    if raw_value.is_empty() {
+        return None;
+    }
+    // Parse as comma-separated address list.
+    let notify_to: Vec<String> = raw_value
+        .split(',')
+        .filter_map(|part| {
+            let part = part.trim();
+            if part.is_empty() {
+                return None;
+            }
+            // Strip optional display name: take last <...> if present.
+            if let (Some(lt), Some(gt)) = (part.rfind('<'), part.rfind('>'))
+                && lt < gt
+            {
+                let addr = part[lt + 1..gt].trim().to_string();
+                if !addr.is_empty() {
+                    return Some(addr);
+                }
+            }
+            Some(part.to_string())
+        })
+        .collect();
+    if notify_to.is_empty() {
+        return None;
+    }
+    let original_message_id = parsed.message_id().map(|s| s.to_string());
+    let original_from = parsed
+        .from()
+        .and_then(|g| g.first())
+        .and_then(|a| a.address())
+        .map(|s| s.to_string());
+    Some(ReadReceiptRequest {
+        notify_to,
+        original_message_id,
+        original_from,
     })
 }
 
@@ -712,5 +775,37 @@ mod tests {
         let r = render_message(raw, RemotePolicy::Block).unwrap();
         assert_eq!(r.blocked_remote, 1);
         assert!(!r.trackers.is_empty());
+    }
+
+    #[test]
+    fn surfaces_read_receipt_request() {
+        let raw = b"From: sender@example.com\r\n\
+                    To: me@example.com\r\n\
+                    Subject: Test\r\n\
+                    Message-ID: <abc123@example.com>\r\n\
+                    Disposition-Notification-To: alice@example.com\r\n\
+                    \r\n\
+                    Hello\r\n";
+        let r = render_message(raw, RemotePolicy::Block).unwrap();
+        let req = r
+            .read_receipt_request
+            .expect("read_receipt_request present");
+        assert_eq!(req.notify_to, vec!["alice@example.com"]);
+        assert_eq!(
+            req.original_message_id.as_deref(),
+            Some("abc123@example.com")
+        );
+        assert_eq!(req.original_from.as_deref(), Some("sender@example.com"));
+    }
+
+    #[test]
+    fn no_request_when_header_absent() {
+        let raw = b"From: sender@example.com\r\n\
+                    To: me@example.com\r\n\
+                    Subject: No receipt\r\n\
+                    \r\n\
+                    Body text\r\n";
+        let r = render_message(raw, RemotePolicy::Block).unwrap();
+        assert!(r.read_receipt_request.is_none());
     }
 }

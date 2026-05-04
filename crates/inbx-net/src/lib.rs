@@ -2,6 +2,7 @@ pub mod graph;
 pub mod idle;
 pub mod imap;
 pub mod jmap;
+pub mod mdn;
 pub mod oauth;
 pub mod proxy;
 pub mod sieve;
@@ -14,5 +15,6 @@ pub use imap::{
     fetch_headers_uids, fetch_inbox_headers, find_drafts_folder, find_sent_folder, list_folders,
     rename_folder, search_since, store_flags, subscribe_folder, uid_copy, uid_move,
 };
+pub use mdn::{Disposition as MdnDisposition, MdnContext, build_mdn};
 pub use oauth::{Error as OAuthError, TokenSet, login as oauth_login, refresh as oauth_refresh};
 pub use smtp::{Error as SmtpError, send_message};

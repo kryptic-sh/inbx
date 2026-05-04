@@ -40,6 +40,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 tracing-appender.workspace = true
 rpassword.workspace = true
+gethostname.workspace = true
 ratatui.workspace = true
 crossterm.workspace = true
 futures-util.workspace = true

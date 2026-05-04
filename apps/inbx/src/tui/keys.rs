@@ -161,6 +161,22 @@ pub(super) async fn handle_list_key(app: &mut App, key: KeyEvent) -> Result<bool
         }
     }
 
+    // Read-receipt prompt: Y = send, N = decline. Only active in Preview pane
+    // when a pending receipt exists and the user has not yet responded.
+    if app.pane == Pane::Preview && app.current_receipt.is_some() {
+        match key.code {
+            KeyCode::Char('Y') => {
+                app.send_read_receipt().await?;
+                return Ok(false);
+            }
+            KeyCode::Char('N') => {
+                app.decline_read_receipt();
+                return Ok(false);
+            }
+            _ => {}
+        }
+    }
+
     // Body scroll keys when Preview pane is focused.
     if app.pane == Pane::Preview {
         match key.code {

@@ -21,6 +21,7 @@ tokio-rustls.workspace = true
 rustls.workspace = true
 webpki-roots.workspace = true
 mail-parser.workspace = true
+mail-builder.workspace = true
 lettre.workspace = true
 oauth2.workspace = true
 reqwest.workspace = true

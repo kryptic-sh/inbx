@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
@@ -6,6 +7,7 @@ use hjkl_picker::Picker;
 use inbx_composer::{Composer, FocusedEditor, Identity};
 use inbx_config::Account;
 use inbx_contacts::{Contact, ContactsStore};
+use inbx_render::RemotePolicy;
 use inbx_store::{FolderRow, MessageRow, OutboxRow, Store};
 use ratatui::widgets::ListState;
 
@@ -106,6 +108,13 @@ pub(super) struct App {
     /// in flight. The event loop forces redraws at 120 ms while busy so the
     /// spinner in the status line animates.
     pub(super) busy: bool,
+    /// UIDs for which the user has already responded to a read-receipt prompt
+    /// (either sent or declined).  Not persisted across sessions — best effort.
+    pub(super) receipt_responded: HashSet<i64>,
+    /// Read-receipt request for the currently previewed message, if any.
+    /// Populated by `refresh_body`; cleared when the user responds or the
+    /// message changes.
+    pub(super) current_receipt: Option<inbx_render::ReadReceiptRequest>,
 }
 
 #[derive(Clone, Copy)]
@@ -289,6 +298,8 @@ impl App {
             active_picker: None,
             active_wizard: None,
             busy: false,
+            receipt_responded: HashSet::new(),
+            current_receipt: None,
         };
         app.reload_messages().await?;
         Ok(app)
@@ -526,6 +537,63 @@ impl App {
     pub(super) fn close_ical(&mut self) {
         self.ical = None;
         self.status = "ical: cancelled".into();
+    }
+
+    /// Send a read receipt (MDN) for the current message.  Called only when
+    /// the user explicitly presses `Y` in the Preview pane.
+    pub(super) async fn send_read_receipt(&mut self) -> Result<()> {
+        let req = match self.current_receipt.clone() {
+            Some(r) => r,
+            None => return Ok(()),
+        };
+        let uid = match self.current_message().map(|m| m.uid) {
+            Some(u) => u,
+            None => return Ok(()),
+        };
+        let subject = self
+            .current_message()
+            .and_then(|m| m.subject.clone())
+            .unwrap_or_default();
+
+        let ctx = inbx_net::MdnContext {
+            from: self.account.email.clone(),
+            to: req.notify_to.clone(),
+            original_message_id: req.original_message_id.unwrap_or_default(),
+            original_recipient: req.original_from,
+            original_subject: subject,
+            disposition: inbx_net::MdnDisposition::DisplayedManualAction,
+            reporting_ua: gethostname::gethostname().to_string_lossy().into_owned(),
+        };
+
+        let addrs = req.notify_to.join(", ");
+        match inbx_net::build_mdn(&ctx) {
+            Ok(raw) => match inbx_net::send_message(&self.account, &raw).await {
+                Ok(()) => {
+                    self.status = format!("sent read receipt to {addrs}");
+                }
+                Err(e) => {
+                    self.status = format!("read receipt send failed: {e}");
+                }
+            },
+            Err(e) => {
+                self.status = format!("read receipt build failed: {e}");
+            }
+        }
+        self.receipt_responded.insert(uid);
+        self.current_receipt = None;
+        Ok(())
+    }
+
+    /// Decline a read receipt for the current message.  Called when the user
+    /// explicitly presses `N` in the Preview pane.
+    pub(super) fn decline_read_receipt(&mut self) {
+        let uid = match self.current_message().map(|m| m.uid) {
+            Some(u) => u,
+            None => return,
+        };
+        self.receipt_responded.insert(uid);
+        self.current_receipt = None;
+        self.status = "declined read receipt".into();
     }
 
     pub(super) async fn save_draft(&mut self) -> Result<()> {
@@ -1338,24 +1406,42 @@ impl App {
 
     pub(super) fn refresh_body(&mut self) {
         self.body_scroll = 0;
-        match self.current_message() {
+        self.current_receipt = None;
+        // Clone what we need before dropping the borrow on self.
+        let snapshot = self.current_message().map(|m| {
+            (
+                m.uid,
+                m.maildir_path.clone(),
+                m.folder.clone(),
+                m.from_addr.clone(),
+                m.subject.clone(),
+                m.flags.clone(),
+            )
+        });
+        match snapshot {
             None => {
                 self.body.clear();
             }
-            Some(m) => match m.maildir_path.as_deref() {
-                Some(path) => self.body = render_path(path),
-                None => {
-                    self.body = format!(
-                        "[body not yet fetched — run `inbx fetch --bodies` to download]\n\n\
-                         folder: {}\nuid: {}\nfrom: {}\nsubject: {}\nflags: {}",
-                        m.folder,
-                        m.uid,
-                        m.from_addr.as_deref().unwrap_or(""),
-                        m.subject.as_deref().unwrap_or(""),
-                        m.flags,
-                    );
+            Some((uid, Some(path), ..)) => {
+                self.body = render_path(&path);
+                // Detect read-receipt request for this message.
+                if !self.receipt_responded.contains(&uid)
+                    && let Ok(raw) = std::fs::read(&path)
+                    && let Ok(rendered) = inbx_render::render_message(&raw, RemotePolicy::Block)
+                {
+                    self.current_receipt = rendered.read_receipt_request;
                 }
-            },
+            }
+            Some((_, None, folder, from_addr, subject, flags)) => {
+                self.body = format!(
+                    "[body not yet fetched — run `inbx fetch --bodies` to download]\n\n\
+                     folder: {}\nfrom: {}\nsubject: {}\nflags: {}",
+                    folder,
+                    from_addr.as_deref().unwrap_or(""),
+                    subject.as_deref().unwrap_or(""),
+                    flags,
+                );
+            }
         }
     }
 
