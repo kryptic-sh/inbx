@@ -243,6 +243,21 @@ fn draw_preview(f: &mut ratatui::Frame, app: &App, area: Rect) {
         }
     }
 
+    // While the body is being fetched (header-only message in store), render
+    // an animated spinner instead of the static placeholder text.
+    let fetching = app
+        .current_message()
+        .map(|m| m.maildir_path.is_none())
+        .unwrap_or(false);
+    if fetching {
+        let line = format!("  {} fetching body…", spinner::frame());
+        let para = Paragraph::new(line)
+            .block(pane_block(&title, app.pane == Pane::Preview))
+            .wrap(Wrap { trim: false });
+        f.render_widget(para, area);
+        return;
+    }
+
     let para = Paragraph::new(app.body.as_str())
         .block(pane_block(&title, app.pane == Pane::Preview))
         .wrap(Wrap { trim: false })
