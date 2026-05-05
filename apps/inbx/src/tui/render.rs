@@ -148,18 +148,34 @@ fn rgb(c: &Rgb) -> Color {
     Color::Rgb(c.0, c.1, c.2)
 }
 
+/// Friendly name for a folder. Prefers IMAP `special_use` attributes (e.g.
+/// `\Trash` → `Trash`); else strips known provider prefixes (`[Gmail]/`,
+/// `INBOX/`) so nested mailboxes don't carry the parent label.
+fn folder_display_name(name: &str, special_use: Option<&str>) -> String {
+    match special_use {
+        Some("\\All") => return "All Mail".into(),
+        Some("\\Archive") => return "Archive".into(),
+        Some("\\Drafts") => return "Drafts".into(),
+        Some("\\Sent") => return "Sent".into(),
+        Some("\\Trash") => return "Trash".into(),
+        Some("\\Junk") => return "Spam".into(),
+        Some("\\Flagged") => return "Starred".into(),
+        _ => {}
+    }
+    if name.eq_ignore_ascii_case("INBOX") {
+        return "Inbox".into();
+    }
+    name.strip_prefix("[Gmail]/")
+        .or_else(|| name.strip_prefix("INBOX/"))
+        .unwrap_or(name)
+        .to_string()
+}
+
 fn draw_folders(f: &mut ratatui::Frame, app: &App, area: Rect) {
     let items: Vec<ListItem> = app
         .folders
         .iter()
-        .map(|fld| {
-            let suffix = fld
-                .special_use
-                .as_deref()
-                .map(|s| format!(" [{s}]"))
-                .unwrap_or_default();
-            ListItem::new(format!("{}{}", fld.name, suffix))
-        })
+        .map(|fld| ListItem::new(folder_display_name(&fld.name, fld.special_use.as_deref())))
         .collect();
     let list = List::new(items)
         .block(pane_block("folders", app.pane == Pane::Folders))
