@@ -1799,7 +1799,13 @@ impl App {
         let folder = self.current_folder().map(|f| f.name.clone());
         let prior = self.msg_state.selected();
         self.messages = match folder {
-            Some(name) => self.store.list_messages(&name, 200).await?,
+            Some(name) => self
+                .store
+                .list_messages(&name, 200)
+                .await?
+                .into_iter()
+                .filter(|m| !m.flags.to_ascii_lowercase().contains("\\deleted"))
+                .collect(),
             None => Vec::new(),
         };
         if self.messages.is_empty() {
