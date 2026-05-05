@@ -14,6 +14,8 @@ patch bumps.
   actions instead of reconnecting each time.
 - Extract shared DAV helpers (PROPFIND + XML scrape) into new `inbx-dav` crate
   (consumed by inbx-contacts + inbx-ical).
+- CalDAV sync is now etag-aware — fetches only new and changed events via
+  calendar-multiget instead of always pulling the full calendar.
 
 ### Added
 
