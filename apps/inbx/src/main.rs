@@ -801,12 +801,43 @@ enum CarddavCmd {
     },
 }
 
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+enum RsvpArg {
+    Accept,
+    Decline,
+    Tentative,
+}
+
+impl From<RsvpArg> for inbx_ical::RsvpResponse {
+    fn from(a: RsvpArg) -> Self {
+        match a {
+            RsvpArg::Accept => Self::Accept,
+            RsvpArg::Decline => Self::Decline,
+            RsvpArg::Tentative => Self::Tentative,
+        }
+    }
+}
+
 #[derive(Subcommand)]
 enum CalCmd {
     /// CalDAV calendar operations (pull / discover).
     Caldav {
         #[command(subcommand)]
         action: CaldavCmd,
+    },
+    /// Send an RSVP reply to a stored calendar event.
+    Rsvp {
+        /// Event UID as written by `inbx cal caldav pull` (the iCalendar UID,
+        /// not the sanitized filename — sanitization is applied for you).
+        uid: String,
+
+        /// Response status.
+        #[arg(value_enum)]
+        response: RsvpArg,
+
+        /// Account name to send from.
+        #[arg(long)]
+        account: String,
     },
 }
 
@@ -2620,7 +2651,109 @@ async fn cmd_cal(action: CalCmd) -> Result<()> {
                 }
             }
         },
+        CalCmd::Rsvp {
+            uid,
+            response,
+            account,
+        } => cmd_cal_rsvp(&uid, response, &account).await?,
     }
+    Ok(())
+}
+
+async fn cmd_cal_rsvp(uid: &str, response: RsvpArg, account_name: &str) -> Result<()> {
+    let cfg = inbx_config::load()?;
+    let account = cfg
+        .accounts
+        .iter()
+        .find(|a| a.name == account_name)
+        .ok_or_else(|| anyhow::anyhow!("no account named '{account_name}' in config"))?
+        .clone();
+
+    // Locate the stored .ics written by `inbx cal caldav pull`.
+    // The path is <data_dir>/<account>/calendar/<sanitized_uid>.ics.
+    let store_dir = inbx_config::data_dir()
+        .map(|d| d.join(&account.name).join("calendar"))
+        .unwrap_or_else(|_| {
+            std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
+                .join(".local")
+                .join("share")
+                .join("inbx")
+                .join(&account.name)
+                .join("calendar")
+        });
+    let safe_uid = inbx_ical::caldav::sanitize_uid(uid);
+    let ics_path = store_dir.join(format!("{safe_uid}.ics"));
+    if !ics_path.exists() {
+        anyhow::bail!(
+            "no stored event for uid '{uid}' under {}",
+            store_dir.display()
+        );
+    }
+    let text = std::fs::read_to_string(&ics_path)
+        .with_context(|| format!("reading {}", ics_path.display()))?;
+    let invite =
+        inbx_ical::parse_ics(&text).map_err(|e| anyhow::anyhow!("parse_ics failed: {e}"))?;
+
+    // Find the ATTENDEE line matching our account email.
+    // Different servers format ATTENDEE differently — sometimes with
+    // parameters before the value, so a case-insensitive substring match
+    // is more robust than strict URI equality.
+    let our_addr = account.email.to_ascii_lowercase();
+    let attendee = invite
+        .attendees
+        .iter()
+        .find(|a| a.to_ascii_lowercase().contains(&our_addr))
+        .cloned()
+        .unwrap_or_else(|| format!("mailto:{}", account.email));
+    // build_reply requires the "mailto:" prefix.
+    let attendee = if attendee.to_ascii_lowercase().starts_with("mailto:") {
+        attendee
+    } else {
+        format!("mailto:{attendee}")
+    };
+
+    let rsvp_response: inbx_ical::RsvpResponse = response.into();
+    let reply_ics = inbx_ical::build_reply(&invite, rsvp_response, &attendee)
+        .map_err(|e| anyhow::anyhow!("build_reply failed: {e}"))?;
+
+    // Resolve organizer → To address. invite.organizer is a "mailto:foo@bar"
+    // URI (possibly with parameters); strip the scheme for the MIME To header.
+    let organizer = invite
+        .organizer
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("event has no ORGANIZER; cannot reply"))?;
+    let to_addr = organizer.splitn(2, ':').last().unwrap_or(organizer);
+
+    let summary = invite.summary.as_deref().unwrap_or("(no subject)");
+    let verb = match rsvp_response {
+        inbx_ical::RsvpResponse::Accept => "Accepted",
+        inbx_ical::RsvpResponse::Decline => "Declined",
+        inbx_ical::RsvpResponse::Tentative => "Tentative",
+    };
+    let subject = format!("{verb}: {summary}");
+    let body_text = format!(
+        "{verb} the invitation to \"{summary}\".\n\n\
+         (Sent by inbx — RSVP reply, RFC 5546 METHOD:REPLY attached.)\n",
+    );
+
+    use mail_builder::MessageBuilder;
+    use mail_builder::mime::MimePart;
+
+    let raw = MessageBuilder::new()
+        .from((account.name.as_str(), account.email.as_str()))
+        .to(to_addr)
+        .subject(subject)
+        .body(MimePart::new(
+            "multipart/alternative",
+            vec![
+                MimePart::new("text/plain", body_text),
+                MimePart::new("text/calendar; method=REPLY", reply_ics),
+            ],
+        ))
+        .write_to_vec()?;
+
+    inbx_net::send_message(&account, &raw).await?;
+    println!("rsvp {verb} sent for uid '{uid}' to {to_addr}");
     Ok(())
 }
 

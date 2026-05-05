@@ -19,6 +19,8 @@ patch bumps.
 
 ### Added
 
+- `inbx cal rsvp <uid> {accept|decline|tentative} --account <name>` — sends a
+  METHOD:REPLY for a stored CalDAV event via SMTP.
 - CardDAV auto-push on `ContactsStore::upsert` when an account has `[carddav]`
   configured. Fire-and-forget; failures log and continue.
 - Homebrew tap auto-publish for `inbx` on tag push. New

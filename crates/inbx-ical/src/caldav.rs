@@ -432,7 +432,7 @@ fn parse_uid_from_ical(text: &str) -> Option<String> {
     None
 }
 
-fn sanitize_uid(uid: &str) -> String {
+pub fn sanitize_uid(uid: &str) -> String {
     uid.chars()
         .map(|c| {
             if c == '/' || c == '\\' || c.is_control() {
