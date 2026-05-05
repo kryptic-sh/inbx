@@ -18,7 +18,7 @@
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use super::app::{App, IcalResponse, LeaderState, MovePickerState, Pane};
+use super::app::{App, IcalResponse, LeaderState, MovePickerMode, MovePickerState, Pane};
 use super::wizard::AccountWizard;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -295,6 +295,10 @@ pub(super) enum Action {
 
     // ── Misc List actions ────────────────────────────────────────────────────
     ManualSync,
+    ToggleRawHeaders,
+    CopyMessage,
+    OpenTemplatePicker,
+    LeaderOpenFolderCrud,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -826,6 +830,38 @@ static BINDS: &[BindRow] = &[
         action: Action::ManualSync,
         key: || KeySpec::plain_char('F', "F"),
         desc: "manual sync",
+        category: Category::Overlays,
+        contexts: &[Context::List],
+        gate: None,
+    },
+    BindRow {
+        action: Action::ToggleRawHeaders,
+        key: || KeySpec::plain_char('H', "H"),
+        desc: "toggle raw headers view",
+        category: Category::MessageOps,
+        contexts: &[Context::List],
+        gate: Some(|app| app.pane == Pane::Messages || app.pane == Pane::Preview),
+    },
+    BindRow {
+        action: Action::CopyMessage,
+        key: || KeySpec::plain_char('y', "y"),
+        desc: "copy message to folder",
+        category: Category::MessageOps,
+        contexts: &[Context::List],
+        gate: Some(|app| app.pane == Pane::Messages),
+    },
+    BindRow {
+        action: Action::OpenTemplatePicker,
+        key: || KeySpec::leader_char('t', "<Space>t"),
+        desc: "template picker",
+        category: Category::Compose,
+        contexts: &[Context::List],
+        gate: None,
+    },
+    BindRow {
+        action: Action::LeaderOpenFolderCrud,
+        key: || KeySpec::leader_char('F', "<Space>F"),
+        desc: "folder create / rename / delete",
         category: Category::Overlays,
         contexts: &[Context::List],
         gate: None,
@@ -1396,8 +1432,12 @@ impl Action {
                 if let Some(picker) = app.move_picker.as_ref() {
                     let idx = picker.state.selected().unwrap_or(0);
                     if let Some(target) = targets.get(idx).cloned() {
+                        let mode = picker.mode;
                         app.move_picker = None;
-                        app.move_current_to(&target).await?;
+                        match mode {
+                            MovePickerMode::Move => app.move_current_to(&target).await?,
+                            MovePickerMode::Copy => app.copy_current_to(&target).await?,
+                        }
                     }
                 }
             }
@@ -1486,6 +1526,26 @@ impl Action {
                 // Handled entirely in handle_active_picker_key (requires mutable
                 // borrow of the picker state with complex logic).
             }
+
+            // ── New actions ───────────────────────────────────────────────────
+            Action::ToggleRawHeaders => {
+                app.preview_raw_headers = !app.preview_raw_headers;
+                app.refresh_body();
+                if app.preview_raw_headers {
+                    app.status = "raw headers view (H to toggle back)".into();
+                } else {
+                    app.status = "rendered body view (H to toggle raw headers)".into();
+                }
+            }
+            Action::CopyMessage => {
+                app.move_picker = Some(MovePickerState::new_copy());
+            }
+            Action::OpenTemplatePicker => {
+                app.open_template_picker();
+            }
+            Action::LeaderOpenFolderCrud => {
+                app.open_folder_crud();
+            }
         }
         Ok(false)
     }
@@ -1507,6 +1567,10 @@ fn pgp_flag_label(flags: &inbx_composer::PgpFlags) -> &'static str {
 
 /// Derive the active `Context` from app state, used by the help renderer.
 pub(super) fn current_context(app: &App) -> Context {
+    if app.folder_crud.is_some() || app.folder_crud_prompt.is_some() {
+        // Treated as List context for help purposes — no separate context needed.
+        return Context::List;
+    }
     if app.active_picker.is_some() {
         return Context::ActivePicker;
     }

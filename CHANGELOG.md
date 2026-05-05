@@ -8,6 +8,18 @@ patch bumps.
 
 ## [Unreleased]
 
+### Added
+
+- TUI: `H` toggles raw RFC 5322 header view in the preview pane (closes #24).
+- TUI: `y` opens a copy-to-folder picker (IMAP UID COPY) mirroring the move
+  picker (`m`) with a "Copy" mode indicator in the title (closes #23).
+- TUI: `<Space>t` opens a template picker; selecting a template opens the
+  composer pre-filled via `inbx_composer::templates::from_template` (closes
+  #20).
+- TUI: `<Space>F` opens a folder CRUD overlay (Create / Rename / Delete) backed
+  by `MailProvider::{create,rename,delete}_folder`; ops fire on a background
+  tokio task and post `TaskResult::FolderOp` (closes #18).
+
 ## [0.5.0] - 2026-05-05
 
 ### Added

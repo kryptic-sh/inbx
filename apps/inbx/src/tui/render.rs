@@ -8,7 +8,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 
 use super::ACTIVE_THEME;
-use super::app::{ActivePicker, App, Mode, Pane};
+use super::app::{ActivePicker, App, FolderCrudPrompt, Mode, MovePickerMode, Pane};
 use super::binds::{Action, Category, current_context};
 
 pub(super) fn draw(f: &mut ratatui::Frame, app: &App) {
@@ -59,6 +59,12 @@ pub(super) fn draw(f: &mut ratatui::Frame, app: &App) {
     }
     if app.active_picker.is_some() {
         draw_active_picker(f, app, outer[0]);
+    }
+    if app.folder_crud.is_some() {
+        draw_folder_crud(f, app, outer[0]);
+    }
+    if app.folder_crud_prompt.is_some() {
+        draw_folder_crud_prompt(f, app, outer[0]);
     }
     if app.active_wizard.is_some() {
         draw_active_wizard(f, app, outer[0]);
@@ -899,8 +905,11 @@ fn draw_move_picker(f: &mut ratatui::Frame, app: &App, area: Rect) {
         .constraints([Constraint::Length(3), Constraint::Min(1)])
         .split(popup);
 
-    let filter_para = Paragraph::new(format!("/{}", picker.filter))
-        .block(pane_block("move to (Esc cancel · Enter pick)", true));
+    let title = match picker.mode {
+        MovePickerMode::Move => "move to (Esc cancel · Enter pick)",
+        MovePickerMode::Copy => "copy to (Esc cancel · Enter pick)",
+    };
+    let filter_para = Paragraph::new(format!("/{}", picker.filter)).block(pane_block(title, true));
     f.render_widget(filter_para, layout[0]);
 
     let items: Vec<ListItem> = targets
@@ -914,6 +923,62 @@ fn draw_move_picker(f: &mut ratatui::Frame, app: &App, area: Rect) {
     f.render_stateful_widget(list, layout[1], &mut picker.state.clone());
 }
 
+fn draw_folder_crud(f: &mut ratatui::Frame, app: &App, area: Rect) {
+    let Some(crud) = app.folder_crud.as_ref() else {
+        return;
+    };
+    let height = 7u16.min(area.height);
+    let width = 40u16.min(area.width);
+    let x = area.x + area.width.saturating_sub(width) / 2;
+    let y = area.y + area.height.saturating_sub(height) / 2;
+    let popup = Rect {
+        x,
+        y,
+        width,
+        height,
+    };
+    f.render_widget(Clear, popup);
+    let actions = vec![
+        ListItem::new("  c  Create new folder"),
+        ListItem::new("  r  Rename current folder"),
+        ListItem::new("  d  Delete current folder"),
+    ];
+    let list = List::new(actions)
+        .block(pane_block("folder (c/r/d · Esc cancel)", true))
+        .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
+        .highlight_symbol("> ");
+    f.render_stateful_widget(list, popup, &mut crud.state.clone());
+}
+
+fn draw_folder_crud_prompt(f: &mut ratatui::Frame, app: &App, area: Rect) {
+    let Some(prompt) = app.folder_crud_prompt.as_ref() else {
+        return;
+    };
+    let (title, value) = match prompt {
+        FolderCrudPrompt::Create(name) => ("create folder", name.as_str()),
+        FolderCrudPrompt::Rename(_, new_name) => ("rename folder (new name)", new_name.as_str()),
+        FolderCrudPrompt::Delete(name, _) => ("delete folder — press y to confirm", name.as_str()),
+    };
+    let height = 3u16.min(area.height);
+    let width = 60u16.min(area.width);
+    let x = area.x + area.width.saturating_sub(width) / 2;
+    let y = area.y + area.height.saturating_sub(height) / 2;
+    let popup = Rect {
+        x,
+        y,
+        width,
+        height,
+    };
+    f.render_widget(Clear, popup);
+    let display = if matches!(prompt, FolderCrudPrompt::Delete(_, _)) {
+        value.to_string()
+    } else {
+        format!("{value}_")
+    };
+    let para = Paragraph::new(display).block(pane_block(title, true));
+    f.render_widget(para, popup);
+}
+
 fn draw_active_picker(f: &mut ratatui::Frame, app: &App, area: Rect) {
     let Some(ap) = app.active_picker.as_ref() else {
         return;
@@ -924,6 +989,7 @@ fn draw_active_picker(f: &mut ratatui::Frame, app: &App, area: Rect) {
         ActivePicker::Message(p, _) => (p, "message jump (Enter jump · Esc cancel)"),
         ActivePicker::Attachment(p, _, _) => (p, "attachments (Enter save · Esc cancel)"),
         ActivePicker::Sieve(p, _) => (p, "sieve scripts (Enter edit · Esc cancel)"),
+        ActivePicker::Template(p, _) => (p, "templates (Enter open · Esc cancel)"),
     };
     let entries = picker.visible_entries();
     let height = (entries.len() as u16 + 5).min(area.height).max(8);

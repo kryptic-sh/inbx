@@ -125,6 +125,16 @@ pub(super) fn attachment_picker(
     (hjkl_picker::Picker::new(Box::new(source)), slot)
 }
 
+/// Open a template picker. Returns the picker and the shared slot (template name).
+pub(super) fn template_picker(
+    names: Vec<String>,
+) -> (hjkl_picker::Picker, Arc<Mutex<Option<String>>>) {
+    let items: Vec<(String, String)> = names.into_iter().map(|name| (name.clone(), name)).collect();
+    let source = StashedSource::new("templates", items);
+    let slot = Arc::clone(&source.last_picked);
+    (hjkl_picker::Picker::new(Box::new(source)), slot)
+}
+
 /// Open a Sieve script picker. Returns the picker and the shared slot (script name).
 /// Label format: `<name>` or `<name> (active)` when `script.active`.
 pub(super) fn sieve_picker(

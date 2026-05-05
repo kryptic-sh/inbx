@@ -49,6 +49,9 @@ pub(super) enum TaskResult {
     WatchSignal,
     /// An event arrived from the inbx-sync daemon over the IPC socket.
     SyncIpcEvent(inbx_ipc::Event),
+    /// A folder CRUD operation (create / rename / delete) completed.
+    /// Carries the success message or an error string.
+    FolderOp(Result<String, String>),
     /// A tree-sitter grammar finished loading (or failed). The `lang` key
     /// matches the string used for the cache lookup in `App`.
     #[cfg(feature = "tree-sitter")]

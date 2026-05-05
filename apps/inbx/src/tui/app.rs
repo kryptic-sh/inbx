@@ -31,6 +31,30 @@ pub(super) enum ActivePicker {
     Attachment(Picker, Arc<Mutex<Option<usize>>>, Vec<(String, Vec<u8>)>),
     /// Sieve script picker — payload is the script name.
     Sieve(Picker, Arc<Mutex<Option<String>>>),
+    /// Template picker — payload is the template name.
+    Template(Picker, Arc<Mutex<Option<String>>>),
+}
+
+/// Which sub-action the folder CRUD overlay is performing.
+#[derive(Clone, Debug)]
+pub(super) enum FolderCrudPrompt {
+    Create(String),
+    Rename(String, String), // (from, new_name)
+    Delete(String, bool),   // (name, confirmed)
+}
+
+/// State for the folder CRUD action-choice overlay.
+pub(super) struct FolderCrudState {
+    /// 0 = Create, 1 = Rename, 2 = Delete.
+    pub(super) state: ratatui::widgets::ListState,
+}
+
+impl FolderCrudState {
+    pub(super) fn new() -> Self {
+        let mut state = ratatui::widgets::ListState::default();
+        state.select(Some(0));
+        Self { state }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -85,6 +109,9 @@ pub(super) struct App {
     pub(super) pending_pgp_chord: bool,
     pub(super) body: String,
     pub(super) body_scroll: u16,
+    /// When `true`, the preview pane shows raw RFC 5322 headers instead of
+    /// the rendered body.  Toggled by `H` in the list pane.
+    pub(super) preview_raw_headers: bool,
     pub(super) status: String,
     pub(super) composer: Option<Composer>,
     pub(super) show_help: bool,
@@ -105,6 +132,10 @@ pub(super) struct App {
     pub(super) last_sync_unix: Option<i64>,
     /// Active hjkl-picker overlay. `None` when no picker is open.
     pub(super) active_picker: Option<ActivePicker>,
+    /// Folder CRUD action-choice overlay (`<Space>F`). `None` when not open.
+    pub(super) folder_crud: Option<FolderCrudState>,
+    /// Active folder CRUD prompt (text input for name). `None` when not open.
+    pub(super) folder_crud_prompt: Option<FolderCrudPrompt>,
     /// Active account-creation wizard. `None` when not open.
     pub(super) active_wizard: Option<super::wizard::AccountWizard>,
     /// Active Sieve-script edit wizard. `None` when not open.
@@ -227,9 +258,17 @@ impl AccountPickerState {
     }
 }
 
+/// Whether the move-picker is in move or copy mode.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum MovePickerMode {
+    Move,
+    Copy,
+}
+
 pub(super) struct MovePickerState {
     pub(super) filter: String,
     pub(super) state: ListState,
+    pub(super) mode: MovePickerMode,
 }
 
 pub(super) struct OutboxState {
@@ -316,6 +355,17 @@ impl MovePickerState {
         Self {
             filter: String::new(),
             state,
+            mode: MovePickerMode::Move,
+        }
+    }
+
+    pub(super) fn new_copy() -> Self {
+        let mut state = ListState::default();
+        state.select(Some(0));
+        Self {
+            filter: String::new(),
+            state,
+            mode: MovePickerMode::Copy,
         }
     }
 }
@@ -374,6 +424,7 @@ impl App {
             pending_pgp_chord: false,
             body: String::new(),
             body_scroll: 0,
+            preview_raw_headers: false,
             status: String::new(),
             composer: None,
             show_help: false,
@@ -387,6 +438,8 @@ impl App {
             last_search: None,
             last_sync_unix: None,
             active_picker: None,
+            folder_crud: None,
+            folder_crud_prompt: None,
             active_wizard: None,
             active_sieve_wizard: None,
             sieve_session: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
@@ -1149,6 +1202,181 @@ impl App {
         Ok(())
     }
 
+    /// UID COPY the current message to `target` folder (IMAP-only).
+    pub(super) async fn copy_current_to(&mut self, target: &str) -> Result<()> {
+        let Some(source) = self.current_folder().map(|f| f.name.clone()) else {
+            return Ok(());
+        };
+        let Some(msg) = self.current_message().cloned() else {
+            return Ok(());
+        };
+        // UID COPY is IMAP-only — connect_imap directly.
+        let mut session = inbx_net::connect_imap(&self.account).await?;
+        inbx_net::uid_copy(&mut session, &source, &[msg.uid as u32], target).await?;
+        let _ = session.logout().await;
+        self.status = format!("copied uid {} → {target}", msg.uid);
+        Ok(())
+    }
+
+    /// Open a template picker (`<Space>t`).
+    pub(super) fn open_template_picker(&mut self) {
+        let names = match inbx_composer::templates::list(&self.account.name) {
+            Ok(v) => v,
+            Err(e) => {
+                self.status = format!("templates: {e}");
+                return;
+            }
+        };
+        if names.is_empty() {
+            self.status = "templates: none saved (use `inbx template save`)".into();
+            return;
+        }
+        let (p, slot) = super::picker::template_picker(names);
+        self.active_picker = Some(ActivePicker::Template(p, slot));
+        self.status = "<Space>t templates: Enter open · Esc cancel".into();
+    }
+
+    /// Open a composer pre-filled from the named template (`<Space>t`).
+    pub(super) fn open_template(&mut self, name: String) {
+        let identity = inbx_composer::Identity::from_account(&self.account);
+        match inbx_composer::templates::from_template(identity, &self.account.name, &name) {
+            Ok(composer) => {
+                self.composer = Some(composer);
+                self.status = format!("compose: template '{name}'");
+            }
+            Err(e) => {
+                self.status = format!("template '{name}': {e}");
+            }
+        }
+    }
+
+    /// Open the folder CRUD overlay (`<Space>F`).
+    pub(super) fn open_folder_crud(&mut self) {
+        self.folder_crud = Some(FolderCrudState::new());
+        self.status = "folder: c create · r rename · d delete · Esc cancel".into();
+    }
+
+    /// Execute the selected folder CRUD action.
+    pub(super) fn confirm_folder_crud(&mut self) {
+        let Some(crud) = self.folder_crud.as_ref() else {
+            return;
+        };
+        let op = crud.state.selected().unwrap_or(0);
+        let current_folder = self.current_folder().map(|f| f.name.clone());
+        match op {
+            // Create
+            0 => {
+                self.folder_crud = None;
+                self.status = "folder create: type new name (Esc cancel)".into();
+                self.folder_crud_prompt = Some(FolderCrudPrompt::Create(String::new()));
+            }
+            // Rename
+            1 => {
+                let Some(name) = current_folder else {
+                    self.status = "no folder selected".into();
+                    self.folder_crud = None;
+                    return;
+                };
+                self.folder_crud = None;
+                self.status = format!("folder rename '{name}': type new name (Esc cancel)");
+                self.folder_crud_prompt = Some(FolderCrudPrompt::Rename(name, String::new()));
+            }
+            // Delete
+            2 => {
+                let Some(name) = current_folder else {
+                    self.status = "no folder selected".into();
+                    self.folder_crud = None;
+                    return;
+                };
+                self.folder_crud = None;
+                self.status = format!("folder delete '{name}': y to confirm · Esc cancel");
+                self.folder_crud_prompt = Some(FolderCrudPrompt::Delete(name, false));
+            }
+            _ => {
+                self.folder_crud = None;
+            }
+        }
+    }
+
+    /// Apply a folder CRUD prompt action (spawns background task).
+    pub(super) fn apply_folder_crud_prompt(&mut self) {
+        let Some(prompt) = self.folder_crud_prompt.take() else {
+            return;
+        };
+        let account = self.account.clone();
+        let store = self.store.clone();
+        let tx = self.task_tx.0.clone();
+        match prompt {
+            FolderCrudPrompt::Create(name) => {
+                if name.is_empty() {
+                    self.status = "folder create: name cannot be empty".into();
+                    return;
+                }
+                if !self.spawn_pending() {
+                    return;
+                }
+                self.status = format!("creating folder '{name}'…");
+                tokio::spawn(async move {
+                    let result = async {
+                        let mut provider =
+                            inbx_net::connect_provider(&account, Some(&store)).await?;
+                        provider.create_folder(&name).await?;
+                        drop(provider);
+                        Ok::<_, anyhow::Error>(name)
+                    }
+                    .await;
+                    let _ = tx.send(super::tasks::TaskResult::FolderOp(
+                        result.map_err(|e| e.to_string()),
+                    ));
+                });
+            }
+            FolderCrudPrompt::Rename(from, to) => {
+                if to.is_empty() {
+                    self.status = "folder rename: new name cannot be empty".into();
+                    return;
+                }
+                if !self.spawn_pending() {
+                    return;
+                }
+                let msg = format!("renamed '{from}' → '{to}'");
+                self.status = format!("renaming '{from}' → '{to}'…");
+                tokio::spawn(async move {
+                    let result = async {
+                        let mut provider =
+                            inbx_net::connect_provider(&account, Some(&store)).await?;
+                        provider.rename_folder(&from, &to).await?;
+                        drop(provider);
+                        Ok::<_, anyhow::Error>(msg)
+                    }
+                    .await;
+                    let _ = tx.send(super::tasks::TaskResult::FolderOp(
+                        result.map_err(|e| e.to_string()),
+                    ));
+                });
+            }
+            FolderCrudPrompt::Delete(name, _confirmed) => {
+                if !self.spawn_pending() {
+                    return;
+                }
+                let msg = format!("deleted '{name}'");
+                self.status = format!("deleting '{name}'…");
+                tokio::spawn(async move {
+                    let result = async {
+                        let mut provider =
+                            inbx_net::connect_provider(&account, Some(&store)).await?;
+                        provider.delete_folder(&name).await?;
+                        drop(provider);
+                        Ok::<_, anyhow::Error>(msg)
+                    }
+                    .await;
+                    let _ = tx.send(super::tasks::TaskResult::FolderOp(
+                        result.map_err(|e| e.to_string()),
+                    ));
+                });
+            }
+        }
+    }
+
     pub(super) async fn run_search(&mut self) -> Result<()> {
         let Some(s) = self.search.as_mut() else {
             return Ok(());
@@ -1628,20 +1856,41 @@ impl App {
                 m.flags.clone(),
             )
         });
+        let raw_headers = self.preview_raw_headers;
         match snapshot {
             None => {
                 self.body.clear();
             }
             Some((uid, Some(path), ..)) => {
-                self.body = render_path(&path);
-                // Parse the rendered message for receipt + code_body.
-                if let Ok(raw) = std::fs::read(&path)
-                    && let Ok(rendered) = inbx_render::render_message(&raw, RemotePolicy::Block)
-                {
-                    if !self.receipt_responded.contains(&uid) {
-                        self.current_receipt = rendered.read_receipt_request.clone();
+                if raw_headers {
+                    // Show raw RFC 5322 headers (everything before the first blank line).
+                    self.body = match std::fs::read(&path) {
+                        Ok(bytes) => {
+                            let text = String::from_utf8_lossy(&bytes);
+                            // Split on \r\n\r\n or \n\n — whichever comes first.
+                            let crlf_pos = text.find("\r\n\r\n");
+                            let lf_pos = text.find("\n\n");
+                            let end = match (crlf_pos, lf_pos) {
+                                (Some(a), Some(b)) => a.min(b),
+                                (Some(a), None) => a,
+                                (None, Some(b)) => b,
+                                (None, None) => text.len(),
+                            };
+                            text[..end].to_string()
+                        }
+                        Err(e) => format!("[error reading file: {e}]"),
+                    };
+                } else {
+                    self.body = render_path(&path);
+                    // Parse the rendered message for receipt + code_body.
+                    if let Ok(raw) = std::fs::read(&path)
+                        && let Ok(rendered) = inbx_render::render_message(&raw, RemotePolicy::Block)
+                    {
+                        if !self.receipt_responded.contains(&uid) {
+                            self.current_receipt = rendered.read_receipt_request.clone();
+                        }
+                        self.current_rendered = Some(rendered);
                     }
-                    self.current_rendered = Some(rendered);
                 }
             }
             Some((_, None, folder, from_addr, subject, flags)) => {

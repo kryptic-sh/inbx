@@ -139,6 +139,14 @@ async fn event_loop(term: &mut Term, app: &mut App) -> Result<()> {
                     keys::handle_ical_key(app, key).await?;
                     continue;
                 }
+                if app.folder_crud.is_some() {
+                    keys::handle_folder_crud_key(app, key).await?;
+                    continue;
+                }
+                if app.folder_crud_prompt.is_some() {
+                    keys::handle_folder_crud_prompt_key(app, key).await?;
+                    continue;
+                }
                 if app.active_wizard.is_some() {
                     keys::handle_wizard_key(app, key).await?;
                     continue;
@@ -247,6 +255,26 @@ async fn handle_task_result(app: &mut App, result: tasks::TaskResult) -> Result<
             // Restore the wizard so the user can retry.
             app.active_sieve_wizard = Some(wizard::SieveEditWizard::new(name, body));
             app.status = format!("sieve save failed: {e}");
+        }
+        TaskResult::FolderOp(result) => {
+            app.complete_pending();
+            match result {
+                Ok(msg) => {
+                    // Refresh the folder list so the new/renamed/deleted folder appears.
+                    if let Ok(store) = inbx_store::Store::open(&app.account.name).await
+                        && let Ok(folders) = store.list_folders().await
+                    {
+                        app.folders = folders;
+                        if !app.folders.is_empty() && app.folder_state.selected().is_none() {
+                            app.folder_state.select(Some(0));
+                        }
+                    }
+                    app.status = msg;
+                }
+                Err(e) => {
+                    app.status = format!("folder op failed: {e}");
+                }
+            }
         }
         TaskResult::WatchSignal => {
             // Background watch (IMAP IDLE or JMAP EventSource) fired.

@@ -5,7 +5,7 @@ use hjkl_form::FormMode;
 use hjkl_picker::PickerEvent;
 use inbx_composer::FocusedEditor;
 
-use super::app::{ActivePicker, App, LeaderState};
+use super::app::{ActivePicker, App, FolderCrudPrompt, LeaderState};
 use super::binds::{Action, Context};
 
 /// Returns true to quit the TUI.
@@ -582,6 +582,7 @@ pub(super) async fn handle_active_picker_key(app: &mut App, key: KeyEvent) -> Re
         ActivePicker::Message(p, _) => p.handle_key(key),
         ActivePicker::Attachment(p, _, _) => p.handle_key(key),
         ActivePicker::Sieve(p, _) => p.handle_key(key),
+        ActivePicker::Template(p, _) => p.handle_key(key),
     };
 
     match event {
@@ -622,6 +623,11 @@ pub(super) async fn handle_active_picker_key(app: &mut App, key: KeyEvent) -> Re
                         app.open_sieve_edit(name);
                     }
                 }
+                ActivePicker::Template(_, slot) => {
+                    if let Some(name) = slot.lock().ok().and_then(|mut g| g.take()) {
+                        app.open_template(name);
+                    }
+                }
             }
         }
         PickerEvent::None => {
@@ -642,9 +648,140 @@ pub(super) async fn handle_active_picker_key(app: &mut App, key: KeyEvent) -> Re
                 ActivePicker::Sieve(p, _) => {
                     p.refresh();
                 }
+                ActivePicker::Template(p, _) => {
+                    p.refresh();
+                }
             }
             app.active_picker = Some(picker_state);
         }
+    }
+    Ok(())
+}
+
+/// Route key events when the folder CRUD action-choice overlay is open.
+pub(super) async fn handle_folder_crud_key(app: &mut App, key: KeyEvent) -> Result<()> {
+    match key.code {
+        KeyCode::Esc => {
+            app.folder_crud = None;
+            app.status = "folder: cancelled".into();
+        }
+        KeyCode::Enter => {
+            app.confirm_folder_crud();
+        }
+        KeyCode::Up | KeyCode::Char('k') if key.modifiers.is_empty() => {
+            if let Some(crud) = app.folder_crud.as_mut() {
+                let cur = crud.state.selected().unwrap_or(0);
+                crud.state.select(Some(if cur == 0 { 2 } else { cur - 1 }));
+            }
+        }
+        KeyCode::Down | KeyCode::Char('j') if key.modifiers.is_empty() => {
+            if let Some(crud) = app.folder_crud.as_mut() {
+                let cur = crud.state.selected().unwrap_or(0);
+                crud.state.select(Some((cur + 1) % 3));
+            }
+        }
+        KeyCode::Char('c') if key.modifiers.is_empty() => {
+            if let Some(crud) = app.folder_crud.as_mut() {
+                crud.state.select(Some(0));
+            }
+            app.confirm_folder_crud();
+        }
+        KeyCode::Char('r') if key.modifiers.is_empty() => {
+            if let Some(crud) = app.folder_crud.as_mut() {
+                crud.state.select(Some(1));
+            }
+            app.confirm_folder_crud();
+        }
+        KeyCode::Char('d') if key.modifiers.is_empty() => {
+            if let Some(crud) = app.folder_crud.as_mut() {
+                crud.state.select(Some(2));
+            }
+            app.confirm_folder_crud();
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Route key events when a folder CRUD text-input prompt is open
+/// (create name / rename new name / delete confirm).
+pub(super) async fn handle_folder_crud_prompt_key(app: &mut App, key: KeyEvent) -> Result<()> {
+    match key.code {
+        KeyCode::Esc => {
+            app.folder_crud_prompt = None;
+            app.status = "folder: cancelled".into();
+            return Ok(());
+        }
+        KeyCode::Enter => {
+            // For Delete prompts, the enter key only fires after 'y' confirms.
+            let ready = match &app.folder_crud_prompt {
+                Some(FolderCrudPrompt::Delete(_, confirmed)) => *confirmed,
+                Some(FolderCrudPrompt::Create(name)) => !name.is_empty(),
+                Some(FolderCrudPrompt::Rename(_, new_name)) => !new_name.is_empty(),
+                None => false,
+            };
+            if ready {
+                app.apply_folder_crud_prompt();
+            } else if matches!(
+                &app.folder_crud_prompt,
+                Some(FolderCrudPrompt::Delete(_, false))
+            ) {
+                app.status = "folder delete: press y to confirm, Esc to cancel".into();
+            }
+            return Ok(());
+        }
+        KeyCode::Char('y') if key.modifiers.is_empty() => {
+            // Confirm delete.
+            if let Some(FolderCrudPrompt::Delete(_, confirmed)) = app.folder_crud_prompt.as_mut() {
+                *confirmed = true;
+                app.apply_folder_crud_prompt();
+                return Ok(());
+            }
+            // For create/rename: treat as regular character input.
+            match app.folder_crud_prompt.as_mut() {
+                Some(FolderCrudPrompt::Create(name)) => name.push('y'),
+                Some(FolderCrudPrompt::Rename(_, new_name)) => new_name.push('y'),
+                _ => {}
+            }
+        }
+        KeyCode::Backspace => match app.folder_crud_prompt.as_mut() {
+            Some(FolderCrudPrompt::Create(name)) => {
+                name.pop();
+            }
+            Some(FolderCrudPrompt::Rename(_, new_name)) => {
+                new_name.pop();
+            }
+            _ => {}
+        },
+        KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            match app.folder_crud_prompt.as_mut() {
+                Some(FolderCrudPrompt::Create(name)) => {
+                    name.push(c);
+                }
+                Some(FolderCrudPrompt::Rename(_, new_name)) => {
+                    new_name.push(c);
+                }
+                Some(FolderCrudPrompt::Delete(_, _)) => {
+                    // Only 'y' does something for delete — handled above.
+                }
+                None => {}
+            }
+        }
+        _ => {}
+    }
+    // Update status to show current input.
+    match &app.folder_crud_prompt {
+        Some(FolderCrudPrompt::Create(name)) => {
+            app.status = format!("folder create: {name}_ (Enter confirm · Esc cancel)");
+        }
+        Some(FolderCrudPrompt::Rename(from, new_name)) => {
+            app.status =
+                format!("folder rename '{from}' → {new_name}_ (Enter confirm · Esc cancel)");
+        }
+        Some(FolderCrudPrompt::Delete(name, _)) => {
+            app.status = format!("folder delete '{name}': y to confirm · Esc cancel");
+        }
+        None => {}
     }
     Ok(())
 }
