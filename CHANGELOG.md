@@ -37,6 +37,9 @@ patch bumps.
 
 ### Changed
 
+- `inbx` with no subcommand now launches the TUI directly; `inbx tui` remains as
+  an equivalent alias. `inbx --account foo` (no subcommand) opens the TUI for
+  that account.
 - TUI now spawns `inbx_sync::run` in-process (single account, no IPC, no desktop
   notifications) when no `inbx-sync` daemon is detected at startup on
   Linux/macOS. Users running the daemon see no change; the in-process task is

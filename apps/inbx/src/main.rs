@@ -63,6 +63,7 @@ const LONG_ABOUT: &str = concat!(
     include_str!("art.txt"),
     "\nmodal-vim email client · v",
     env!("CARGO_PKG_VERSION"),
+    "\n\nRun `inbx` with no subcommand to launch the TUI directly.",
 );
 
 #[derive(Parser)]
@@ -73,8 +74,11 @@ const LONG_ABOUT: &str = concat!(
     long_about = LONG_ABOUT,
 )]
 struct Cli {
+    /// Account to use when no subcommand is given (launches TUI).
+    #[arg(long)]
+    account: Option<String>,
     #[command(subcommand)]
-    command: Cmd,
+    command: Option<Cmd>,
 }
 
 #[derive(Subcommand)]
@@ -153,7 +157,7 @@ enum Cmd {
         #[arg(long = "attach")]
         attachments: Vec<std::path::PathBuf>,
     },
-    /// Launch the read-only TUI.
+    /// Launch the TUI (default when no subcommand is given).
     Tui {
         #[arg(long)]
         account: Option<String>,
@@ -977,161 +981,164 @@ async fn main() -> Result<()> {
     let _log_guard = init_logging();
     let cli = Cli::parse();
     match cli.command {
-        Cmd::Config => cmd_config(),
-        Cmd::Accounts { action } => match action {
-            AccountCmd::Add { oauth } => cmd_accounts_add(oauth),
-            AccountCmd::List => cmd_accounts_list(),
-            AccountCmd::Test { account } => cmd_accounts_test(account).await,
-            AccountCmd::Folders { account } => cmd_accounts_folders(account).await,
-            AccountCmd::Remove { account, purge } => cmd_accounts_remove(account, purge),
-            AccountCmd::Edit {
+        None => return cmd_tui(cli.account).await,
+        Some(cmd) => match cmd {
+            Cmd::Config => cmd_config(),
+            Cmd::Accounts { action } => match action {
+                AccountCmd::Add { oauth } => cmd_accounts_add(oauth),
+                AccountCmd::List => cmd_accounts_list(),
+                AccountCmd::Test { account } => cmd_accounts_test(account).await,
+                AccountCmd::Folders { account } => cmd_accounts_folders(account).await,
+                AccountCmd::Remove { account, purge } => cmd_accounts_remove(account, purge),
+                AccountCmd::Edit {
+                    account,
+                    email,
+                    imap_host,
+                    imap_port,
+                    imap_security,
+                    smtp_host,
+                    smtp_port,
+                    smtp_security,
+                    username,
+                } => cmd_accounts_edit(
+                    account,
+                    email,
+                    imap_host,
+                    imap_port,
+                    imap_security,
+                    smtp_host,
+                    smtp_port,
+                    smtp_security,
+                    username,
+                ),
+            },
+            Cmd::Fetch {
                 account,
-                email,
-                imap_host,
-                imap_port,
-                imap_security,
-                smtp_host,
-                smtp_port,
-                smtp_security,
-                username,
-            } => cmd_accounts_edit(
-                account,
-                email,
-                imap_host,
-                imap_port,
-                imap_security,
-                smtp_host,
-                smtp_port,
-                smtp_security,
-                username,
-            ),
-        },
-        Cmd::Fetch {
-            account,
-            folder,
-            all,
-            since,
-            bodies,
-            body_limit,
-            notify,
-        } => {
-            if all {
-                cmd_fetch_all(account, since, bodies, body_limit, notify).await
-            } else {
-                cmd_fetch(account, folder, since, bodies, body_limit, notify).await
+                folder,
+                all,
+                since,
+                bodies,
+                body_limit,
+                notify,
+            } => {
+                if all {
+                    cmd_fetch_all(account, since, bodies, body_limit, notify).await
+                } else {
+                    cmd_fetch(account, folder, since, bodies, body_limit, notify).await
+                }
             }
-        }
-        Cmd::List {
-            account,
-            folder,
-            limit,
-        } => cmd_list(account, folder, limit).await,
-        Cmd::Show {
-            account,
-            folder,
-            uid,
-        } => cmd_show(account, folder, uid).await,
-        Cmd::Headers {
-            account,
-            folder,
-            uid,
-        } => cmd_headers(account, folder, uid).await,
-        Cmd::Body {
-            account,
-            folder,
-            uid,
-        } => cmd_body(account, folder, uid).await,
-        Cmd::Send {
-            account,
-            no_save,
-            attachments,
-        } => cmd_send(account, no_save, attachments).await,
-        Cmd::Tui { account } => cmd_tui(account).await,
-        Cmd::Contacts { action } => cmd_contacts(action).await,
-        Cmd::OAuth { action } => cmd_oauth(action).await,
-        Cmd::Graph { action } => cmd_graph(action).await,
-        Cmd::Jmap { action } => cmd_jmap(action).await,
-        Cmd::Search {
-            account,
-            query,
-            limit,
-        } => cmd_search(account, query, limit).await,
-        Cmd::Thread { account, thread_id } => cmd_thread(account, thread_id).await,
-        Cmd::Ical { action } => cmd_ical(action).await,
-        Cmd::Cal { action } => cmd_cal(action).await,
-        Cmd::Draft { action } => cmd_draft(action).await,
-        Cmd::Template { action } => cmd_template(action).await,
-        Cmd::Watch {
-            account,
-            folder,
-            bodies,
-        } => cmd_watch(account, folder, bodies).await,
-        Cmd::Sync {
-            account,
-            bodies,
-            body_limit,
-            idle_folder,
-            folders,
-            notify,
-        } => cmd_sync(account, bodies, body_limit, idle_folder, folders, notify).await,
-        Cmd::Completion { shell } => {
-            use clap::CommandFactory;
-            let mut cmd = Cli::command();
-            clap_complete::generate(shell, &mut cmd, "inbx", &mut std::io::stdout());
-            Ok(())
-        }
-        Cmd::Outbox { action } => cmd_outbox(action).await,
-        Cmd::Mark {
-            account,
-            folder,
-            verb,
-            uid,
-        } => cmd_mark(account, folder, verb, uid).await,
-        Cmd::Expunge { account, folder } => cmd_expunge(account, folder).await,
-        Cmd::Mv {
-            account,
-            from,
-            to,
-            uid,
-        } => cmd_move_or_copy(account, from, to, uid, false).await,
-        Cmd::Cp {
-            account,
-            from,
-            to,
-            uid,
-        } => cmd_move_or_copy(account, from, to, uid, true).await,
-        Cmd::Flag {
-            account,
-            folder,
-            uid,
-            add,
-            del,
-        } => cmd_flag(account, folder, uid, add, del).await,
-        Cmd::Folder { action } => cmd_folder(action).await,
-        Cmd::Sieve { action } => cmd_sieve(action).await,
-        Cmd::Unsubscribe {
-            account,
-            folder,
-            uid,
-            mailto,
-            dry_run,
-        } => cmd_unsubscribe(account, folder, uid, mailto, dry_run).await,
-        Cmd::Pgp { cmd } => cmd_pgp(cmd).await,
-        Cmd::Export {
-            account,
-            folder,
-            output,
-            eml,
-            uid,
-            since,
-            limit,
-        } => cmd_export(account, folder, output, eml, uid, since, limit).await,
-        Cmd::Import {
-            account,
-            folder,
-            input,
-            eml,
-        } => cmd_import(account, folder, input, eml).await,
+            Cmd::List {
+                account,
+                folder,
+                limit,
+            } => cmd_list(account, folder, limit).await,
+            Cmd::Show {
+                account,
+                folder,
+                uid,
+            } => cmd_show(account, folder, uid).await,
+            Cmd::Headers {
+                account,
+                folder,
+                uid,
+            } => cmd_headers(account, folder, uid).await,
+            Cmd::Body {
+                account,
+                folder,
+                uid,
+            } => cmd_body(account, folder, uid).await,
+            Cmd::Send {
+                account,
+                no_save,
+                attachments,
+            } => cmd_send(account, no_save, attachments).await,
+            Cmd::Tui { account } => cmd_tui(account).await,
+            Cmd::Contacts { action } => cmd_contacts(action).await,
+            Cmd::OAuth { action } => cmd_oauth(action).await,
+            Cmd::Graph { action } => cmd_graph(action).await,
+            Cmd::Jmap { action } => cmd_jmap(action).await,
+            Cmd::Search {
+                account,
+                query,
+                limit,
+            } => cmd_search(account, query, limit).await,
+            Cmd::Thread { account, thread_id } => cmd_thread(account, thread_id).await,
+            Cmd::Ical { action } => cmd_ical(action).await,
+            Cmd::Cal { action } => cmd_cal(action).await,
+            Cmd::Draft { action } => cmd_draft(action).await,
+            Cmd::Template { action } => cmd_template(action).await,
+            Cmd::Watch {
+                account,
+                folder,
+                bodies,
+            } => cmd_watch(account, folder, bodies).await,
+            Cmd::Sync {
+                account,
+                bodies,
+                body_limit,
+                idle_folder,
+                folders,
+                notify,
+            } => cmd_sync(account, bodies, body_limit, idle_folder, folders, notify).await,
+            Cmd::Completion { shell } => {
+                use clap::CommandFactory;
+                let mut cmd = Cli::command();
+                clap_complete::generate(shell, &mut cmd, "inbx", &mut std::io::stdout());
+                Ok(())
+            }
+            Cmd::Outbox { action } => cmd_outbox(action).await,
+            Cmd::Mark {
+                account,
+                folder,
+                verb,
+                uid,
+            } => cmd_mark(account, folder, verb, uid).await,
+            Cmd::Expunge { account, folder } => cmd_expunge(account, folder).await,
+            Cmd::Mv {
+                account,
+                from,
+                to,
+                uid,
+            } => cmd_move_or_copy(account, from, to, uid, false).await,
+            Cmd::Cp {
+                account,
+                from,
+                to,
+                uid,
+            } => cmd_move_or_copy(account, from, to, uid, true).await,
+            Cmd::Flag {
+                account,
+                folder,
+                uid,
+                add,
+                del,
+            } => cmd_flag(account, folder, uid, add, del).await,
+            Cmd::Folder { action } => cmd_folder(action).await,
+            Cmd::Sieve { action } => cmd_sieve(action).await,
+            Cmd::Unsubscribe {
+                account,
+                folder,
+                uid,
+                mailto,
+                dry_run,
+            } => cmd_unsubscribe(account, folder, uid, mailto, dry_run).await,
+            Cmd::Pgp { cmd } => cmd_pgp(cmd).await,
+            Cmd::Export {
+                account,
+                folder,
+                output,
+                eml,
+                uid,
+                since,
+                limit,
+            } => cmd_export(account, folder, output, eml, uid, since, limit).await,
+            Cmd::Import {
+                account,
+                folder,
+                input,
+                eml,
+            } => cmd_import(account, folder, input, eml).await,
+        },
     }
 }
 
