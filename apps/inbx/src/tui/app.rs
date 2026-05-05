@@ -1804,7 +1804,7 @@ impl App {
                 .list_messages(&name, 200)
                 .await?
                 .into_iter()
-                .filter(|m| !m.flags.to_ascii_lowercase().contains("\\deleted"))
+                .filter(|m| !m.flags.to_ascii_lowercase().contains("deleted"))
                 .collect(),
             None => Vec::new(),
         };
