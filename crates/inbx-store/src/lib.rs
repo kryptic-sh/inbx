@@ -510,6 +510,21 @@ impl Store {
         Ok(uids)
     }
 
+    /// Return `(folder, unread_count)` pairs for every folder with at least one
+    /// unread message. "Unread" = flags do not contain "seen"; deleted rows are
+    /// excluded.
+    pub async fn folder_unread_counts(&self) -> Result<Vec<(String, i64)>> {
+        let rows: Vec<(String, i64)> = sqlx::query_as(
+            "SELECT folder, COUNT(*) FROM messages
+             WHERE LOWER(flags) NOT LIKE '%seen%'
+               AND LOWER(flags) NOT LIKE '%deleted%'
+             GROUP BY folder",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
     /// Drop messages from the local index (e.g. after EXPUNGE or UID MOVE).
     pub async fn delete_messages(&self, folder: &str, uids: &[i64]) -> Result<()> {
         if uids.is_empty() {

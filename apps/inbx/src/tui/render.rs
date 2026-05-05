@@ -175,7 +175,21 @@ fn draw_folders(f: &mut ratatui::Frame, app: &App, area: Rect) {
     let items: Vec<ListItem> = app
         .folders
         .iter()
-        .map(|fld| ListItem::new(folder_display_name(&fld.name, fld.special_use.as_deref())))
+        .map(|fld| {
+            let name = folder_display_name(&fld.name, fld.special_use.as_deref());
+            let unread = app.folder_unread.get(&fld.name).copied().unwrap_or(0);
+            let label = if unread > 0 {
+                format!("{name}  ({unread})")
+            } else {
+                name
+            };
+            let style = if unread > 0 {
+                Style::default().add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            ListItem::new(Line::from(Span::styled(label, style)))
+        })
         .collect();
     let list = List::new(items)
         .block(pane_block("folders", app.pane == Pane::Folders))

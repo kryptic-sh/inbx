@@ -300,6 +300,10 @@ async fn handle_task_result(app: &mut App, result: tasks::TaskResult) -> Result<
                         .unwrap_or_default();
                     if account == current_account && folder == current_folder {
                         app.reload_messages().await?;
+                    } else if account == current_account {
+                        // Different folder for the same account — refresh badges
+                        // so the unread count next to that folder updates.
+                        app.refresh_folder_unread().await;
                     }
                 }
                 IpcEvent::Heartbeat { ts_unix } => {

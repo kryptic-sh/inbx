@@ -95,6 +95,8 @@ pub(super) struct App {
     pub(super) account: Account,
     pub(super) store: Store,
     pub(super) folders: Vec<FolderRow>,
+    /// Per-folder unread count, refreshed after every message reload + sync.
+    pub(super) folder_unread: std::collections::HashMap<String, i64>,
     pub(super) folder_state: ListState,
     pub(super) messages: Vec<MessageRow>,
     pub(super) msg_state: ListState,
@@ -419,6 +421,7 @@ impl App {
             account,
             store,
             folders,
+            folder_unread: std::collections::HashMap::new(),
             folder_state,
             messages: Vec::new(),
             msg_state: ListState::default(),
@@ -1795,6 +1798,13 @@ impl App {
         self.msg_state.selected().and_then(|i| self.messages.get(i))
     }
 
+    pub(super) async fn refresh_folder_unread(&mut self) {
+        match self.store.folder_unread_counts().await {
+            Ok(rows) => self.folder_unread = rows.into_iter().collect(),
+            Err(e) => tracing::debug!(%e, "folder_unread_counts failed"),
+        }
+    }
+
     pub(super) async fn reload_messages(&mut self) -> Result<()> {
         let folder = self.current_folder().map(|f| f.name.clone());
         let prior = self.msg_state.selected();
@@ -1818,6 +1828,7 @@ impl App {
         }
         self.refresh_body();
         self.respawn_watch();
+        self.refresh_folder_unread().await;
         Ok(())
     }
 
