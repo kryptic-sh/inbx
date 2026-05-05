@@ -79,10 +79,9 @@ async fn main() -> Result<()> {
         }
     };
     #[cfg(not(unix))]
-    let ipc_server: Option<()> = {
+    {
         tracing::warn!("ipc: unix sockets not supported on this platform; running without IPC");
-        None
-    };
+    }
 
     // Heartbeat task: every 60s broadcast a Heartbeat so TUI clients can
     // detect a stale/dead daemon.
@@ -125,8 +124,7 @@ async fn main() -> Result<()> {
                         tokio::time::sleep(Duration::from_secs(30)).await;
                         continue;
                     }
-                    Ok(new_count) =>
-                    {
+                    Ok(new_count) => {
                         #[cfg(unix)]
                         if let Some(ref srv) = ipc {
                             srv.send(inbx_ipc::Event::FolderUpdated {
@@ -135,6 +133,8 @@ async fn main() -> Result<()> {
                                 new_count,
                             });
                         }
+                        #[cfg(not(unix))]
+                        let _ = new_count;
                     }
                 }
                 wait_for_change(&acct, &folder).await;
