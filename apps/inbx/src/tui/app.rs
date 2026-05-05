@@ -109,6 +109,12 @@ pub(super) struct App {
     pub(super) active_wizard: Option<super::wizard::AccountWizard>,
     /// Active Sieve-script edit wizard. `None` when not open.
     pub(super) active_sieve_wizard: Option<super::wizard::SieveEditWizard>,
+    /// Cached ManageSieve session shared across the picker → edit → save flow.
+    /// `None` means no live connection — the next sieve op will lazy-connect.
+    /// Wrapped in `Arc<Mutex>` so the spawned task can hold it across `.await`
+    /// without blocking the event loop and so the cache survives between tasks.
+    pub(super) sieve_session:
+        std::sync::Arc<tokio::sync::Mutex<Option<inbx_net::sieve::SieveClient>>>,
     /// True while an async operation (manual sync, fetch, outbox drain) is
     /// in flight. The event loop forces redraws at 120 ms while busy so the
     /// spinner in the status line animates.
@@ -321,6 +327,7 @@ impl App {
             active_picker: None,
             active_wizard: None,
             active_sieve_wizard: None,
+            sieve_session: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
             busy: false,
             pending_op_count: 0,
             task_tx,
@@ -1229,6 +1236,18 @@ impl App {
         self.status = "<Space>a attachments: Enter save · Esc cancel".into();
     }
 
+    /// Drop the cached sieve session, sending LOGOUT if the connection is live.
+    /// Spawned onto a task so the caller isn't blocked on the network round-trip.
+    pub(super) fn drop_sieve_session(&mut self) {
+        let cache = self.sieve_session.clone();
+        tokio::spawn(async move {
+            let mut guard = cache.lock().await;
+            if let Some(client) = guard.take() {
+                let _ = client.logout().await;
+            }
+        });
+    }
+
     /// Connect to ManageSieve, list scripts, open a picker (`<Space>S`).
     /// Spawns a background task; result comes back as `TaskResult::SieveScripts`.
     pub(super) fn open_sieve_picker(&mut self) {
@@ -1237,9 +1256,10 @@ impl App {
         }
         self.status = "sieve: connecting…".into();
         let account = self.account.clone();
+        let cache = self.sieve_session.clone();
         let tx = self.task_tx.0.clone();
         tokio::spawn(async move {
-            let result = do_sieve_list(account).await;
+            let result = do_sieve_list(account, cache).await;
             let _ = tx.send(result);
         });
     }
@@ -1252,9 +1272,10 @@ impl App {
         }
         self.status = format!("sieve: fetching '{name}'…");
         let account = self.account.clone();
+        let cache = self.sieve_session.clone();
         let tx = self.task_tx.0.clone();
         tokio::spawn(async move {
-            let result = do_sieve_get(account, name).await;
+            let result = do_sieve_get(account, cache, name).await;
             let _ = tx.send(result);
         });
     }
@@ -1275,9 +1296,10 @@ impl App {
                 }
                 self.status = format!("sieve: saving '{name}'…");
                 let account = self.account.clone();
+                let cache = self.sieve_session.clone();
                 let tx = self.task_tx.0.clone();
                 tokio::spawn(async move {
-                    let result = do_sieve_put(account, name, body).await;
+                    let result = do_sieve_put(account, cache, name, body).await;
                     let _ = tx.send(result);
                 });
             }
@@ -1293,6 +1315,8 @@ impl App {
             self.status = format!("already on {}", target.name);
             return Ok(());
         }
+        // Different account = different credentials; drop any cached session.
+        self.drop_sieve_session();
         let store = Store::open(&target.name).await?;
         self.store = store;
         self.account = target;
@@ -1752,31 +1776,66 @@ async fn do_drain_outbox(account: inbx_config::Account, store: Store) -> super::
     TaskResult::OutboxDrained { sent, failed }
 }
 
-/// Connect to ManageSieve and list scripts off the event-loop thread.
-async fn do_sieve_list(account: inbx_config::Account) -> super::tasks::TaskResult {
-    use super::tasks::TaskResult;
-    let result = async {
-        let mut client = inbx_net::sieve::SieveClient::connect(&account)
+type SieveCache = std::sync::Arc<tokio::sync::Mutex<Option<inbx_net::sieve::SieveClient>>>;
+
+/// Lazy-connect helper: reuses the cached `SieveClient` if live, or
+/// establishes a fresh connection. On any op error the cache is cleared so
+/// the next call reconnects from scratch (the session may be in an
+/// unrecoverable state after a server error).
+async fn ensure_sieve_connected(
+    account: &inbx_config::Account,
+    cache: &SieveCache,
+) -> std::result::Result<(), String> {
+    let mut guard = cache.lock().await;
+    if guard.is_none() {
+        let client = inbx_net::sieve::SieveClient::connect(account)
             .await
             .map_err(|e| e.to_string())?;
-        let scripts = client.list_scripts().await.map_err(|e| e.to_string())?;
-        let _ = client.logout().await;
-        Ok(scripts)
+        *guard = Some(client);
+    }
+    Ok(())
+}
+
+/// Connect to ManageSieve and list scripts off the event-loop thread.
+async fn do_sieve_list(
+    account: inbx_config::Account,
+    cache: SieveCache,
+) -> super::tasks::TaskResult {
+    use super::tasks::TaskResult;
+    let result = async {
+        ensure_sieve_connected(&account, &cache).await?;
+        let mut guard = cache.lock().await;
+        let client = guard.as_mut().expect("just connected");
+        match client.list_scripts().await.map_err(|e| e.to_string()) {
+            Ok(scripts) => Ok(scripts),
+            Err(e) => {
+                *guard = None;
+                Err(e)
+            }
+        }
     }
     .await;
     TaskResult::SieveScripts(result)
 }
 
 /// Fetch a sieve script body off the event-loop thread.
-async fn do_sieve_get(account: inbx_config::Account, name: String) -> super::tasks::TaskResult {
+async fn do_sieve_get(
+    account: inbx_config::Account,
+    cache: SieveCache,
+    name: String,
+) -> super::tasks::TaskResult {
     use super::tasks::TaskResult;
     let body = async {
-        let mut client = inbx_net::sieve::SieveClient::connect(&account)
-            .await
-            .map_err(|e| e.to_string())?;
-        let body = client.get_script(&name).await.map_err(|e| e.to_string())?;
-        let _ = client.logout().await;
-        Ok(body)
+        ensure_sieve_connected(&account, &cache).await?;
+        let mut guard = cache.lock().await;
+        let client = guard.as_mut().expect("just connected");
+        match client.get_script(&name).await.map_err(|e| e.to_string()) {
+            Ok(body) => Ok(body),
+            Err(e) => {
+                *guard = None;
+                Err(e)
+            }
+        }
     }
     .await;
     TaskResult::SieveBody { name, body }
@@ -1785,20 +1844,26 @@ async fn do_sieve_get(account: inbx_config::Account, name: String) -> super::tas
 /// Save a sieve script off the event-loop thread.
 async fn do_sieve_put(
     account: inbx_config::Account,
+    cache: SieveCache,
     name: String,
     body: String,
 ) -> super::tasks::TaskResult {
     use super::tasks::TaskResult;
     let result = async {
-        let mut client = inbx_net::sieve::SieveClient::connect(&account)
-            .await
-            .map_err(|e| e.to_string())?;
-        client
+        ensure_sieve_connected(&account, &cache).await?;
+        let mut guard = cache.lock().await;
+        let client = guard.as_mut().expect("just connected");
+        match client
             .put_script(&name, &body)
             .await
-            .map_err(|e| e.to_string())?;
-        let _ = client.logout().await;
-        Ok(())
+            .map_err(|e| e.to_string())
+        {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                *guard = None;
+                Err(e)
+            }
+        }
     }
     .await;
     TaskResult::SieveSaved { name, body, result }

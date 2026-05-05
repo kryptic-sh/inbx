@@ -208,6 +208,8 @@ async fn handle_task_result(app: &mut App, result: tasks::TaskResult) -> Result<
         }
         TaskResult::SieveScripts(Err(e)) => {
             app.complete_pending();
+            // Cache already cleared inside do_sieve_list on error; belt-and-suspenders.
+            app.drop_sieve_session();
             app.status = format!("sieve list failed: {e}");
         }
         TaskResult::SieveBody {
@@ -231,6 +233,9 @@ async fn handle_task_result(app: &mut App, result: tasks::TaskResult) -> Result<
             result: Ok(()),
         } => {
             app.complete_pending();
+            // Sieve flow complete; drop the cached session — no more ops expected
+            // until the user re-enters the picker.
+            app.drop_sieve_session();
             app.status = format!("sieve: saved {name}");
         }
         TaskResult::SieveSaved {

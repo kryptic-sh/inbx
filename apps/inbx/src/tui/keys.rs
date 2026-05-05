@@ -586,6 +586,11 @@ pub(super) async fn handle_active_picker_key(app: &mut App, key: KeyEvent) -> Re
 
     match event {
         PickerEvent::Cancel => {
+            // Sieve picker cancelled without opening an edit wizard — drop the
+            // cached session so the next picker entry reconnects clean.
+            if matches!(picker_state, ActivePicker::Sieve(_, _)) {
+                app.drop_sieve_session();
+            }
             // picker_state dropped — overlay closed.
             app.status = "picker cancelled".into();
         }
@@ -653,6 +658,8 @@ pub(super) async fn handle_sieve_wizard_key(app: &mut App, key: KeyEvent) -> Res
     if wizard.form.mode == hjkl_form::FormMode::Normal {
         if key.code == KeyCode::Esc {
             app.active_sieve_wizard = None;
+            // Wizard dismissed without saving; drop the cached session.
+            app.drop_sieve_session();
             app.status = "sieve: cancelled".into();
             return Ok(());
         }
