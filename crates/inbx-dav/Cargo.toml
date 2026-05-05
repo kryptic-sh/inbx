@@ -1,6 +1,5 @@
 [package]
-name = "inbx-ical"
-description = "inbx ical: invite display + RSVP"
+name = "inbx-dav"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,10 +9,5 @@ homepage.workspace = true
 authors.workspace = true
 
 [dependencies]
-inbx-dav.workspace = true
-thiserror.workspace = true
-mail-parser.workspace = true
-icalendar.workspace = true
 reqwest.workspace = true
-tokio.workspace = true
-tracing.workspace = true
+thiserror.workspace = true

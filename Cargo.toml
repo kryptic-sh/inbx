@@ -6,6 +6,7 @@ members = [
     "crates/inbx-config",
     "crates/inbx-pgp",
     "crates/inbx-render",
+    "crates/inbx-dav",
     "crates/inbx-contacts",
     "crates/inbx-ical",
     "crates/inbx-composer",
@@ -89,6 +90,7 @@ inbx-store = { version = "0.3.2", path = "crates/inbx-store" }
 inbx-config = { version = "0.3.2", path = "crates/inbx-config" }
 inbx-pgp = { version = "0.3.2", path = "crates/inbx-pgp" }
 inbx-render = { version = "0.3.2", path = "crates/inbx-render" }
+inbx-dav = { version = "0.3.2", path = "crates/inbx-dav" }
 inbx-contacts = { version = "0.3.2", path = "crates/inbx-contacts" }
 inbx-ical = { version = "0.3.2", path = "crates/inbx-ical" }
 inbx-composer = { version = "0.3.2", path = "crates/inbx-composer" }

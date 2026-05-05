@@ -2617,6 +2617,7 @@ version = "0.3.2"
 dependencies = [
  "async-trait",
  "inbx-config",
+ "inbx-dav",
  "inbx-pgp",
  "mail-parser",
  "reqwest",
@@ -2627,10 +2628,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "inbx-dav"
+version = "0.3.2"
+dependencies = [
+ "reqwest",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "inbx-ical"
 version = "0.3.2"
 dependencies = [
  "icalendar",
+ "inbx-dav",
  "mail-parser",
  "reqwest",
  "thiserror 2.0.18",

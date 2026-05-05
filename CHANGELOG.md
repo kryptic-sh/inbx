@@ -8,6 +8,11 @@ patch bumps.
 
 ## [Unreleased]
 
+### Changed
+
+- Extract shared DAV helpers (PROPFIND + XML scrape) into new `inbx-dav` crate
+  (consumed by inbx-contacts + inbx-ical).
+
 ### Added
 
 - Homebrew tap auto-publish for `inbx` on tag push. New

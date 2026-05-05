@@ -1,5 +1,3 @@
-// TODO(dav-shared): lift PROPFIND helpers to a shared inbx-dav crate once second consumer landed.
-
 //! Minimal CalDAV pull (RFC 4791).
 //!
 //! No auto-discovery required by the caller. Pass any URL on the CalDAV
@@ -18,6 +16,8 @@ pub enum Error {
     Reqwest(#[from] reqwest::Error),
     #[error("server: {status}: {body}")]
     Server { status: u16, body: String },
+    #[error("dav: {0}")]
+    Dav(#[from] inbx_dav::Error),
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
     #[error("parse: {0}")]
@@ -98,7 +98,7 @@ pub async fn discover(
         .build()?;
 
     // Step 1: principal URL.
-    let principal = match propfind_extract(
+    let principal = match inbx_dav::propfind_extract(
         &http,
         server_base,
         user,
@@ -109,12 +109,12 @@ pub async fn discover(
     )
     .await?
     {
-        Some(href) => absolutize(server_base, &href),
+        Some(href) => inbx_dav::absolutize(server_base, &href),
         None => server_base.to_string(),
     };
 
     // Step 2: calendar-home-set off the principal.
-    let home = match propfind_extract(
+    let home = match inbx_dav::propfind_extract(
         &http,
         &principal,
         user,
@@ -125,28 +125,29 @@ pub async fn discover(
     )
     .await?
     {
-        Some(href) => absolutize(&principal, &href),
+        Some(href) => inbx_dav::absolutize(&principal, &href),
         None => principal.clone(),
     };
 
     // Step 3: depth-1 PROPFIND of the home; collect resources of type calendar.
-    let body = propfind_raw(&http, &home, user, password, PROPFIND_CALENDARS, "1").await?;
+    let body =
+        inbx_dav::propfind_raw(&http, &home, user, password, PROPFIND_CALENDARS, "1").await?;
     let mut out = Vec::new();
-    for resp in split_responses(&body) {
+    for resp in inbx_dav::split_responses(&body) {
         if !resp.contains("<calendar") && !resp.contains(":calendar") {
             continue;
         }
         // Make sure it's a resourcetype=calendar, not e.g. a calendar-home-set.
         // The resourcetype block looks like <resourcetype><calendar/></resourcetype>.
-        let Some(href) = extract_tag_text(&resp, "href") else {
+        let Some(href) = inbx_dav::extract_tag_text(&resp, "href") else {
             continue;
         };
-        let url = absolutize(&home, &href);
+        let url = inbx_dav::absolutize(&home, &href);
         if url == home {
             continue;
         }
-        let display_name = extract_tag_text(&resp, "displayname");
-        let color = extract_tag_text(&resp, "calendar-color");
+        let display_name = inbx_dav::extract_tag_text(&resp, "displayname");
+        let color = inbx_dav::extract_tag_text(&resp, "calendar-color");
         out.push(DiscoveredCalendar {
             url,
             display_name,
@@ -217,7 +218,7 @@ fn extract_calendar_data_blocks(xml: &str) -> Vec<String> {
             break;
         };
         let abs_end = abs_start + end_off + "END:VCALENDAR".len();
-        out.push(decode_xml_entities(&xml[abs_start..abs_end]));
+        out.push(inbx_dav::decode_xml_entities(&xml[abs_start..abs_end]));
         cur = abs_end;
     }
     out
@@ -247,148 +248,6 @@ fn sanitize_uid(uid: &str) -> String {
             }
         })
         .collect()
-}
-
-async fn propfind_raw(
-    http: &reqwest::Client,
-    url: &str,
-    user: &str,
-    password: &str,
-    body: &str,
-    depth: &str,
-) -> Result<String> {
-    let res = http
-        .request(reqwest::Method::from_bytes(b"PROPFIND").unwrap(), url)
-        .basic_auth(user, Some(password))
-        .header("Content-Type", "application/xml; charset=utf-8")
-        .header("Depth", depth)
-        .body(body.to_string())
-        .send()
-        .await?;
-    if !res.status().is_success() {
-        let status = res.status().as_u16();
-        let body = res.text().await.unwrap_or_default();
-        return Err(Error::Server { status, body });
-    }
-    Ok(res.text().await?)
-}
-
-async fn propfind_extract(
-    http: &reqwest::Client,
-    url: &str,
-    user: &str,
-    password: &str,
-    body: &str,
-    depth: &str,
-    parent_tag: &str,
-) -> Result<Option<String>> {
-    let xml = propfind_raw(http, url, user, password, body, depth).await?;
-    Ok(find_href_under(&xml, parent_tag))
-}
-
-fn split_responses(xml: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut cur = 0;
-    while let Some(start) = xml[cur..].find("<") {
-        let abs_start = cur + start;
-        let after = &xml[abs_start..];
-        // Match `<response` or `<*:response`.
-        let header_end = match after.find('>') {
-            Some(e) => abs_start + e + 1,
-            None => break,
-        };
-        let header = &xml[abs_start..header_end];
-        if header.contains("response") && !header.contains("/>") && !header.contains("</") {
-            let close_needle = match header
-                .trim_start_matches('<')
-                .split(|c: char| c.is_whitespace() || c == '>')
-                .next()
-            {
-                Some(name) => format!("</{name}>"),
-                None => break,
-            };
-            let Some(close_off) = xml[header_end..].find(&close_needle) else {
-                break;
-            };
-            let abs_close = header_end + close_off + close_needle.len();
-            out.push(decode_xml_entities(&xml[abs_start..abs_close]));
-            cur = abs_close;
-        } else {
-            cur = header_end;
-        }
-    }
-    out
-}
-
-fn find_href_under(xml: &str, parent_tag: &str) -> Option<String> {
-    // Locate the parent tag (matching `<*:tag` or `<tag`), then the first
-    // <href> inside it.
-    let lower = xml.to_ascii_lowercase();
-    let needle = parent_tag.to_ascii_lowercase();
-    let start = lower.find(&needle)?;
-    let end = lower[start..]
-        .find(&format!("/{needle}"))
-        .map(|e| start + e)
-        .unwrap_or(xml.len());
-    let slice = &xml[start..end];
-    extract_tag_text(slice, "href")
-}
-
-fn extract_tag_text(xml: &str, tag: &str) -> Option<String> {
-    // Match `<tag>text</tag>` or `<*:tag>text</*:tag>` case-insensitively.
-    let lower = xml.to_ascii_lowercase();
-    let mut cur = 0;
-    let needle = format!("{tag}>");
-    while let Some(off) = lower[cur..].find(&needle) {
-        let open_end = cur + off + needle.len();
-        // confirm preceding char is `<` or `:`
-        let bytes = lower.as_bytes();
-        if open_end < needle.len() + 1 {
-            return None;
-        }
-        let preceding = bytes[cur + off - 1];
-        if preceding != b'<' && preceding != b':' {
-            cur = open_end;
-            continue;
-        }
-        // Find closing tag.
-        let close = lower[open_end..].find("</")?;
-        let text = &xml[open_end..open_end + close];
-        let text = decode_xml_entities(text.trim());
-        return Some(text);
-    }
-    None
-}
-
-fn absolutize(base: &str, href: &str) -> String {
-    if href.starts_with("http://") || href.starts_with("https://") {
-        return href.to_string();
-    }
-    // base looks like "https://host/path"; replace path with href if href
-    // starts with `/`.
-    if let Some(scheme_end) = base.find("://") {
-        let after = &base[scheme_end + 3..];
-        let host_end = after
-            .find('/')
-            .map(|i| scheme_end + 3 + i)
-            .unwrap_or(base.len());
-        let host_part = &base[..host_end];
-        if href.starts_with('/') {
-            return format!("{host_part}{href}");
-        }
-        // relative href — append with `/`
-        let trimmed = base.trim_end_matches('/');
-        return format!("{trimmed}/{href}");
-    }
-    href.to_string()
-}
-
-fn decode_xml_entities(s: &str) -> String {
-    s.replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&apos;", "'")
-        .replace("&amp;", "&")
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -458,7 +317,7 @@ END:VCALENDAR</c:calendar-data>
     #[test]
     fn absolutize_absolute_href() {
         assert_eq!(
-            absolutize("https://dav.example.com/", "https://other.com/cal"),
+            inbx_dav::absolutize("https://dav.example.com/", "https://other.com/cal"),
             "https://other.com/cal"
         );
     }
@@ -466,7 +325,7 @@ END:VCALENDAR</c:calendar-data>
     #[test]
     fn absolutize_root_relative() {
         assert_eq!(
-            absolutize("https://dav.example.com/user/", "/calendars/me/"),
+            inbx_dav::absolutize("https://dav.example.com/user/", "/calendars/me/"),
             "https://dav.example.com/calendars/me/"
         );
     }
