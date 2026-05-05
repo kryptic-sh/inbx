@@ -192,15 +192,22 @@ fn draw_messages(f: &mut ratatui::Frame, app: &App, area: Rect) {
             let unread = !m.flags.to_ascii_lowercase().contains("seen");
             let from = m.from_addr.clone().unwrap_or_default();
             let subj = m.subject.clone().unwrap_or_default();
-            let line = format!("{}  {}", truncate(&from, 18), truncate(&subj, 60));
-            let style = if unread {
+            let from_style = if unread {
                 Style::default()
                     .fg(rgb(&theme().unread))
                     .add_modifier(Modifier::BOLD)
             } else {
                 Style::default()
             };
-            ListItem::new(Line::from(Span::styled(line, style)))
+            let subj_style = if unread {
+                Style::default().add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            };
+            ListItem::new(vec![
+                Line::from(Span::styled(from, from_style)),
+                Line::from(Span::styled(format!("  {subj}"), subj_style)),
+            ])
         })
         .collect();
     let list = List::new(items)
