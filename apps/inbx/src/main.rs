@@ -270,9 +270,13 @@ enum Cmd {
         /// Cap on bodies per cycle when --bodies is set.
         #[arg(long, default_value_t = 200)]
         body_limit: u32,
-        /// Folder to watch per account (defaults to INBOX).
+        /// Folder watched via push / IDLE (defaults to INBOX). Push signals on
+        /// this folder trigger an immediate re-sync of ALL folders.
         #[arg(long, default_value = "INBOX")]
-        folder: String,
+        idle_folder: String,
+        /// Restrict sync to these folders. Default: empty = discover all.
+        #[arg(long, num_args = 0..)]
+        folders: Vec<String>,
         /// Fire desktop notifications on new mail.
         #[arg(long)]
         notify: bool,
@@ -1066,9 +1070,10 @@ async fn main() -> Result<()> {
             account,
             bodies,
             body_limit,
-            folder,
+            idle_folder,
+            folders,
             notify,
-        } => cmd_sync(account, bodies, body_limit, folder, notify).await,
+        } => cmd_sync(account, bodies, body_limit, idle_folder, folders, notify).await,
         Cmd::Completion { shell } => {
             use clap::CommandFactory;
             let mut cmd = Cli::command();
@@ -2963,7 +2968,8 @@ async fn cmd_sync(
     account_filter: Vec<String>,
     bodies: bool,
     body_limit: u32,
-    folder: String,
+    idle_folder: String,
+    folders: Vec<String>,
     notify: bool,
 ) -> Result<()> {
     use std::sync::Arc;
@@ -3013,7 +3019,8 @@ async fn cmd_sync(
         accounts,
         ipc: ipc_server,
         notifications: notify,
-        folder,
+        idle_folder,
+        folders,
         fetch_bodies: bodies,
         body_limit,
         poll_interval_secs: 300,

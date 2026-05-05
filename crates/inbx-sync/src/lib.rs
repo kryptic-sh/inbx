@@ -27,14 +27,17 @@ pub struct Config {
     /// Whether to fire desktop notifications on new mail. Set to `false` when
     /// spawned in-process from the TUI (the status line already shows new mail).
     pub notifications: bool,
-    /// Folder to watch / sync per account. Defaults to `"INBOX"` in callers.
-    pub folder: String,
+    /// Folder watched via push (IMAP IDLE / JMAP EventSource / Graph delta).
+    /// Defaults to `"INBOX"` in callers. Push events trigger immediate re-sync
+    /// of all folders.
+    pub idle_folder: String,
+    /// When non-empty, sync only these folders. Empty = discover all from server.
+    pub folders: Vec<String>,
     /// Whether to download message bodies on each fetch cycle.
     pub fetch_bodies: bool,
     /// Cap on bodies fetched per cycle when `fetch_bodies` is true.
     pub body_limit: u32,
-    /// Poll interval in seconds between sync cycles (used for Graph transport).
-    /// Not currently exposed as a loop delay for IMAP/JMAP — kept for future use.
+    /// Seconds between sync cycles. Push signals also trigger a cycle early.
     pub poll_interval_secs: u64,
 }
 
@@ -47,8 +50,14 @@ pub async fn run(cfg: Config) -> Result<()> {
         anyhow::bail!("no accounts configured; run `inbx accounts add`");
     }
 
-    let folder = Arc::new(cfg.folder);
-    tracing::info!(accounts = cfg.accounts.len(), folder = %folder, "inbx-sync starting");
+    let idle_folder = Arc::new(cfg.idle_folder);
+    let static_folders = Arc::new(cfg.folders);
+    let poll_interval_secs = cfg.poll_interval_secs;
+    tracing::info!(
+        accounts = cfg.accounts.len(),
+        idle_folder = %idle_folder,
+        "inbx-sync starting"
+    );
 
     // Heartbeat task: every 60s broadcast a Heartbeat so TUI clients can
     // detect a stale/dead daemon.
@@ -70,7 +79,8 @@ pub async fn run(cfg: Config) -> Result<()> {
 
     let mut tasks = JoinSet::new();
     for acct in cfg.accounts {
-        let folder = folder.clone();
+        let idle_folder = idle_folder.clone();
+        let static_folders = static_folders.clone();
         let fetch_bodies = cfg.fetch_bodies;
         let body_limit = cfg.body_limit;
         let notify = cfg.notifications;
@@ -78,26 +88,87 @@ pub async fn run(cfg: Config) -> Result<()> {
         let ipc = cfg.ipc.clone();
         tasks.spawn(async move {
             loop {
-                match sync_once(&acct, &folder, fetch_bodies, body_limit, notify).await {
-                    Err(e) => {
-                        tracing::warn!(account = %acct.name, %e, "cycle failed; sleeping 30s");
-                        tokio::time::sleep(Duration::from_secs(30)).await;
+                // 1. Determine the folder list for this cycle.
+                //    If the caller fixed a set, use it; otherwise discover from
+                //    the server by running sync_once on the idle folder first
+                //    (which calls list_folders internally and upserts to the
+                //    store), then reading back what the store knows.
+                let folders: Vec<String> = if !static_folders.is_empty() {
+                    static_folders.as_ref().clone()
+                } else {
+                    // Run a discovery sync on the idle folder. This populates
+                    // the store's folders table via inbx_net::list_folders.
+                    match sync_once(&acct, &idle_folder, fetch_bodies, body_limit, notify).await {
+                        Err(e) => {
+                            tracing::warn!(account = %acct.name, %e, "discovery cycle failed; sleeping 30s");
+                            tokio::time::sleep(Duration::from_secs(30)).await;
+                            continue;
+                        }
+                        Ok(new_count) => {
+                            #[cfg(unix)]
+                            if let Some(ref srv) = ipc {
+                                srv.send(inbx_ipc::Event::FolderUpdated {
+                                    account: acct.name.clone(),
+                                    folder: idle_folder.to_string(),
+                                    new_count,
+                                });
+                            }
+                            #[cfg(not(unix))]
+                            let _ = new_count;
+                        }
+                    }
+                    // Read back discovered folders from the store.
+                    match inbx_store::Store::open(&acct.name).await {
+                        Ok(store) => match store.list_folders().await {
+                            Ok(rows) => rows.into_iter().map(|r| r.name).collect(),
+                            Err(e) => {
+                                tracing::warn!(account = %acct.name, %e, "list_folders from store failed; using idle_folder only");
+                                vec![idle_folder.to_string()]
+                            }
+                        },
+                        Err(e) => {
+                            tracing::warn!(account = %acct.name, %e, "store open failed; using idle_folder only");
+                            vec![idle_folder.to_string()]
+                        }
+                    }
+                };
+
+                // 2. Sync every folder (skipping idle_folder — already synced
+                //    during discovery above when static_folders is empty).
+                for folder in &folders {
+                    if static_folders.is_empty() && folder.as_str() == idle_folder.as_str() {
+                        // Already synced in the discovery step above.
                         continue;
                     }
-                    Ok(new_count) => {
-                        #[cfg(unix)]
-                        if let Some(ref srv) = ipc {
-                            srv.send(inbx_ipc::Event::FolderUpdated {
-                                account: acct.name.clone(),
-                                folder: folder.to_string(),
-                                new_count,
-                            });
+                    match sync_once(&acct, folder, fetch_bodies, body_limit, notify).await {
+                        Err(e) => {
+                            tracing::warn!(account = %acct.name, %folder, %e, "folder sync failed; continuing");
                         }
-                        #[cfg(not(unix))]
-                        let _ = new_count;
+                        Ok(new_count) => {
+                            #[cfg(unix)]
+                            if let Some(ref srv) = ipc {
+                                srv.send(inbx_ipc::Event::FolderUpdated {
+                                    account: acct.name.clone(),
+                                    folder: folder.clone(),
+                                    new_count,
+                                });
+                            }
+                            #[cfg(not(unix))]
+                            let _ = new_count;
+                        }
                     }
                 }
-                wait_for_change(&acct, &folder).await;
+
+                // 3. Wait for push signal on idle_folder OR periodic timer —
+                //    whichever fires first. Either triggers the next full cycle.
+                tokio::select! {
+                    _ = wait_for_change(&acct, &idle_folder) => {
+                        tracing::debug!(account = %acct.name, "push signal; re-syncing all folders");
+                    }
+                    _ = tokio::time::sleep(Duration::from_secs(poll_interval_secs)) => {
+                        tracing::debug!(account = %acct.name, "poll timer fired; re-syncing all folders");
+                    }
+                }
             }
         });
     }

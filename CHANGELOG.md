@@ -28,6 +28,12 @@ patch bumps.
 - `inbx sync` subcommand: same flags as the `inbx-sync` standalone binary; binds
   IPC server and calls `inbx_sync::run`. Useful for environments where only the
   `inbx` binary is installed (closes #26).
+- Multi-folder sync: each account now syncs **all server folders** per cycle
+  (auto-discovered via `inbx_net::list_folders`). Push / IDLE watches only the
+  `--idle-folder` (default: `INBOX`); a push event or the periodic poll timer
+  (300 s default) triggers a full re-sync of every folder. Per-folder errors are
+  isolated — a failing folder logs a warning and the cycle continues. Pass
+  `--folders <NAME>...` to restrict to a fixed set.
 
 ### Changed
 
@@ -35,6 +41,9 @@ patch bumps.
   notifications) when no `inbx-sync` daemon is detected at startup on
   Linux/macOS. Users running the daemon see no change; the in-process task is
   aborted cleanly on TUI exit (closes #26).
+- `inbx-sync` and `inbx sync`: `--folder` renamed to `--idle-folder`. The flag
+  now controls only which folder the IMAP IDLE / JMAP EventSource / Graph delta
+  push connection watches, not which folders are synced.
 
 ## [0.5.0] - 2026-05-05
 

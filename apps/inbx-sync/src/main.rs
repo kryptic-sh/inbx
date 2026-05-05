@@ -22,9 +22,13 @@ struct Cli {
     /// Cap on bodies per cycle when --bodies is set.
     #[arg(long, default_value_t = 200)]
     body_limit: u32,
-    /// Folder to watch per account (defaults to INBOX).
+    /// Folder watched via push / IDLE (defaults to INBOX). Push signals on this
+    /// folder trigger an immediate re-sync of ALL folders.
     #[arg(long, default_value = "INBOX")]
-    folder: String,
+    idle_folder: String,
+    /// Restrict sync to these folders. Default: empty = discover all from server.
+    #[arg(long, num_args = 0..)]
+    folders: Vec<String>,
     /// Fire desktop notifications on new mail.
     #[arg(long)]
     notify: bool,
@@ -81,7 +85,8 @@ async fn main() -> Result<()> {
         accounts,
         ipc: ipc_server,
         notifications: cli.notify,
-        folder: cli.folder,
+        idle_folder: cli.idle_folder,
+        folders: cli.folders,
         fetch_bodies: cli.bodies,
         body_limit: cli.body_limit,
         poll_interval_secs: 300,
