@@ -2553,11 +2553,7 @@ async fn list_selectable_folders(store: &Store) -> Result<Vec<inbx_store::Folder
         .list_folders()
         .await?
         .into_iter()
-        .filter(|r| {
-            !r.attrs
-                .as_deref()
-                .is_some_and(|a| a.contains("\\Noselect"))
-        })
+        .filter(|r| !r.attrs.as_deref().is_some_and(|a| a.contains("\\Noselect")))
         .collect())
 }
 

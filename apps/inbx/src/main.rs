@@ -4,14 +4,12 @@ mod tui;
 use tracing_subscriber::layer::SubscriberExt as _;
 use tracing_subscriber::util::SubscriberInitExt as _;
 
-/// Tee tracing output to stderr (pretty) and a daily-rotated file under
-/// `$XDG_STATE_HOME/inbx/log/inbx.YYYY-MM-DD`. Returns the worker guard
-/// that must outlive the process so buffered records are flushed at exit.
-fn init_logging() -> Option<tracing_appender::non_blocking::WorkerGuard> {
+/// Tracing init. When `tui` is true, suppresses stderr output so log writes
+/// don't corrupt the alt-screen — file-only. When false, tees stderr + file.
+/// File path: `$XDG_STATE_HOME/inbx/log/inbx.YYYY-MM-DD`.
+fn init_logging(tui: bool) -> Option<tracing_appender::non_blocking::WorkerGuard> {
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
-
-    let stderr_layer = tracing_subscriber::fmt::layer().with_writer(std::io::stderr);
 
     let dirs = directories::ProjectDirs::from("sh", "kryptic", "inbx");
     let state_dir = dirs.as_ref().map(|d| d.data_local_dir().join("log"));
@@ -36,14 +34,17 @@ fn init_logging() -> Option<tracing_appender::non_blocking::WorkerGuard> {
         None => (None, None),
     };
 
-    let subscriber = tracing_subscriber::registry()
-        .with(env_filter)
-        .with(stderr_layer);
-    if let Some(file_layer) = file_layer {
-        subscriber.with(file_layer).init();
+    let stderr_layer = if tui {
+        None
     } else {
-        subscriber.init();
-    }
+        Some(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
+    };
+
+    tracing_subscriber::registry()
+        .with(env_filter)
+        .with(stderr_layer)
+        .with(file_layer)
+        .init();
     guard
 }
 
@@ -978,8 +979,9 @@ enum AccountCmd {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let _log_guard = init_logging();
     let cli = Cli::parse();
+    let tui_mode = matches!(cli.command, None | Some(Cmd::Tui { .. }));
+    let _log_guard = init_logging(tui_mode);
     match cli.command {
         None => return cmd_tui(cli.account).await,
         Some(cmd) => match cmd {
