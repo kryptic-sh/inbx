@@ -16,7 +16,7 @@ members = [
     "apps/inbx-sync",
     "xtask",
 ]
-default-members = ["apps/inbx"]
+default-members = ["apps/inbx", "apps/inbx-sync"]
 
 [workspace.package]
 version = "0.5.0"
