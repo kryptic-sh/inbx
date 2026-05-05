@@ -253,6 +253,34 @@ async fn handle_task_result(app: &mut App, result: tasks::TaskResult) -> Result<
             // Kick off a manual sync on the current folder, same as `F`.
             app.manual_sync();
         }
+        TaskResult::SyncIpcEvent(event) => {
+            use inbx_ipc::Event as IpcEvent;
+            match event {
+                IpcEvent::FolderUpdated {
+                    account,
+                    folder,
+                    new_count: _,
+                } => {
+                    // Reload only when the event matches the currently-displayed
+                    // account + folder so irrelevant account events are ignored.
+                    let current_account = app.account.name.clone();
+                    let current_folder = app
+                        .current_folder()
+                        .map(|f| f.name.clone())
+                        .unwrap_or_default();
+                    if account == current_account && folder == current_folder {
+                        app.reload_messages().await?;
+                    }
+                }
+                IpcEvent::Heartbeat { ts_unix } => {
+                    // Record for a future status-line "synced X ago" indicator.
+                    app.last_ipc_heartbeat_unix = Some(ts_unix);
+                }
+                IpcEvent::Hello { version } => {
+                    tracing::debug!(%version, "ipc: daemon hello");
+                }
+            }
+        }
     }
     Ok(())
 }

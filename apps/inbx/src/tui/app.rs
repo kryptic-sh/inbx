@@ -143,6 +143,13 @@ pub(super) struct App {
     /// Name of the folder the current `watch_handle` is bound to.  `None`
     /// while no watch task is running.
     watched_folder: Option<String>,
+    /// Live connection to the inbx-sync daemon IPC socket. `Some` when the
+    /// daemon was detected at startup; `None` when using in-process watch.
+    /// Present on unix only; always `None` on Windows.
+    pub(super) sync_ipc: Option<()>,
+    /// Unix timestamp of the last `Heartbeat` event from the IPC daemon.
+    /// Used by a future status-line indicator (e.g. "synced 3m ago").
+    pub(super) last_ipc_heartbeat_unix: Option<i64>,
 }
 
 #[derive(Clone, Copy)]
@@ -299,6 +306,27 @@ impl App {
         let theme = inbx_config::theme::load_theme().unwrap_or_default();
         let _ = ACTIVE_THEME.set(theme);
         let (task_tx, task_rx) = super::tasks::channel();
+        // Attempt to connect to a running inbx-sync daemon over IPC.
+        // On unix: try with 500 ms timeout; suppress in-process watch if found.
+        // On non-unix (Windows): always skip.
+        #[cfg(unix)]
+        let (sync_ipc, ipc_rx) = match inbx_ipc::Client::connect().await {
+            Ok(mut client) => {
+                tracing::debug!("ipc: connected to inbx-sync daemon");
+                let rx = client.receiver();
+                (Some(()), Some(rx))
+            }
+            Err(e) => {
+                tracing::debug!(%e, "ipc: no sync daemon detected, using in-process watch");
+                (None, None)
+            }
+        };
+        #[cfg(not(unix))]
+        let (sync_ipc, ipc_rx): (
+            Option<()>,
+            Option<tokio::sync::mpsc::Receiver<inbx_ipc::Event>>,
+        ) = (None, None);
+
         let mut app = Self {
             account,
             store,
@@ -337,7 +365,28 @@ impl App {
             current_receipt: None,
             watch_handle: None,
             watched_folder: None,
+            sync_ipc,
+            last_ipc_heartbeat_unix: None,
         };
+
+        // If IPC connected, spawn a pump task that forwards Events into the
+        // existing task channel as SyncIpcEvent variants.
+        if let Some(mut rx) = ipc_rx {
+            let tx = app.task_tx.0.clone();
+            tokio::spawn(async move {
+                while let Some(event) = rx.recv().await {
+                    if tx
+                        .send(super::tasks::TaskResult::SyncIpcEvent(event))
+                        .is_err()
+                    {
+                        // TUI exited — stop pumping.
+                        break;
+                    }
+                }
+                tracing::warn!("ipc: daemon connection closed");
+            });
+        }
+
         app.reload_messages().await?;
 
         Ok(app)
@@ -1609,6 +1658,11 @@ impl App {
     /// previous task before spawning a new one — the old IDLE / EventSource /
     /// poll drops cleanly when the future is cancelled (sockets close on drop).
     pub(super) fn respawn_watch(&mut self) {
+        // IPC mode: the sync daemon drives reloads via FolderUpdated events.
+        // Suppress the in-process watch entirely to avoid duplicate syncs.
+        if self.sync_ipc.is_some() {
+            return;
+        }
         let Some(folder) = self.current_folder().map(|f| f.name.clone()) else {
             return; // No folder selected — nothing to watch.
         };

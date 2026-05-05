@@ -14,6 +14,7 @@ name = "inbx"
 path = "src/main.rs"
 
 [dependencies]
+inbx-ipc.workspace = true
 inbx-config.workspace = true
 inbx-dav.workspace = true
 inbx-pgp.workspace = true

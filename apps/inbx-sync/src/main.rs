@@ -60,6 +60,48 @@ async fn main() -> Result<()> {
     let folder = Arc::new(cli.folder);
     tracing::info!(accounts = names.len(), folder = %folder, "inbx-sync starting");
 
+    // Bind the IPC server so connected TUI instances receive sync events.
+    // On non-unix platforms this logs a warning and continues without IPC.
+    #[cfg(unix)]
+    let ipc_server: Option<Arc<inbx_ipc::Server>> = match inbx_ipc::Server::bind().await {
+        Ok(srv) => {
+            tracing::info!(socket = %inbx_ipc::socket_path().display(), "ipc: listening");
+            // Broadcast Hello so any TUI that connected before the first cycle
+            // knows the daemon version.
+            srv.send(inbx_ipc::Event::Hello {
+                version: env!("CARGO_PKG_VERSION").to_string(),
+            });
+            Some(srv)
+        }
+        Err(e) => {
+            tracing::error!(%e, "ipc: bind failed; exiting");
+            std::process::exit(1);
+        }
+    };
+    #[cfg(not(unix))]
+    let ipc_server: Option<()> = {
+        tracing::warn!("ipc: unix sockets not supported on this platform; running without IPC");
+        None
+    };
+
+    // Heartbeat task: every 60s broadcast a Heartbeat so TUI clients can
+    // detect a stale/dead daemon.
+    #[cfg(unix)]
+    if let Some(srv) = ipc_server.clone() {
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(60));
+            interval.tick().await; // skip the immediate first tick
+            loop {
+                interval.tick().await;
+                let ts_unix = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs() as i64)
+                    .unwrap_or(0);
+                srv.send(inbx_ipc::Event::Heartbeat { ts_unix });
+            }
+        });
+    }
+
     let mut tasks = JoinSet::new();
     for name in names {
         let acct = match cfg.accounts.iter().find(|a| a.name == name) {
@@ -73,12 +115,27 @@ async fn main() -> Result<()> {
         let bodies = cli.bodies;
         let body_limit = cli.body_limit;
         let notify = cli.notify;
+        #[cfg(unix)]
+        let ipc = ipc_server.clone();
         tasks.spawn(async move {
             loop {
-                if let Err(e) = sync_once(&acct, &folder, bodies, body_limit, notify).await {
-                    tracing::warn!(account = %acct.name, %e, "cycle failed; sleeping 30s");
-                    tokio::time::sleep(Duration::from_secs(30)).await;
-                    continue;
+                match sync_once(&acct, &folder, bodies, body_limit, notify).await {
+                    Err(e) => {
+                        tracing::warn!(account = %acct.name, %e, "cycle failed; sleeping 30s");
+                        tokio::time::sleep(Duration::from_secs(30)).await;
+                        continue;
+                    }
+                    Ok(new_count) =>
+                    {
+                        #[cfg(unix)]
+                        if let Some(ref srv) = ipc {
+                            srv.send(inbx_ipc::Event::FolderUpdated {
+                                account: acct.name.clone(),
+                                folder: folder.to_string(),
+                                new_count,
+                            });
+                        }
+                    }
                 }
                 wait_for_change(&acct, &folder).await;
             }
@@ -95,6 +152,8 @@ async fn main() -> Result<()> {
             while tasks.join_next().await.is_some() {}
         } => {}
     }
+    // Dropping ipc_server here closes the listener and all client connections
+    // see EOF — no explicit shutdown needed.
     Ok(())
 }
 
@@ -229,7 +288,7 @@ async fn sync_once(
     fetch_bodies: bool,
     body_limit: u32,
     notify: bool,
-) -> Result<()> {
+) -> Result<u32> {
     // Best-effort outbox drain piggybacks on this connection cycle.
     let store = inbx_store::Store::open(&account.name).await?;
     let due = store.outbox_due().await?;
@@ -361,7 +420,7 @@ async fn sync_once(
         }
     }
     let _ = session.logout().await;
-    Ok(())
+    Ok(new_count as u32)
 }
 
 /// Parse and store any Autocrypt: header from a raw message into the contacts store.

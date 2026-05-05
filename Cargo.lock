@@ -2563,6 +2563,7 @@ dependencies = [
  "inbx-contacts",
  "inbx-dav",
  "inbx-ical",
+ "inbx-ipc",
  "inbx-net",
  "inbx-pgp",
  "inbx-render",
@@ -2649,6 +2650,17 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "toml 0.8.23",
+ "tracing",
+]
+
+[[package]]
+name = "inbx-ipc"
+version = "0.4.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
  "tracing",
 ]
 
@@ -2741,6 +2753,7 @@ dependencies = [
  "inbx-composer",
  "inbx-config",
  "inbx-contacts",
+ "inbx-ipc",
  "inbx-net",
  "inbx-render",
  "inbx-store",

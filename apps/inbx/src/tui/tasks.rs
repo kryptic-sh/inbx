@@ -45,6 +45,8 @@ pub(super) enum TaskResult {
     /// folder. No pending-op counter is decremented — the watch loop is
     /// long-lived and does not participate in the busy/spinner cycle.
     WatchSignal,
+    /// An event arrived from the inbx-sync daemon over the IPC socket.
+    SyncIpcEvent(inbx_ipc::Event),
 }
 
 #[derive(Clone)]

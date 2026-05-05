@@ -8,6 +8,13 @@ patch bumps.
 
 ## [Unreleased]
 
+### Added
+
+- `inbx-sync` ↔ `inbx` TUI unix-socket IPC. TUI auto-detects a running sync
+  daemon at startup and listens for `FolderUpdated` events instead of running
+  its own watch loop. Linux/macOS only; Windows TUI continues to use the
+  in-process watch.
+
 ## [0.4.0] - 2026-05-05
 
 ### Added
