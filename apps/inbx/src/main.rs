@@ -8,8 +8,11 @@ use tracing_subscriber::util::SubscriberInitExt as _;
 /// don't corrupt the alt-screen — file-only. When false, tees stderr + file.
 /// File path: `$XDG_STATE_HOME/inbx/log/inbx.YYYY-MM-DD`.
 fn init_logging(tui: bool) -> Option<tracing_appender::non_blocking::WorkerGuard> {
-    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        tracing_subscriber::EnvFilter::new(
+            "info,html5ever=error,markup5ever=error,ammonia=warn,html2text=warn",
+        )
+    });
 
     let dirs = directories::ProjectDirs::from("sh", "kryptic", "inbx");
     let state_dir = dirs.as_ref().map(|d| d.data_local_dir().join("log"));

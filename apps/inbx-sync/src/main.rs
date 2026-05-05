@@ -95,8 +95,11 @@ async fn main() -> Result<()> {
 }
 
 fn init_logging() -> Option<tracing_appender::non_blocking::WorkerGuard> {
-    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        tracing_subscriber::EnvFilter::new(
+            "info,html5ever=error,markup5ever=error,ammonia=warn,html2text=warn",
+        )
+    });
     let stderr_layer = tracing_subscriber::fmt::layer().with_writer(std::io::stderr);
     let dirs = directories::ProjectDirs::from("sh", "kryptic", "inbx");
     let state_dir = dirs.as_ref().map(|d| d.data_local_dir().join("log"));
