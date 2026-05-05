@@ -185,6 +185,13 @@ fn draw_folders(f: &mut ratatui::Frame, app: &App, area: Rect) {
 }
 
 fn draw_messages(f: &mut ratatui::Frame, app: &App, area: Rect) {
+    // Inner row width = pane width − borders (2). Right-pad the sender so the
+    // relative-time stamp lands flush right.
+    let row_width = area.width.saturating_sub(2) as usize;
+    let now_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
     let items: Vec<ListItem> = app
         .messages
         .iter()
@@ -192,6 +199,10 @@ fn draw_messages(f: &mut ratatui::Frame, app: &App, area: Rect) {
             let unread = !m.flags.to_ascii_lowercase().contains("seen");
             let from = m.from_addr.clone().unwrap_or_default();
             let subj = m.subject.clone().unwrap_or_default();
+            let when = m
+                .date_unix
+                .map(|t| format_age_short(now_unix - t))
+                .unwrap_or_default();
             let from_style = if unread {
                 Style::default()
                     .fg(rgb(&theme().unread))
@@ -204,8 +215,17 @@ fn draw_messages(f: &mut ratatui::Frame, app: &App, area: Rect) {
             } else {
                 Style::default()
             };
+            // Truncate sender to leave room for the timestamp + 1 space.
+            let when_w = when.chars().count();
+            let max_from = row_width.saturating_sub(when_w + 1);
+            let from_trunc = truncate(&from, max_from);
+            let from_pad_w = row_width.saturating_sub(when_w);
+            let from_padded = format!("{from_trunc:<pad$}", pad = from_pad_w);
             ListItem::new(vec![
-                Line::from(Span::styled(from, from_style)),
+                Line::from(vec![
+                    Span::styled(from_padded, from_style),
+                    Span::styled(when, Style::default().add_modifier(Modifier::DIM)),
+                ]),
                 Line::from(Span::styled(subj, subj_style)),
             ])
         })
