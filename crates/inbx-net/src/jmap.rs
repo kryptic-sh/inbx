@@ -431,6 +431,8 @@ impl JmapClient {
 pub struct Mailbox {
     pub id: String,
     pub name: String,
+    #[serde(rename = "parentId", default)]
+    pub parent_id: Option<String>,
     #[serde(default)]
     pub role: Option<String>,
     #[serde(rename = "totalEmails", default)]
@@ -1188,26 +1190,110 @@ impl crate::provider::MailProvider for JmapClient {
     }
 
     async fn create_folder(&mut self, name: &str) -> crate::provider::Result<()> {
-        // TODO(hierarchical): split on '/' and create with parentId for nested folders.
-        // For now pass the literal name — Fastmail accepts it as a top-level mailbox.
-        self.invoke(
-            vec![json!([
-                "Mailbox/set",
-                {
-                    "accountId": self.account_id,
-                    "create": {
-                        "new": {
-                            "name": name,
-                            "parentId": null
+        let segments = split_mailbox_path(name).map_err(crate::provider::Error::Jmap)?;
+
+        if segments.len() == 1 {
+            // Single segment — create top-level mailbox directly.
+            self.invoke(
+                vec![json!([
+                    "Mailbox/set",
+                    {
+                        "accountId": self.account_id,
+                        "create": {
+                            "new": {
+                                "name": name,
+                                "parentId": null
+                            }
                         }
-                    }
-                },
-                "c"
-            ])],
-            vec![CORE_CAPABILITY, MAIL_CAPABILITY],
-        )
-        .await
-        .map_err(crate::provider::Error::Jmap)?;
+                    },
+                    "c"
+                ])],
+                vec![CORE_CAPABILITY, MAIL_CAPABILITY],
+            )
+            .await
+            .map_err(crate::provider::Error::Jmap)?;
+            return Ok(());
+        }
+
+        // Multi-segment path: walk existing mailboxes, creating any missing segments.
+        let mut mailboxes = self
+            .list_mailboxes()
+            .await
+            .map_err(crate::provider::Error::Jmap)?;
+
+        let mut parent_id: Option<String> = None;
+
+        for segment in &segments {
+            // Find an existing mailbox at this level with the same name.
+            let existing = mailboxes
+                .iter()
+                .find(|m| m.parent_id == parent_id && m.name.eq_ignore_ascii_case(segment));
+
+            if let Some(m) = existing {
+                parent_id = Some(m.id.clone());
+                continue;
+            }
+
+            // Segment not found — create it under parent_id.
+            let parent_value = match &parent_id {
+                Some(id) => Value::String(id.clone()),
+                None => Value::Null,
+            };
+            let v = self
+                .invoke(
+                    vec![json!([
+                        "Mailbox/set",
+                        {
+                            "accountId": self.account_id,
+                            "create": {
+                                "new": {
+                                    "name": segment,
+                                    "parentId": parent_value
+                                }
+                            }
+                        },
+                        "c"
+                    ])],
+                    vec![CORE_CAPABILITY, MAIL_CAPABILITY],
+                )
+                .await
+                .map_err(crate::provider::Error::Jmap)?;
+
+            // Check for server-side creation failure.
+            if let Some(err) = v["methodResponses"][0][1]["notCreated"]["new"].as_object() {
+                let desc = err
+                    .get("description")
+                    .and_then(|d| d.as_str())
+                    .unwrap_or("unknown error");
+                return Err(crate::provider::Error::Jmap(Error::Server {
+                    status: 0,
+                    body: format!("JMAP: failed to create mailbox '{segment}': {desc}"),
+                }));
+            }
+
+            let new_id = v["methodResponses"][0][1]["created"]["new"]["id"]
+                .as_str()
+                .ok_or_else(|| {
+                    crate::provider::Error::Jmap(Error::Server {
+                        status: 0,
+                        body: format!("JMAP: no id returned for created mailbox '{segment}'"),
+                    })
+                })?
+                .to_owned();
+
+            // Avoid round-trip re-list — server-assigned id is enough for subsequent segments.
+            mailboxes.push(Mailbox {
+                id: new_id.clone(),
+                name: segment.to_string(),
+                parent_id: parent_id.clone(),
+                role: None,
+                total: 0,
+                unread: 0,
+            });
+
+            parent_id = Some(new_id);
+        }
+
         Ok(())
     }
 
@@ -1466,4 +1552,54 @@ fn build_flags_from_keywords(
         flags.push("\\Deleted");
     }
     flags.join(" ")
+}
+
+/// Split a `/`-delimited mailbox path into non-empty segments.
+///
+/// Returns `Err` if the path is empty or contains an empty segment (e.g. `"a//b"`).
+fn split_mailbox_path(path: &str) -> Result<Vec<&str>> {
+    if path.is_empty() {
+        return Err(Error::Server {
+            status: 0,
+            body: "JMAP: mailbox path must not be empty".into(),
+        });
+    }
+    let segments: Vec<&str> = path.split('/').collect();
+    if segments.iter().any(|s| s.is_empty()) {
+        return Err(Error::Server {
+            status: 0,
+            body: format!("JMAP: mailbox path '{path}' contains an empty segment"),
+        });
+    }
+    Ok(segments)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::split_mailbox_path;
+
+    #[test]
+    fn split_single() {
+        assert_eq!(split_mailbox_path("INBOX").unwrap(), vec!["INBOX"]);
+    }
+
+    #[test]
+    fn split_nested() {
+        assert_eq!(
+            split_mailbox_path("INBOX/Foo/Bar").unwrap(),
+            vec!["INBOX", "Foo", "Bar"]
+        );
+    }
+
+    #[test]
+    fn split_empty_path() {
+        assert!(split_mailbox_path("").is_err());
+    }
+
+    #[test]
+    fn split_empty_segment() {
+        assert!(split_mailbox_path("a//b").is_err());
+        assert!(split_mailbox_path("/leading").is_err());
+        assert!(split_mailbox_path("trailing/").is_err());
+    }
 }
