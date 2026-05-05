@@ -35,20 +35,35 @@ pub type Result<T> = std::result::Result<T, Error>;
 // ── Index types ───────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
-struct Index {
+pub struct Index {
     #[serde(default)]
-    entries: Vec<IndexEntry>,
+    pub entries: Vec<IndexEntry>,
+}
+
+impl Index {
+    pub fn find_by_uid(&self, uid: &str) -> Option<&IndexEntry> {
+        self.entries.iter().find(|e| e.uid == uid)
+    }
+
+    pub fn find_by_uid_mut(&mut self, uid: &str) -> Option<&mut IndexEntry> {
+        self.entries.iter_mut().find(|e| e.uid == uid)
+    }
+
+    pub fn remove_by_uid(&mut self, uid: &str) -> Option<IndexEntry> {
+        let pos = self.entries.iter().position(|e| e.uid == uid)?;
+        Some(self.entries.remove(pos))
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-struct IndexEntry {
-    href: String,
-    uid: String,
-    etag: String,
-    filename: String,
+pub struct IndexEntry {
+    pub href: String,
+    pub uid: String,
+    pub etag: String,
+    pub filename: String,
 }
 
-fn load_index(store_dir: &Path) -> Result<Index> {
+pub fn load_index(store_dir: &Path) -> Result<Index> {
     let path = store_dir.join("_index.toml");
     if !path.exists() {
         return Ok(Index::default());
@@ -57,7 +72,7 @@ fn load_index(store_dir: &Path) -> Result<Index> {
     toml::from_str(&raw).map_err(|e| Error::Parse(e.to_string()))
 }
 
-fn save_index(store_dir: &Path, idx: &Index) -> Result<()> {
+pub fn save_index(store_dir: &Path, idx: &Index) -> Result<()> {
     let raw = toml::to_string_pretty(idx).map_err(|e| Error::Parse(e.to_string()))?;
     std::fs::write(store_dir.join("_index.toml"), raw)?;
     Ok(())
@@ -444,6 +459,93 @@ pub fn sanitize_uid(uid: &str) -> String {
         .collect()
 }
 
+/// Compose the resource URL for a new event. `calendar_url` may or may
+/// not end with '/'; we normalize.
+pub fn derive_event_href(calendar_url: &str, uid: &str) -> String {
+    let safe = sanitize_uid(uid);
+    if calendar_url.ends_with('/') {
+        format!("{calendar_url}{safe}.ics")
+    } else {
+        format!("{calendar_url}/{safe}.ics")
+    }
+}
+
+/// PUT a VCALENDAR to `event_url` (the full resource URL — collection + filename).
+/// `if_match` is the etag for an update, or `None` for create.
+/// Returns the new server-assigned etag (from the `ETag` response header).
+pub async fn put_event(
+    event_url: &str,
+    user: &str,
+    password: &str,
+    ics: &str,
+    if_match: Option<&str>,
+) -> Result<String> {
+    let http = reqwest::ClientBuilder::new()
+        .timeout(Duration::from_secs(60))
+        .build()?;
+
+    let mut req = http
+        .put(event_url)
+        .basic_auth(user, Some(password))
+        .header("Content-Type", "text/calendar; charset=utf-8")
+        .body(ics.to_string());
+
+    match if_match {
+        Some(etag) => req = req.header("If-Match", etag),
+        None => req = req.header("If-None-Match", "*"), // create-only guard
+    }
+
+    let res = req.send().await?;
+    let status = res.status();
+    if !status.is_success() {
+        let code = status.as_u16();
+        let body = res.text().await.unwrap_or_default();
+        return Err(Error::Server { status: code, body });
+    }
+
+    // Server returns the new ETag in the response header. Some servers omit it
+    // on create — caller can recover via a follow-up PROPFIND if needed.
+    let etag = res
+        .headers()
+        .get("etag")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
+        .unwrap_or_default();
+    Ok(etag)
+}
+
+/// DELETE the resource at `event_url`. `if_match` is the etag for safe
+/// conditional delete; pass `None` to force-delete.
+/// 404 is treated as success (already gone).
+pub async fn delete_event(
+    event_url: &str,
+    user: &str,
+    password: &str,
+    if_match: Option<&str>,
+) -> Result<()> {
+    let http = reqwest::ClientBuilder::new()
+        .timeout(Duration::from_secs(60))
+        .build()?;
+
+    let mut req = http.delete(event_url).basic_auth(user, Some(password));
+    if let Some(etag) = if_match {
+        req = req.header("If-Match", etag);
+    }
+
+    let res = req.send().await?;
+    let status = res.status();
+    // 404 means the resource is already gone — treat as success.
+    if status.as_u16() == 404 {
+        return Ok(());
+    }
+    if !status.is_success() {
+        let code = status.as_u16();
+        let body = res.text().await.unwrap_or_default();
+        return Err(Error::Server { status: code, body });
+    }
+    Ok(())
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -506,6 +608,18 @@ END:VCALENDAR</c:calendar-data>
     #[test]
     fn sanitize_uid_replaces_slashes() {
         assert_eq!(sanitize_uid("a/b\\c\x00d"), "a_b_c_d");
+    }
+
+    #[test]
+    fn derive_event_href_trailing_slash() {
+        let url = derive_event_href("https://dav.example.com/cal/work/", "my-uid@host");
+        assert_eq!(url, "https://dav.example.com/cal/work/my-uid@host.ics");
+    }
+
+    #[test]
+    fn derive_event_href_no_trailing_slash() {
+        let url = derive_event_href("https://dav.example.com/cal/work", "my-uid@host");
+        assert_eq!(url, "https://dav.example.com/cal/work/my-uid@host.ics");
     }
 
     #[test]

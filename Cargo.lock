@@ -2561,6 +2561,7 @@ dependencies = [
  "inbx-composer",
  "inbx-config",
  "inbx-contacts",
+ "inbx-dav",
  "inbx-ical",
  "inbx-net",
  "inbx-pgp",

@@ -15,6 +15,7 @@ path = "src/main.rs"
 
 [dependencies]
 inbx-config.workspace = true
+inbx-dav.workspace = true
 inbx-pgp.workspace = true
 inbx-net.workspace = true
 inbx-store.workspace = true

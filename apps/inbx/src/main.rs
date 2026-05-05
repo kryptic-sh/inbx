@@ -839,6 +839,36 @@ enum CalCmd {
         #[arg(long)]
         account: String,
     },
+    /// Upload a local .ics to a CalDAV calendar. Updates if the UID already
+    /// exists in the local index; creates otherwise.
+    Put {
+        /// Path to the local .ics file to upload.
+        path: std::path::PathBuf,
+        /// CalDAV calendar URL the event belongs to (must match the URL used
+        /// for the most recent `cal caldav pull`).
+        #[arg(long)]
+        url: String,
+        #[arg(long)]
+        account: String,
+        /// HTTP basic-auth username (defaults to account.username).
+        #[arg(long)]
+        user: Option<String>,
+    },
+    /// Delete a stored event by UID, both from the server and locally.
+    Delete {
+        uid: String,
+        /// CalDAV calendar URL the event belongs to.
+        #[arg(long)]
+        url: String,
+        #[arg(long)]
+        account: String,
+        /// HTTP basic-auth username (defaults to account.username).
+        #[arg(long)]
+        user: Option<String>,
+        /// Skip the If-Match guard. Use only when the local etag is known stale.
+        #[arg(long, default_value_t = false)]
+        force: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -2656,6 +2686,19 @@ async fn cmd_cal(action: CalCmd) -> Result<()> {
             response,
             account,
         } => cmd_cal_rsvp(&uid, response, &account).await?,
+        CalCmd::Put {
+            path,
+            url,
+            account,
+            user,
+        } => cmd_cal_put(&path, &url, &account, user.as_deref()).await?,
+        CalCmd::Delete {
+            uid,
+            url,
+            account,
+            user,
+            force,
+        } => cmd_cal_delete(&uid, &url, &account, user.as_deref(), force).await?,
     }
     Ok(())
 }
@@ -2754,6 +2797,134 @@ async fn cmd_cal_rsvp(uid: &str, response: RsvpArg, account_name: &str) -> Resul
 
     inbx_net::send_message(&account, &raw).await?;
     println!("rsvp {verb} sent for uid '{uid}' to {to_addr}");
+    Ok(())
+}
+
+/// Strip scheme + host from a full URL to produce a root-relative path,
+/// mirroring what a PROPFIND response typically returns for an href.
+fn url_to_relative_href(event_url: &str) -> String {
+    if let Some(idx) = event_url.find("://")
+        && let Some(slash_idx) = event_url[idx + 3..].find('/')
+    {
+        return event_url[idx + 3 + slash_idx..].to_string();
+    }
+    event_url.to_string()
+}
+
+async fn cmd_cal_put(
+    path: &std::path::Path,
+    url: &str,
+    account_name: &str,
+    user: Option<&str>,
+) -> Result<()> {
+    let cfg = inbx_config::load()?;
+    let account = cfg
+        .accounts
+        .iter()
+        .find(|a| a.name == account_name)
+        .ok_or_else(|| anyhow::anyhow!("no account named '{account_name}' in config"))?
+        .clone();
+    let username = user.unwrap_or(account.username.as_str()).to_string();
+    let password = inbx_config::load_password(&account.name)
+        .with_context(|| format!("no password in keyring for {}", account.name))?;
+
+    let ics =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    let invite =
+        inbx_ical::parse_ics(&ics).map_err(|e| anyhow::anyhow!("parse_ics failed: {e}"))?;
+    let uid = invite.uid;
+
+    let store_dir = inbx_config::data_dir()?
+        .join(&account.name)
+        .join("calendar");
+    std::fs::create_dir_all(&store_dir)?;
+    let mut index = inbx_ical::caldav::load_index(&store_dir)?;
+
+    let (event_url, if_match, was_update) = match index.find_by_uid(&uid) {
+        Some(entry) => {
+            let abs = inbx_dav::absolutize(url, &entry.href);
+            (abs, Some(entry.etag.clone()), true)
+        }
+        None => (inbx_ical::caldav::derive_event_href(url, &uid), None, false),
+    };
+
+    let new_etag =
+        inbx_ical::caldav::put_event(&event_url, &username, &password, &ics, if_match.as_deref())
+            .await?;
+
+    // Write the local .ics to keep the store in sync with the server.
+    let safe_uid = inbx_ical::caldav::sanitize_uid(&uid);
+    let filename = format!("{safe_uid}.ics");
+    std::fs::write(store_dir.join(&filename), ics.as_bytes())?;
+
+    if was_update {
+        if let Some(entry) = index.find_by_uid_mut(&uid) {
+            entry.etag = new_etag.clone();
+        }
+    } else {
+        let href = url_to_relative_href(&event_url);
+        index.entries.push(inbx_ical::caldav::IndexEntry {
+            href,
+            uid: uid.clone(),
+            etag: new_etag.clone(),
+            filename,
+        });
+    }
+    inbx_ical::caldav::save_index(&store_dir, &index)?;
+
+    let verb = if was_update { "updated" } else { "created" };
+    println!("{verb} event '{uid}' (etag={new_etag})");
+    Ok(())
+}
+
+async fn cmd_cal_delete(
+    uid: &str,
+    url: &str,
+    account_name: &str,
+    user: Option<&str>,
+    force: bool,
+) -> Result<()> {
+    let cfg = inbx_config::load()?;
+    let account = cfg
+        .accounts
+        .iter()
+        .find(|a| a.name == account_name)
+        .ok_or_else(|| anyhow::anyhow!("no account named '{account_name}' in config"))?
+        .clone();
+    let username = user.unwrap_or(account.username.as_str()).to_string();
+    let password = inbx_config::load_password(&account.name)
+        .with_context(|| format!("no password in keyring for {}", account.name))?;
+
+    let store_dir = inbx_config::data_dir()?
+        .join(&account.name)
+        .join("calendar");
+    let mut index = inbx_ical::caldav::load_index(&store_dir)?;
+
+    let entry = index
+        .find_by_uid(uid)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "no stored event with uid '{uid}' in {}",
+                store_dir.display()
+            )
+        })?
+        .clone();
+
+    let event_url = inbx_dav::absolutize(url, &entry.href);
+    let if_match = if force {
+        None
+    } else {
+        Some(entry.etag.as_str())
+    };
+
+    inbx_ical::caldav::delete_event(&event_url, &username, &password, if_match).await?;
+
+    // Remove from index and delete local file.
+    index.remove_by_uid(uid);
+    let _ = std::fs::remove_file(store_dir.join(&entry.filename));
+    inbx_ical::caldav::save_index(&store_dir, &index)?;
+
+    println!("deleted event '{uid}'");
     Ok(())
 }
 

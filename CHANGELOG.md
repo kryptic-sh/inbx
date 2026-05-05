@@ -19,6 +19,9 @@ patch bumps.
 
 ### Added
 
+- `inbx cal put <ics-path> --url <calendar> --account <name>` and
+  `inbx cal delete <uid> --url <calendar> --account <name>` — CalDAV write paths
+  (PUT/DELETE with If-Match etag).
 - `inbx cal rsvp <uid> {accept|decline|tentative} --account <name>` — sends a
   METHOD:REPLY for a stored CalDAV event via SMTP.
 - CardDAV auto-push on `ContactsStore::upsert` when an account has `[carddav]`
