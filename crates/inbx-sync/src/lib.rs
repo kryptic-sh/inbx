@@ -117,10 +117,19 @@ pub async fn run(cfg: Config) -> Result<()> {
                             let _ = new_count;
                         }
                     }
-                    // Read back discovered folders from the store.
+                    // Read back discovered folders from the store, skipping
+                    // \Noselect virtual parents (e.g. Gmail's "[Gmail]").
                     match inbx_store::Store::open(&acct.name).await {
                         Ok(store) => match store.list_folders().await {
-                            Ok(rows) => rows.into_iter().map(|r| r.name).collect(),
+                            Ok(rows) => rows
+                                .into_iter()
+                                .filter(|r| {
+                                    !r.attrs
+                                        .as_deref()
+                                        .is_some_and(|a| a.contains("\\Noselect"))
+                                })
+                                .map(|r| r.name)
+                                .collect(),
                             Err(e) => {
                                 tracing::warn!(account = %acct.name, %e, "list_folders from store failed; using idle_folder only");
                                 vec![idle_folder.to_string()]
