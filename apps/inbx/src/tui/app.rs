@@ -1158,6 +1158,33 @@ impl App {
         });
     }
 
+    pub(super) fn mark_folder_read(&mut self) {
+        let Some(folder_name) = self.current_folder().map(|f| f.name.clone()) else {
+            return;
+        };
+        let unread_uids: Vec<i64> = self
+            .messages
+            .iter()
+            .filter(|m| !m.flags.to_ascii_lowercase().contains("seen"))
+            .map(|m| m.uid)
+            .collect();
+        if unread_uids.is_empty() {
+            self.status = format!("{folder_name}: already all read");
+            return;
+        }
+        if !self.spawn_pending() {
+            return;
+        }
+        self.status = format!("marking {} read in {folder_name}…", unread_uids.len());
+        let account = self.account.clone();
+        let store = self.store.clone();
+        let tx = self.task_tx.0.clone();
+        tokio::spawn(async move {
+            let result = do_mark_folder_read(account, store, folder_name, unread_uids).await;
+            let _ = tx.send(super::tasks::TaskResult::MarkFolderReadDone { result });
+        });
+    }
+
     pub(super) async fn move_current_to(&mut self, target: &str) -> Result<()> {
         let Some(source) = self.current_folder().map(|f| f.name.clone()) else {
             return Ok(());
@@ -2424,6 +2451,32 @@ async fn do_expunge(
     .await;
     result
         .map(|(n, purged)| (n, purged, folder_name))
+        .map_err(|e| e.to_string())
+}
+
+async fn do_mark_folder_read(
+    account: inbx_config::Account,
+    store: Store,
+    folder_name: String,
+    uids: Vec<i64>,
+) -> std::result::Result<(usize, String), String> {
+    let total = uids.len();
+    let result: anyhow::Result<()> = async {
+        let mut provider = inbx_net::connect_provider(&account, Some(&store)).await?;
+        for uid in &uids {
+            provider
+                .set_flags(&folder_name, *uid, &["\\Seen"], &[])
+                .await?;
+        }
+        drop(provider);
+        store
+            .mutate_flags(&folder_name, &uids, &["\\Seen"], &[])
+            .await?;
+        Ok(())
+    }
+    .await;
+    result
+        .map(|()| (total, folder_name))
         .map_err(|e| e.to_string())
 }
 

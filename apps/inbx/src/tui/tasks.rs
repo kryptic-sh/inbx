@@ -72,6 +72,10 @@ pub(super) enum TaskResult {
     ExpungeDone {
         result: std::result::Result<(usize, u64, String), String>,
     },
+    /// `mark_folder_read` finished. Carries `(count, folder_name)` on success.
+    MarkFolderReadDone {
+        result: std::result::Result<(usize, String), String>,
+    },
     /// `unsubscribe_current` finished. Carries a human-readable status string.
     UnsubscribeDone {
         result: std::result::Result<String, String>,

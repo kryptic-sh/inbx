@@ -364,6 +364,18 @@ async fn handle_task_result(app: &mut App, result: tasks::TaskResult) -> Result<
                 }
             }
         }
+        TaskResult::MarkFolderReadDone { result } => {
+            app.complete_pending();
+            match result {
+                Ok((count, folder)) => {
+                    app.reload_messages().await?;
+                    app.status = format!("marked {count} read in {folder}");
+                }
+                Err(e) => {
+                    app.status = format!("mark all read failed: {e}");
+                }
+            }
+        }
         TaskResult::UnsubscribeDone { result } => {
             app.complete_pending();
             app.status = match result {

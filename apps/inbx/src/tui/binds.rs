@@ -210,6 +210,7 @@ pub(super) enum Action {
     ToggleFlagged,
     ToggleDeleted,
     Expunge,
+    MarkFolderRead,
     MoveMessage,
     OpenThread,
     ListUnsubscribe,
@@ -542,6 +543,14 @@ static BINDS: &[BindRow] = &[
         category: Category::MessageOps,
         contexts: &[Context::List],
         gate: Some(|app| app.pane == Pane::Messages),
+    },
+    BindRow {
+        action: Action::MarkFolderRead,
+        key: || KeySpec::leader_char('R', "<Space>R"),
+        desc: "mark all read in folder",
+        category: Category::MessageOps,
+        contexts: &[Context::List],
+        gate: None,
     },
     BindRow {
         action: Action::MoveMessage,
@@ -1282,6 +1291,9 @@ impl Action {
             }
             Action::Expunge => {
                 app.expunge();
+            }
+            Action::MarkFolderRead => {
+                app.mark_folder_read();
             }
             Action::MoveMessage => {
                 app.move_picker = Some(MovePickerState::new());
