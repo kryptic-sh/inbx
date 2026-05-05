@@ -8,20 +8,13 @@ patch bumps.
 
 ## [Unreleased]
 
-### Changed
-
-- TUI Sieve overlay caches the ManageSieve session across list / get / put
-  actions instead of reconnecting each time.
-- Extract shared DAV helpers (PROPFIND + XML scrape) into new `inbx-dav` crate
-  (consumed by inbx-contacts + inbx-ical).
-- CalDAV sync is now etag-aware — fetches only new and changed events via
-  calendar-multiget instead of always pulling the full calendar.
+## [0.4.0] - 2026-05-05
 
 ### Added
 
 - `inbx cal put <ics-path> --url <calendar> --account <name>` and
   `inbx cal delete <uid> --url <calendar> --account <name>` — CalDAV write paths
-  (PUT/DELETE with If-Match etag).
+  (PUT/DELETE with If-Match etag). Closes the two-way sync slice of #13.
 - `inbx cal rsvp <uid> {accept|decline|tentative} --account <name>` — sends a
   METHOD:REPLY for a stored CalDAV event via SMTP.
 - CardDAV auto-push on `ContactsStore::upsert` when an account has `[carddav]`
@@ -33,6 +26,21 @@ patch bumps.
 - Alpine `.apk` packaging (x86_64) auto-built from the musl tarball and uploaded
   to GitHub Releases on every tag. Install with
   `apk add --allow-untrusted inbx-*.apk`.
+
+### Changed
+
+- TUI Sieve overlay caches the ManageSieve session across list / get / put
+  actions instead of reconnecting each time.
+- Extract shared DAV helpers (PROPFIND + XML scrape) into new `inbx-dav` crate
+  (consumed by inbx-contacts + inbx-ical).
+- CalDAV sync is now etag-aware — fetches only new and changed events via
+  calendar-multiget instead of always pulling the full calendar.
+- IMAP `fetch_headers` now honors the `since_uid` hint via
+  `UID FETCH <since+1>:*` with the RFC 3501 `N:*` quirk post-filter, turning
+  steady-state polls from O(folder) into O(new).
+- JMAP `create_folder` walks `/`-delimited paths and chains `Mailbox/set` calls
+  with `parentId`, producing real nested hierarchies instead of one literal
+  top-level mailbox.
 
 ## [0.3.2] - 2026-05-04
 
@@ -470,7 +478,8 @@ patch bumps.
   Actions release-plz workflow (publish gated off until first dry-run pass
   clears).
 
-[Unreleased]: https://github.com/kryptic-sh/inbx/compare/v0.3.2...HEAD
+[Unreleased]: https://github.com/kryptic-sh/inbx/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/kryptic-sh/inbx/releases/tag/v0.4.0
 [0.3.2]: https://github.com/kryptic-sh/inbx/releases/tag/v0.3.2
 [0.3.1]: https://github.com/kryptic-sh/inbx/releases/tag/v0.3.1
 [0.3.0]: https://github.com/kryptic-sh/inbx/releases/tag/v0.3.0
