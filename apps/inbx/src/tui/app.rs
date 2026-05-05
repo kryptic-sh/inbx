@@ -376,7 +376,7 @@ impl MovePickerState {
 
 impl App {
     pub(super) async fn new(account: Account, store: Store) -> Result<Self> {
-        let folders = store.list_folders().await?;
+        let folders = list_selectable_folders(&store).await?;
         let mut folder_state = ListState::default();
         if !folders.is_empty() {
             folder_state.select(Some(0));
@@ -1617,7 +1617,7 @@ impl App {
         let store = Store::open(&target.name).await?;
         self.store = store;
         self.account = target;
-        self.folders = self.store.list_folders().await?;
+        self.folders = list_selectable_folders(&self.store).await?;
         self.folder_state = ListState::default();
         if !self.folders.is_empty() {
             self.folder_state.select(Some(0));
@@ -2544,6 +2544,21 @@ fn build_ical_reply_mime(from: &str, to: &str, subject: &str, ics: &[u8]) -> Vec
         .body(part)
         .write_to_vec()
         .unwrap_or_default()
+}
+
+/// Read folders from the store, hiding `\Noselect` virtual parents (e.g.
+/// Gmail's `[Gmail]`) so they don't appear in the folders pane.
+async fn list_selectable_folders(store: &Store) -> Result<Vec<inbx_store::FolderRow>> {
+    Ok(store
+        .list_folders()
+        .await?
+        .into_iter()
+        .filter(|r| {
+            !r.attrs
+                .as_deref()
+                .is_some_and(|a| a.contains("\\Noselect"))
+        })
+        .collect())
 }
 
 fn open_url(url: &str) -> std::io::Result<()> {
