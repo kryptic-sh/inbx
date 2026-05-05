@@ -202,11 +202,11 @@ fn draw_messages(f: &mut ratatui::Frame, app: &App, area: Rect) {
             let subj_style = if unread {
                 Style::default().add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(Color::DarkGray)
+                Style::default().add_modifier(Modifier::DIM)
             };
             ListItem::new(vec![
                 Line::from(Span::styled(from, from_style)),
-                Line::from(Span::styled(format!("  {subj}"), subj_style)),
+                Line::from(Span::styled(subj, subj_style)),
             ])
         })
         .collect();
