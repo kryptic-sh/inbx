@@ -259,6 +259,24 @@ enum Cmd {
         #[arg(long)]
         bodies: bool,
     },
+    /// Run the full multi-account sync daemon in-process (alias for inbx-sync).
+    Sync {
+        /// Sync only these accounts. Default: every configured account.
+        #[arg(long, num_args = 0..)]
+        account: Vec<String>,
+        /// Also download bodies on each fetch cycle.
+        #[arg(long)]
+        bodies: bool,
+        /// Cap on bodies per cycle when --bodies is set.
+        #[arg(long, default_value_t = 200)]
+        body_limit: u32,
+        /// Folder to watch per account (defaults to INBOX).
+        #[arg(long, default_value = "INBOX")]
+        folder: String,
+        /// Fire desktop notifications on new mail.
+        #[arg(long)]
+        notify: bool,
+    },
     /// Print shell completion script (bash | zsh | fish | elvish | powershell).
     Completion {
         #[arg(value_parser = clap::value_parser!(clap_complete::Shell))]
@@ -1044,6 +1062,13 @@ async fn main() -> Result<()> {
             folder,
             bodies,
         } => cmd_watch(account, folder, bodies).await,
+        Cmd::Sync {
+            account,
+            bodies,
+            body_limit,
+            folder,
+            notify,
+        } => cmd_sync(account, bodies, body_limit, folder, notify).await,
         Cmd::Completion { shell } => {
             use clap::CommandFactory;
             let mut cmd = Cli::command();
@@ -2932,6 +2957,68 @@ async fn cmd_tui(account: Option<String>) -> Result<()> {
     let cfg = inbx_config::load()?;
     let acct = pick_account(&cfg, account.as_deref())?.clone();
     tui::run(acct).await
+}
+
+async fn cmd_sync(
+    account_filter: Vec<String>,
+    bodies: bool,
+    body_limit: u32,
+    folder: String,
+    notify: bool,
+) -> Result<()> {
+    use std::sync::Arc;
+
+    let cfg = inbx_config::load()?;
+    let names: Vec<String> = if account_filter.is_empty() {
+        cfg.accounts.iter().map(|a| a.name.clone()).collect()
+    } else {
+        account_filter.clone()
+    };
+    if names.is_empty() {
+        anyhow::bail!("no accounts configured; run `inbx accounts add`");
+    }
+    let accounts: Vec<_> = names
+        .iter()
+        .filter_map(|name| {
+            let acct = cfg.accounts.iter().find(|a| &a.name == name);
+            if acct.is_none() {
+                tracing::warn!(%name, "skipping; no such account");
+            }
+            acct.cloned()
+        })
+        .collect();
+
+    // Bind IPC server the same way the standalone inbx-sync binary does.
+    #[cfg(unix)]
+    let ipc_server: Option<Arc<inbx_ipc::Server>> = match inbx_ipc::Server::bind().await {
+        Ok(srv) => {
+            tracing::info!(socket = %inbx_ipc::socket_path().display(), "ipc: listening");
+            srv.send(inbx_ipc::Event::Hello {
+                version: env!("CARGO_PKG_VERSION").to_string(),
+            });
+            Some(srv)
+        }
+        Err(e) => {
+            tracing::error!(%e, "ipc: bind failed; exiting");
+            std::process::exit(1);
+        }
+    };
+    #[cfg(not(unix))]
+    let ipc_server: Option<Arc<inbx_ipc::Server>> = {
+        tracing::warn!("ipc: unix sockets not supported on this platform; running without IPC");
+        None
+    };
+
+    inbx_sync::run(inbx_sync::Config {
+        accounts,
+        ipc: ipc_server,
+        notifications: notify,
+        folder,
+        fetch_bodies: bodies,
+        body_limit,
+        poll_interval_secs: 300,
+    })
+    .await
 }
 
 // ── PGP command handlers ──────────────────────────────────────────────────────

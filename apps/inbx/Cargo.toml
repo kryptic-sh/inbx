@@ -19,6 +19,7 @@ tree-sitter = ["inbx-render/tree-sitter", "dep:hjkl-bonsai"]
 [dependencies]
 hjkl-bonsai = { workspace = true, optional = true }
 inbx-ipc.workspace = true
+inbx-sync.workspace = true
 inbx-config.workspace = true
 inbx-dav.workspace = true
 inbx-pgp.workspace = true

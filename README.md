@@ -112,6 +112,7 @@ inbx sieve list|get|put|activate|delete|vacation
 inbx pgp keygen|list|export|sign|verify|encrypt|decrypt|lookup-wkd
 
 inbx tui                              # ratatui TUI
+inbx sync [--account NAME] [--bodies] [--notify]  # alias for inbx-sync daemon
 inbx completion fish > ~/.config/fish/completions/inbx.fish
 ```
 

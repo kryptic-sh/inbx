@@ -184,6 +184,10 @@ pub(super) struct App {
     /// Unix timestamp of the last `Heartbeat` event from the IPC daemon.
     /// Used by a future status-line indicator (e.g. "synced 3m ago").
     pub(super) last_ipc_heartbeat_unix: Option<i64>,
+    /// JoinHandle for the in-process sync task spawned when no daemon is
+    /// detected. `None` when the daemon is running (IPC path) or on Windows.
+    /// Aborted on App drop so the sync loop doesn't outlive the TUI process.
+    sync_handle: Option<tokio::task::JoinHandle<()>>,
     /// Async grammar loader for tree-sitter highlighting.
     #[cfg(feature = "tree-sitter")]
     pub(super) grammar_loader:
@@ -455,6 +459,7 @@ impl App {
             watched_folder: None,
             sync_ipc,
             last_ipc_heartbeat_unix: None,
+            sync_handle: None,
             #[cfg(feature = "tree-sitter")]
             grammar_loader,
             #[cfg(feature = "tree-sitter")]
@@ -484,6 +489,33 @@ impl App {
                 }
                 tracing::warn!("ipc: daemon connection closed");
             });
+        } else {
+            // No daemon detected — spawn sync in-process so the TUI still
+            // receives fresh mail without requiring a separate daemon process.
+            // Notifications are suppressed: the TUI status line already shows
+            // new mail counts. IPC is None: in-process mode has no listeners.
+            // Single-account only: the TUI only knows the active account at
+            // construction time; multi-account in-process is out of scope.
+            #[cfg(unix)]
+            {
+                let acct = app.account.clone();
+                let handle = tokio::spawn(async move {
+                    let cfg = inbx_sync::Config {
+                        accounts: vec![acct],
+                        ipc: None,
+                        notifications: false,
+                        folder: "INBOX".to_string(),
+                        fetch_bodies: false,
+                        body_limit: 200,
+                        poll_interval_secs: 300,
+                    };
+                    if let Err(e) = inbx_sync::run(cfg).await {
+                        tracing::warn!(%e, "in-process sync exited with error");
+                    }
+                });
+                app.sync_handle = Some(handle);
+                tracing::debug!("in-process sync spawned");
+            }
         }
 
         app.reload_messages().await?;
@@ -2593,6 +2625,16 @@ async fn do_watch(
         // Signal the TUI; exit cleanly if the receiver is gone.
         if tx.send(TaskResult::WatchSignal).is_err() {
             break;
+        }
+    }
+}
+
+impl Drop for App {
+    fn drop(&mut self) {
+        // Abort the in-process sync task when the TUI exits so the background
+        // loop doesn't keep running after the terminal is restored.
+        if let Some(handle) = self.sync_handle.take() {
+            handle.abort();
         }
     }
 }

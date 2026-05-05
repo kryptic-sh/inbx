@@ -21,6 +21,20 @@ patch bumps.
 - TUI: `<Space>F` opens a folder CRUD overlay (Create / Rename / Delete) backed
   by `MailProvider::{create,rename,delete}_folder`; ops fire on a background
   tokio task and post `TaskResult::FolderOp` (closes #18).
+- `crates/inbx-sync`: new library crate exposing `Config` + `run()`. Sync engine
+  internals (outbox drain, IMAP fetch, IDLE loop, autocrypt harvest, FTS
+  indexing) extracted from `apps/inbx-sync/src/main.rs` into a reusable lib. No
+  behavior change for existing daemon users (closes #26).
+- `inbx sync` subcommand: same flags as the `inbx-sync` standalone binary; binds
+  IPC server and calls `inbx_sync::run`. Useful for environments where only the
+  `inbx` binary is installed (closes #26).
+
+### Changed
+
+- TUI now spawns `inbx_sync::run` in-process (single account, no IPC, no desktop
+  notifications) when no `inbx-sync` daemon is detected at startup on
+  Linux/macOS. Users running the daemon see no change; the in-process task is
+  aborted cleanly on TUI exit (closes #26).
 
 ## [0.5.0] - 2026-05-05
 
