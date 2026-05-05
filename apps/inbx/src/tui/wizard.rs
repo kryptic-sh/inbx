@@ -159,6 +159,7 @@ impl AccountWizard {
             transport: Transport::Imap,
             pgp: None,
             proxy: None,
+            carddav: None,
         };
 
         Ok((account, password))

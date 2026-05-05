@@ -2387,7 +2387,12 @@ async fn cmd_contacts(action: ContactsCmd) -> Result<()> {
             name,
         } => {
             let acct = pick_account(&cfg, account.as_deref())?;
-            let store = inbx_contacts::ContactsStore::open(&acct.name).await?;
+            let mut store = inbx_contacts::ContactsStore::open(&acct.name).await?;
+            if let Some(carddav_cfg) = &acct.carddav {
+                let pw = inbx_config::load_password(&acct.name)
+                    .with_context(|| format!("no password in keyring for {}", acct.name))?;
+                store = store.with_carddav(carddav_cfg, &acct.username, pw);
+            }
             store.upsert(&email, name.as_deref()).await?;
             println!("upserted {email}");
         }
@@ -2472,7 +2477,7 @@ async fn cmd_contacts(action: ContactsCmd) -> Result<()> {
                     &username,
                     &password,
                     &vcard,
-                    None,
+                    inbx_contacts::carddav::PutMode::CreateOnly,
                 )
                 .await?;
                 println!("pushed {email} → {resource_url}");
@@ -3169,6 +3174,7 @@ fn cmd_accounts_add(oauth: Option<String>) -> Result<()> {
         transport: inbx_config::Transport::Imap,
         pgp: None,
         proxy: None,
+        carddav: None,
     });
     inbx_config::save(&cfg)?;
     if oauth.is_some() {

@@ -59,15 +59,25 @@ pub struct DiscoveredBook {
     pub display_name: Option<String>,
 }
 
+/// Controls the conditional header sent on a CardDAV PUT.
+#[derive(Debug, Clone, Copy)]
+pub enum PutMode<'a> {
+    /// Bare PUT — no conditional header. Idempotent upsert.
+    Overwrite,
+    /// Create-only — `If-None-Match: *`. Server returns 412 if resource exists.
+    CreateOnly,
+    /// Conditional update — `If-Match: <etag>`.
+    Update(&'a str),
+}
+
 /// PUT a single VCARD to the given addressbook resource URL. The full URL
-/// must include the resource filename (e.g. `<book>/<uuid>.vcf`). When
-/// `if_match` is `None` the server treats this as a create.
+/// must include the resource filename (e.g. `<book>/<uuid>.vcf`).
 pub async fn put_vcard(
     resource_url: &str,
     user: &str,
     password: &str,
     vcard: &str,
-    if_match: Option<&str>,
+    mode: PutMode<'_>,
 ) -> Result<()> {
     let http = reqwest::ClientBuilder::new()
         .timeout(Duration::from_secs(30))
@@ -77,10 +87,14 @@ pub async fn put_vcard(
         .basic_auth(user, Some(password))
         .header("Content-Type", "text/vcard; charset=utf-8")
         .body(vcard.to_string());
-    if let Some(etag) = if_match {
-        req = req.header("If-Match", etag);
-    } else {
-        req = req.header("If-None-Match", "*");
+    match mode {
+        PutMode::Overwrite => {}
+        PutMode::CreateOnly => {
+            req = req.header("If-None-Match", "*");
+        }
+        PutMode::Update(etag) => {
+            req = req.header("If-Match", etag);
+        }
     }
     let res = req.send().await?;
     if !res.status().is_success() {

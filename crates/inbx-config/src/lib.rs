@@ -59,6 +59,17 @@ impl ProxyConfig {
 
 pub use inbx_pgp::config::PgpConfig;
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CardDavConfig {
+    /// Full addressbook collection URL — resource path is appended at PUT time.
+    /// Trailing slash optional; normalized at store construction time.
+    pub addressbook_url: String,
+    /// Override the IMAP username if the CardDAV account uses a different one.
+    /// Defaults to `account.username`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("xdg dirs unavailable: {0}")]
@@ -165,6 +176,8 @@ pub struct Account {
     pub pgp: Option<PgpConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proxy: Option<ProxyConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub carddav: Option<CardDavConfig>,
 }
 
 fn default_imap_port() -> u16 {
@@ -266,6 +279,7 @@ mod tests {
                 transport: Transport::Imap,
                 pgp: None,
                 proxy: None,
+                carddav: None,
             }],
         };
         let raw = toml::to_string_pretty(&cfg).unwrap();

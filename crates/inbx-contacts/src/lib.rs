@@ -36,6 +36,14 @@ pub struct Contact {
 
 pub struct ContactsStore {
     pool: SqlitePool,
+    carddav: Option<CardDavCreds>,
+}
+
+#[derive(Clone)]
+struct CardDavCreds {
+    url: String,
+    username: String,
+    password: String,
 }
 
 impl ContactsStore {
@@ -51,7 +59,34 @@ impl ContactsStore {
             .connect_with(opts)
             .await?;
         sqlx::migrate!("./migrations").run(&pool).await?;
-        Ok(Self { pool })
+        Ok(Self {
+            pool,
+            carddav: None,
+        })
+    }
+
+    /// Attach CardDAV credentials so `upsert` auto-pushes on each write.
+    pub fn with_carddav(
+        mut self,
+        cfg: &inbx_config::CardDavConfig,
+        account_username: &str,
+        password: String,
+    ) -> Self {
+        let url = if cfg.addressbook_url.ends_with('/') {
+            cfg.addressbook_url.clone()
+        } else {
+            format!("{}/", cfg.addressbook_url)
+        };
+        let username = cfg
+            .username
+            .clone()
+            .unwrap_or_else(|| account_username.to_string());
+        self.carddav = Some(CardDavCreds {
+            url,
+            username,
+            password,
+        });
+        self
     }
 
     pub async fn upsert(&self, email: &str, name: Option<&str>) -> Result<()> {
@@ -68,6 +103,16 @@ impl ContactsStore {
         .bind(now)
         .execute(&self.pool)
         .await?;
+
+        if let Some(creds) = self.carddav.clone() {
+            let email = email.to_string();
+            let name = name.map(|s| s.to_string());
+            tokio::spawn(async move {
+                if let Err(e) = push_to_carddav(&creds, &email, name.as_deref()).await {
+                    tracing::warn!(email = %email, error = %e, "carddav auto-push failed");
+                }
+            });
+        }
         Ok(())
     }
 
@@ -205,6 +250,36 @@ impl inbx_pgp::PubkeyLookup for ContactsStore {
     }
 }
 
+/// Fire-and-forget CardDAV PUT for a single contact.
+/// Uses a deterministic UID so re-PUTs hit the same resource path (idempotent overwrite).
+async fn push_to_carddav(
+    creds: &CardDavCreds,
+    email: &str,
+    name: Option<&str>,
+) -> carddav::Result<()> {
+    let uid = stable_uid_for(email);
+    let vcard = carddav::build_vcard(email, name, Some(&uid));
+    let resource_url = format!("{}{}.vcf", creds.url, uid);
+    carddav::put_vcard(
+        &resource_url,
+        &creds.username,
+        &creds.password,
+        &vcard,
+        carddav::PutMode::Overwrite,
+    )
+    .await
+}
+
+/// Derive a stable UID from an email address.
+/// Stable UID → idempotent re-PUTs hit the same resource path on the server.
+fn stable_uid_for(email: &str) -> String {
+    use sha1::{Digest, Sha1};
+    let mut h = Sha1::new();
+    h.update(email.to_ascii_lowercase().as_bytes());
+    let hex = h.finalize();
+    format!("inbx-{hex:x}")
+}
+
 fn escape_like(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
@@ -231,6 +306,16 @@ mod tests {
     use super::*;
     use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 
+    #[test]
+    fn stable_uid_deterministic_and_lowercase_normalized() {
+        let a = stable_uid_for("Alice@Example.COM");
+        let b = stable_uid_for("alice@example.com");
+        assert_eq!(a, b, "UID must be case-insensitive");
+        assert!(a.starts_with("inbx-"), "UID must have inbx- prefix");
+        // Same input always produces same output.
+        assert_eq!(a, stable_uid_for("ALICE@EXAMPLE.COM"));
+    }
+
     /// Open an in-memory SQLite ContactsStore (runs all migrations).
     async fn in_memory_store() -> ContactsStore {
         let opts = SqliteConnectOptions::new()
@@ -242,7 +327,10 @@ mod tests {
             .await
             .unwrap();
         sqlx::migrate!("./migrations").run(&pool).await.unwrap();
-        ContactsStore { pool }
+        ContactsStore {
+            pool,
+            carddav: None,
+        }
     }
 
     #[tokio::test]

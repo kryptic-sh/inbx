@@ -15,6 +15,8 @@ patch bumps.
 
 ### Added
 
+- CardDAV auto-push on `ContactsStore::upsert` when an account has `[carddav]`
+  configured. Fire-and-forget; failures log and continue.
 - Homebrew tap auto-publish for `inbx` on tag push. New
   `pkg/homebrew/inbx.rb.in` template + `brew-tap` job in `release.yml` renders
   the formula with the just-uploaded macOS sha256s and pushes it to
