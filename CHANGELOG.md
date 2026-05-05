@@ -8,6 +8,8 @@ patch bumps.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-05-06
+
 ### Changed
 
 - TUI: OAuth login, IMAP expunge, List-Unsubscribe mailto send, and read-receipt
@@ -19,6 +21,12 @@ patch bumps.
   lookup from local disk) runs in the calling context; only the SMTP submit is
   offloaded to a background task so the spinner shows during the network wait.
   On SMTP failure the message is queued in the outbox as before.
+- TUI: bumped `hjkl-splash` to 0.2 — internal clock, no manual `advance()` call.
+  Period explicit at 33 ms via `with_period` to preserve the prior speed.
+- TUI: auto-fetches body when previewing a header-only message — no Enter
+  required. Placeholder `[fetching body…]` shows until the body lands.
+- Build: `inbx-sync` is now part of `default-members` so bare `cargo build`
+  compiles both binaries.
 
 ### Added
 
@@ -59,6 +67,19 @@ patch bumps.
 - `inbx-sync` and `inbx sync`: `--folder` renamed to `--idle-folder`. The flag
   now controls only which folder the IMAP IDLE / JMAP EventSource / Graph delta
   push connection watches, not which folders are synced.
+
+### Fixed
+
+- `inbx-store`: enabled SQLite WAL mode + 5 s busy timeout so the TUI and the
+  in-process sync task can hold the database open concurrently without
+  `database is locked` errors.
+- `inbx-sync`: skip `\Noselect` virtual parents (e.g. Gmail's `[Gmail]`) when
+  iterating discovered folders — they are not selectable and warned every cycle.
+- TUI: hide messages flagged `\Deleted` from the inbox list immediately, even
+  before EXPUNGE fires server-side.
+- `inbx-sync`: prune local message rows whose UID is no longer present on the
+  server (deleted / moved server-side). Previously such rows lingered forever.
+  New `Store::folder_uids` helper enumerates locally stored UIDs for the diff.
 
 ## [0.5.0] - 2026-05-05
 
@@ -548,7 +569,8 @@ patch bumps.
   Actions release-plz workflow (publish gated off until first dry-run pass
   clears).
 
-[Unreleased]: https://github.com/kryptic-sh/inbx/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/kryptic-sh/inbx/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/kryptic-sh/inbx/releases/tag/v0.6.0
 [0.5.0]: https://github.com/kryptic-sh/inbx/releases/tag/v0.5.0
 [0.4.0]: https://github.com/kryptic-sh/inbx/releases/tag/v0.4.0
 [0.3.2]: https://github.com/kryptic-sh/inbx/releases/tag/v0.3.2
