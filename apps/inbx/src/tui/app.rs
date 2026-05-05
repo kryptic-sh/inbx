@@ -667,41 +667,54 @@ impl App {
         Ok(())
     }
 
-    pub(super) async fn unsubscribe_current(&mut self) -> Result<()> {
+    pub(super) fn unsubscribe_current(&mut self) {
         let Some(msg) = self.current_message().cloned() else {
-            return Ok(());
+            return;
         };
         let Some(path) = msg.maildir_path else {
             self.status = "no body fetched — press Enter or F first".into();
-            return Ok(());
+            return;
         };
-        let raw = std::fs::read(&path)?;
+        let raw = match std::fs::read(&path) {
+            Ok(b) => b,
+            Err(e) => {
+                self.status = format!("read error: {e}");
+                return;
+            }
+        };
         let header = match extract_list_unsubscribe(&raw) {
             Some(h) => h,
             None => {
                 self.status = "no List-Unsubscribe header".into();
-                return Ok(());
+                return;
             }
         };
         let uris = parse_unsubscribe_uris(&header);
-        if let Some(mailto) = uris.iter().find(|u| u.starts_with("mailto:")) {
-            let (to, subject, body) = parse_mailto(mailto);
-            let raw = build_unsubscribe_mime(&self.account.email, &to, &subject, &body);
-            match inbx_net::send_message(&self.account, &raw).await {
-                Ok(()) => self.status = format!("unsubscribe sent to {to}"),
-                Err(e) => self.status = format!("unsubscribe failed: {e}"),
-            }
-            return Ok(());
-        }
+        // https: URIs open the browser locally — fast, no spinner needed.
         if let Some(https) = uris.iter().find(|u| u.starts_with("https:")) {
             match open_url(https) {
                 Ok(()) => self.status = format!("opened {https}"),
                 Err(e) => self.status = format!("open failed: {e}"),
             }
-            return Ok(());
+            return;
+        }
+        // mailto: URIs require an SMTP send — spawn background task.
+        if let Some(mailto) = uris.iter().find(|u| u.starts_with("mailto:")) {
+            let (to, subject, body_text) = parse_mailto(mailto);
+            let mime = build_unsubscribe_mime(&self.account.email, &to, &subject, &body_text);
+            if !self.spawn_pending() {
+                return;
+            }
+            self.status = format!("unsubscribing via mailto to {to}…");
+            let account = self.account.clone();
+            let tx = self.task_tx.0.clone();
+            tokio::spawn(async move {
+                let result = do_unsubscribe_mailto(account, mime, to).await;
+                let _ = tx.send(super::tasks::TaskResult::UnsubscribeDone { result });
+            });
+            return;
         }
         self.status = "no List-Unsubscribe header".into();
-        Ok(())
     }
 
     pub(super) async fn open_ical(&mut self) -> Result<()> {
@@ -815,14 +828,14 @@ impl App {
 
     /// Send a read receipt (MDN) for the current message.  Called only when
     /// the user explicitly presses `Y` in the Preview pane.
-    pub(super) async fn send_read_receipt(&mut self) -> Result<()> {
+    pub(super) fn send_read_receipt(&mut self) {
         let req = match self.current_receipt.clone() {
             Some(r) => r,
-            None => return Ok(()),
+            None => return,
         };
         let uid = match self.current_message().map(|m| m.uid) {
             Some(u) => u,
-            None => return Ok(()),
+            None => return,
         };
         let subject = self
             .current_message()
@@ -839,23 +852,32 @@ impl App {
             reporting_ua: gethostname::gethostname().to_string_lossy().into_owned(),
         };
 
-        let addrs = req.notify_to.join(", ");
-        match inbx_net::build_mdn(&ctx) {
-            Ok(raw) => match inbx_net::send_message(&self.account, &raw).await {
-                Ok(()) => {
-                    self.status = format!("sent read receipt to {addrs}");
-                }
-                Err(e) => {
-                    self.status = format!("read receipt send failed: {e}");
-                }
-            },
+        let raw = match inbx_net::build_mdn(&ctx) {
+            Ok(r) => r,
             Err(e) => {
                 self.status = format!("read receipt build failed: {e}");
+                return;
             }
+        };
+
+        if !self.spawn_pending() {
+            return;
         }
+        // Mark responded immediately so we don't prompt again if the user
+        // navigates while the task is in flight.
         self.receipt_responded.insert(uid);
         self.current_receipt = None;
-        Ok(())
+        self.status = "sending read receipt…".into();
+        let account = self.account.clone();
+        let addrs = req.notify_to.join(", ");
+        let tx = self.task_tx.0.clone();
+        tokio::spawn(async move {
+            let result = match inbx_net::send_message(&account, &raw).await {
+                Ok(()) => Ok(format!("sent read receipt to {addrs}")),
+                Err(e) => Err(format!("read receipt send failed: {e}")),
+            };
+            let _ = tx.send(super::tasks::TaskResult::ReadReceiptDone { result });
+        });
     }
 
     /// Decline a read receipt for the current message.  Called when the user
@@ -894,126 +916,44 @@ impl App {
         Ok(())
     }
 
+    /// Prepare the MIME payload (including PGP) and spawn an SMTP send task.
+    ///
+    /// MIME building (including PGP key lookup) runs in the calling async
+    /// context — it's local-disk-only and fast (< 100 ms).  Only the SMTP
+    /// round-trip is offloaded to a tokio task so the spinner animates during
+    /// the network wait.
     pub(super) async fn send_composer(&mut self) -> Result<()> {
-        let Some(composer) = self.composer.as_ref() else {
+        let Some(composer) = self.composer.take() else {
             return Ok(());
         };
 
-        let raw = if composer.pgp.sign || composer.pgp.encrypt {
-            // PGP path.
-            let pgp_cfg = match &self.account.pgp {
-                Some(cfg) => cfg.clone(),
-                None => {
-                    self.status =
-                        "pgp: account has no pgp config; run `inbx pgp keygen` first".into();
-                    return Ok(());
-                }
-            };
-            // Only the inbx-managed source is supported for the TUI PGP send path.
-            let source = match inbx_pgp::key_source_for(&pgp_cfg) {
-                Ok(s) => s,
-                Err(e) => {
-                    self.status = format!("pgp: key source error: {e}");
-                    return Ok(());
-                }
-            };
-
-            // Resolve signer key: prefer configured fingerprint, else first key.
-            let signer_key = if let Some(fpr) = &pgp_cfg.key_fingerprint {
-                inbx_pgp::KeyId(fpr.clone())
-            } else {
-                match source.list_keys().await {
-                    Ok(keys) if !keys.is_empty() => {
-                        let k = keys.into_iter().next().unwrap().0;
-                        tracing::info!(
-                            "pgp: no key_fingerprint configured; using first key {}",
-                            k.0
-                        );
-                        k
-                    }
-                    Ok(_) => {
-                        self.status = "pgp: no keys found in managed dir".into();
-                        return Ok(());
-                    }
-                    Err(e) => {
-                        self.status = format!("pgp: list keys failed: {e}");
-                        return Ok(());
-                    }
-                }
-            };
-
-            // For encrypt: load all *.pub.asc files from the managed_dir.
-            // Recipients not in the dir are silently missing — the user must
-            // manually drop their pubkeys into managed_dir.
-            let recipient_pubkeys: Vec<inbx_pgp::ArmoredKey> = if composer.pgp.encrypt {
-                let managed_dir = pgp_cfg.managed_dir.clone().unwrap_or_else(|| {
-                    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-                    std::path::PathBuf::from(home)
-                        .join(".local")
-                        .join("share")
-                        .join("inbx")
-                        .join("pgp")
-                });
-                tracing::warn!(
-                    "pgp encrypt: loading all pubkeys from {}; \
-                     drop recipient pubkeys into that dir manually for now",
-                    managed_dir.display()
-                );
-                let mut keys = Vec::new();
-                if let Ok(entries) = std::fs::read_dir(&managed_dir) {
-                    for entry in entries.flatten() {
-                        let p = entry.path();
-                        let name = p
-                            .file_name()
-                            .unwrap_or_default()
-                            .to_string_lossy()
-                            .into_owned();
-                        if name.ends_with(".pub.asc")
-                            && let Ok(raw) = std::fs::read_to_string(&p)
-                        {
-                            keys.push(inbx_pgp::ArmoredKey(raw));
-                        }
-                    }
-                }
-                if keys.is_empty() {
-                    self.status = "pgp encrypt: no recipient pubkeys found in managed_dir; \
-                                   drop *.pub.asc files there"
-                        .into();
-                    return Ok(());
-                }
-                keys
-            } else {
-                Vec::new()
-            };
-
-            let c = composer;
-            match c
-                .to_mime_with_pgp(Some(&*source), Some(&signer_key), &recipient_pubkeys)
-                .await
-            {
-                Ok(bytes) => bytes,
-                Err(e) => {
-                    self.status = format!("pgp send failed: {e}");
-                    return Ok(());
-                }
-            }
-        } else {
-            // Plain (non-PGP) path.
-            composer.to_mime()?
-        };
-
-        match inbx_net::send_message(&self.account, &raw).await {
-            Ok(()) => {
-                self.composer = None;
-                self.status = format!("sent ({} bytes)", raw.len());
-            }
+        // Build MIME bytes (possibly with PGP) synchronously / with local I/O.
+        // PGP key lookup reads from disk — no network, always fast.
+        let raw = match prepare_composer_mime(&self.account, &composer).await {
+            Ok(b) => b,
             Err(e) => {
-                let id = self.store.outbox_enqueue(&raw).await?;
-                self.store.outbox_record_failure(id, &e.to_string()).await?;
-                self.composer = None;
-                self.status = format!("queued in outbox (id={id}): {e}");
+                // Put the composer back so the user can fix and retry.
+                self.composer = Some(composer);
+                self.status = e;
+                return Ok(());
             }
+        };
+        // Composer is consumed; don't put it back.
+        if !self.spawn_pending() {
+            // A previous op is in flight — this shouldn't happen normally but
+            // handle it gracefully by queueing directly in the outbox.
+            let id = self.store.outbox_enqueue(&raw).await?;
+            self.status = format!("busy — queued in outbox (id={id})");
+            return Ok(());
         }
+        self.status = "sending…".into();
+        let account = self.account.clone();
+        let store = self.store.clone();
+        let tx = self.task_tx.0.clone();
+        tokio::spawn(async move {
+            let result = do_smtp_send(account, store, raw).await;
+            let _ = tx.send(super::tasks::TaskResult::ComposerSent { result });
+        });
         Ok(())
     }
 
@@ -1178,40 +1118,41 @@ impl App {
         });
     }
 
-    pub(super) async fn oauth_login(&mut self) -> Result<()> {
+    pub(super) fn oauth_login(&mut self) {
         let provider = match &self.account.auth {
             inbx_config::AuthMethod::OAuth2 { provider, .. } => provider.clone(),
             _ => {
                 self.status = "not an oauth2 account".into();
-                return Ok(());
+                return;
             }
         };
-        self.status = "oauth login: opening browser…".into();
-        match inbx_net::oauth_login(&self.account.auth, &provider, self.account.proxy.as_ref())
-            .await
-        {
-            Ok(token) => {
-                inbx_config::store_refresh_token(&self.account.name, &token.refresh)?;
-                self.status = "oauth login complete".into();
-            }
-            Err(e) => {
-                self.status = format!("oauth login failed: {e}");
-            }
+        if !self.spawn_pending() {
+            return;
         }
-        Ok(())
+        self.status = "oauth login: opening browser…".into();
+        let account = self.account.clone();
+        let tx = self.task_tx.0.clone();
+        tokio::spawn(async move {
+            let result = do_oauth_login(account, provider).await;
+            let _ = tx.send(super::tasks::TaskResult::OAuthLoginDone { result });
+        });
     }
 
-    pub(super) async fn expunge(&mut self) -> Result<()> {
+    pub(super) fn expunge(&mut self) {
         let Some(folder_name) = self.current_folder().map(|f| f.name.clone()) else {
-            return Ok(());
+            return;
         };
-        let mut provider = inbx_net::connect_provider(&self.account, Some(&self.store)).await?;
-        let n = provider.expunge_folder(&folder_name).await?;
-        drop(provider);
-        let purged = self.store.purge_deleted(&folder_name).await?;
-        self.reload_messages().await?;
-        self.status = format!("expunged {n} (server) / {purged} (local) in {folder_name}");
-        Ok(())
+        if !self.spawn_pending() {
+            return;
+        }
+        self.status = format!("expunging {folder_name}…");
+        let account = self.account.clone();
+        let store = self.store.clone();
+        let tx = self.task_tx.0.clone();
+        tokio::spawn(async move {
+            let result = do_expunge(account, store, folder_name).await;
+            let _ = tx.send(super::tasks::TaskResult::ExpungeDone { result });
+        });
     }
 
     pub(super) async fn move_current_to(&mut self, target: &str) -> Result<()> {
@@ -2326,6 +2267,159 @@ async fn do_sieve_put(
     }
     .await;
     TaskResult::SieveSaved { name, body, result }
+}
+
+/// Perform an OAuth2 login off the event-loop thread.
+async fn do_oauth_login(
+    account: inbx_config::Account,
+    provider: inbx_config::OAuthProvider,
+) -> std::result::Result<(), String> {
+    match inbx_net::oauth_login(&account.auth, &provider, account.proxy.as_ref()).await {
+        Ok(token) => inbx_config::store_refresh_token(&account.name, &token.refresh)
+            .map_err(|e| e.to_string()),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// Build MIME bytes from a `Composer` (including optional PGP envelope).
+///
+/// Runs in the calling async context (event loop).  PGP key lookup reads from
+/// disk — no network, always fast.  Returns an error string on failure so the
+/// caller can surface it in the status line and restore the composer.
+async fn prepare_composer_mime(
+    account: &inbx_config::Account,
+    composer: &inbx_composer::Composer,
+) -> std::result::Result<Vec<u8>, String> {
+    if composer.pgp.sign || composer.pgp.encrypt {
+        let pgp_cfg = match &account.pgp {
+            Some(cfg) => cfg.clone(),
+            None => {
+                return Err(
+                    "pgp: account has no pgp config; run `inbx pgp keygen` first".to_string(),
+                );
+            }
+        };
+        let source = inbx_pgp::key_source_for(&pgp_cfg).map_err(|e| e.to_string())?;
+
+        let signer_key = if let Some(fpr) = &pgp_cfg.key_fingerprint {
+            inbx_pgp::KeyId(fpr.clone())
+        } else {
+            match source.list_keys().await {
+                Ok(keys) if !keys.is_empty() => {
+                    let k = keys.into_iter().next().unwrap().0;
+                    tracing::info!(
+                        "pgp: no key_fingerprint configured; using first key {}",
+                        k.0
+                    );
+                    k
+                }
+                Ok(_) => return Err("pgp: no keys found in managed dir".into()),
+                Err(e) => return Err(format!("pgp: list keys failed: {e}")),
+            }
+        };
+
+        let recipient_pubkeys: Vec<inbx_pgp::ArmoredKey> = if composer.pgp.encrypt {
+            let managed_dir = pgp_cfg.managed_dir.clone().unwrap_or_else(|| {
+                let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+                std::path::PathBuf::from(home)
+                    .join(".local")
+                    .join("share")
+                    .join("inbx")
+                    .join("pgp")
+            });
+            tracing::warn!(
+                "pgp encrypt: loading all pubkeys from {}; \
+                 drop recipient pubkeys into that dir manually for now",
+                managed_dir.display()
+            );
+            let mut keys = Vec::new();
+            if let Ok(entries) = std::fs::read_dir(&managed_dir) {
+                for entry in entries.flatten() {
+                    let p = entry.path();
+                    let name = p
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .into_owned();
+                    if name.ends_with(".pub.asc")
+                        && let Ok(raw) = std::fs::read_to_string(&p)
+                    {
+                        keys.push(inbx_pgp::ArmoredKey(raw));
+                    }
+                }
+            }
+            if keys.is_empty() {
+                return Err("pgp encrypt: no recipient pubkeys found in managed_dir; \
+                            drop *.pub.asc files there"
+                    .into());
+            }
+            keys
+        } else {
+            Vec::new()
+        };
+
+        composer
+            .to_mime_with_pgp(Some(&*source), Some(&signer_key), &recipient_pubkeys)
+            .await
+            .map_err(|e| format!("pgp send failed: {e}"))
+    } else {
+        composer.to_mime().map_err(|e| e.to_string())
+    }
+}
+
+/// SMTP send off the event-loop thread.
+///
+/// On failure enqueues the message in the outbox so the user can retry via the
+/// outbox overlay.  `Ok(bytes)` = sent; `Err(status)` = queued or hard error.
+async fn do_smtp_send(
+    account: inbx_config::Account,
+    store: Store,
+    raw: Vec<u8>,
+) -> std::result::Result<usize, String> {
+    let len = raw.len();
+    match inbx_net::send_message(&account, &raw).await {
+        Ok(()) => Ok(len),
+        Err(e) => match store.outbox_enqueue(&raw).await {
+            Ok(id) => {
+                let _ = store.outbox_record_failure(id, &e.to_string()).await;
+                Err(format!("queued in outbox (id={id}): {e}"))
+            }
+            Err(oe) => Err(format!(
+                "send failed ({e}); outbox enqueue also failed: {oe}"
+            )),
+        },
+    }
+}
+
+/// IMAP EXPUNGE off the event-loop thread.
+async fn do_expunge(
+    account: inbx_config::Account,
+    store: Store,
+    folder_name: String,
+) -> std::result::Result<(usize, u64, String), String> {
+    let result: anyhow::Result<(usize, u64)> = async {
+        let mut provider = inbx_net::connect_provider(&account, Some(&store)).await?;
+        let n = provider.expunge_folder(&folder_name).await?;
+        drop(provider);
+        let purged = store.purge_deleted(&folder_name).await?;
+        Ok((n, purged))
+    }
+    .await;
+    result
+        .map(|(n, purged)| (n, purged, folder_name))
+        .map_err(|e| e.to_string())
+}
+
+/// Send a List-Unsubscribe mailto: off the event-loop thread.
+async fn do_unsubscribe_mailto(
+    account: inbx_config::Account,
+    mime: Vec<u8>,
+    to: String,
+) -> std::result::Result<String, String> {
+    match inbx_net::send_message(&account, &mime).await {
+        Ok(()) => Ok(format!("unsubscribe sent to {to}")),
+        Err(e) => Err(format!("unsubscribe failed: {e}")),
+    }
 }
 
 fn extract_list_unsubscribe(raw: &[u8]) -> Option<String> {

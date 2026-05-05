@@ -59,6 +59,27 @@ pub(super) enum TaskResult {
         lang: &'static str,
         result: Result<Arc<hjkl_bonsai::runtime::Grammar>, String>,
     },
+    /// `oauth_login` finished. `result` carries an error string on failure.
+    OAuthLoginDone {
+        result: std::result::Result<(), String>,
+    },
+    /// `send_composer` finished. On success carries the byte count; on failure
+    /// carries the error (message was queued in the outbox by the task).
+    ComposerSent {
+        result: std::result::Result<usize, String>,
+    },
+    /// `expunge` finished. On success carries (server_count, local_count, folder_name).
+    ExpungeDone {
+        result: std::result::Result<(usize, u64, String), String>,
+    },
+    /// `unsubscribe_current` finished. Carries a human-readable status string.
+    UnsubscribeDone {
+        result: std::result::Result<String, String>,
+    },
+    /// `send_read_receipt` finished. `result` carries the status string.
+    ReadReceiptDone {
+        result: std::result::Result<String, String>,
+    },
 }
 
 #[derive(Clone)]

@@ -1281,7 +1281,7 @@ impl Action {
                 app.toggle_deleted().await?;
             }
             Action::Expunge => {
-                app.expunge().await?;
+                app.expunge();
             }
             Action::MoveMessage => {
                 app.move_picker = Some(MovePickerState::new());
@@ -1290,13 +1290,13 @@ impl Action {
                 app.open_thread().await?;
             }
             Action::ListUnsubscribe => {
-                app.unsubscribe_current().await?;
+                app.unsubscribe_current();
             }
             Action::OpenIcal => {
                 app.open_ical().await?;
             }
             Action::ReadReceiptSend => {
-                app.send_read_receipt().await?;
+                app.send_read_receipt();
             }
             Action::ReadReceiptDecline => {
                 app.decline_read_receipt();
@@ -1387,7 +1387,7 @@ impl Action {
                 app.open_outbox().await?;
             }
             Action::OAuthLogin => {
-                app.oauth_login().await?;
+                app.oauth_login();
             }
             Action::LeaderOpenFolderPicker => {
                 app.open_folder_picker();

@@ -324,6 +324,57 @@ async fn handle_task_result(app: &mut App, result: tasks::TaskResult) -> Result<
                 }
             }
         }
+        TaskResult::OAuthLoginDone { result } => {
+            app.complete_pending();
+            app.status = match result {
+                Ok(()) => "oauth login complete".into(),
+                Err(e) => format!("oauth login failed: {e}"),
+            };
+        }
+        TaskResult::ComposerSent { result } => {
+            app.complete_pending();
+            match result {
+                Ok(bytes) => {
+                    // Composer was already taken out by send_composer(); clear
+                    // any stale state and surface the success.
+                    app.composer = None;
+                    app.status = format!("sent ({bytes} bytes)");
+                }
+                Err(e) => {
+                    // Message was queued in the outbox by do_send_composer.
+                    // Leave composer as None (it was moved into the task).
+                    app.status = e;
+                }
+            }
+        }
+        TaskResult::ExpungeDone { result } => {
+            app.complete_pending();
+            match result {
+                Ok((server_n, local_n, folder)) => {
+                    app.reload_messages().await?;
+                    app.status =
+                        format!("expunged {server_n} (server) / {local_n} (local) in {folder}");
+                }
+                Err(e) => {
+                    app.status = format!("expunge failed: {e}");
+                }
+            }
+        }
+        TaskResult::UnsubscribeDone { result } => {
+            app.complete_pending();
+            app.status = match result {
+                Ok(msg) => msg,
+                Err(e) => e,
+            };
+        }
+        TaskResult::ReadReceiptDone { result } => {
+            app.complete_pending();
+            // receipt_responded was already updated in send_read_receipt().
+            app.status = match result {
+                Ok(msg) => msg,
+                Err(e) => e,
+            };
+        }
     }
     Ok(())
 }

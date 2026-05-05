@@ -8,6 +8,18 @@ patch bumps.
 
 ## [Unreleased]
 
+### Changed
+
+- TUI: OAuth login, IMAP expunge, List-Unsubscribe mailto send, and read-receipt
+  SMTP send now use the `spawn_pending` / `TaskResult` pattern so the busy
+  spinner animates in the status line during the network round-trip instead of
+  freezing the event loop. New `TaskResult` variants: `OAuthLoginDone`,
+  `ComposerSent`, `ExpungeDone`, `UnsubscribeDone`, `ReadReceiptDone`.
+- TUI: `ComposerSend` (`<Enter>` in composer) — MIME building (including PGP key
+  lookup from local disk) runs in the calling context; only the SMTP submit is
+  offloaded to a background task so the spinner shows during the network wait.
+  On SMTP failure the message is queued in the outbox as before.
+
 ### Added
 
 - TUI: splash screen animation on startup via `hjkl-splash`; plays a cursor
