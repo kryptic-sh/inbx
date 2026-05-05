@@ -43,7 +43,8 @@ apps/
 ## Highlights
 
 - **TUI** with vim navigation (j/k, h/l, gg/G, Tab) and a modal composer overlay
-  (`c`/`r`/`R`/`f`, Ctrl-S send, Ctrl-D save draft)
+  (`c`/`r`/`R`/`f`, Ctrl-S send, Ctrl-D save draft); animated splash screen on
+  startup (skip with any key)
 - **Auth** — app password via OS keyring, OAuth2 (Gmail + Microsoft) with PKCE +
   auth-code loopback flow, refresh tokens stored in the keyring
 - **Render** — HTML sanitized via ammonia, remote content blocked by default,

@@ -105,6 +105,7 @@ tempfile = "3"
 which = "8"
 
 # hjkl deps use caret-minor pins; consumers track minor bumps from crates.io.
+hjkl-splash = "0.1"
 hjkl-bonsai = "0.5"
 hjkl-editor = "0.3"
 hjkl-buffer = { version = "0.3", features = ["ratatui"] }

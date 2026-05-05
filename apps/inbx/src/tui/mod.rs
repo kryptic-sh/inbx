@@ -19,6 +19,7 @@ mod binds;
 mod keys;
 mod picker;
 mod render;
+mod splash;
 mod tasks;
 mod wizard;
 
@@ -35,6 +36,7 @@ pub async fn run(account: Account) -> Result<()> {
     let mut app = App::new(account, store).await?;
 
     let mut terminal = setup_terminal()?;
+    splash::play(&mut terminal).await?;
     let res = event_loop(&mut terminal, &mut app).await;
     restore_terminal(&mut terminal)?;
     res

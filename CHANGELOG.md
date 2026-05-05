@@ -10,6 +10,8 @@ patch bumps.
 
 ### Added
 
+- TUI: splash screen animation on startup via `hjkl-splash`; plays a cursor
+  trace over the inbx figlet art and fades to the inbox (closes #25).
 - TUI: `H` toggles raw RFC 5322 header view in the preview pane (closes #24).
 - TUI: `y` opens a copy-to-folder picker (IMAP UID COPY) mirroring the move
   picker (`m`) with a "Copy" mode indicator in the title (closes #23).
