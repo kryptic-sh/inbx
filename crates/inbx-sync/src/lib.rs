@@ -367,6 +367,24 @@ pub async fn sync_once(
             .await?;
     }
     let (uidvalidity, rows) = inbx_net::fetch_headers(&mut session, folder).await?;
+
+    // Prune local rows whose UID is no longer present on the server (deleted /
+    // moved to another folder server-side).
+    let server_uids: std::collections::HashSet<i64> =
+        rows.iter().map(|r| r.uid as i64).collect();
+    let local_uids = store
+        .folder_uids(folder, uidvalidity as i64)
+        .await
+        .unwrap_or_default();
+    let stale: Vec<i64> = local_uids
+        .into_iter()
+        .filter(|u| !server_uids.contains(u))
+        .collect();
+    if !stale.is_empty() {
+        tracing::debug!(account = %account.name, %folder, count = stale.len(), "pruning stale local rows");
+        store.delete_messages(folder, &stale).await?;
+    }
+
     let prev = store.folder_uidvalidity(folder).await?;
     if let Some(prev) = prev
         && prev as u32 != uidvalidity
