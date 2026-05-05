@@ -8,6 +8,33 @@ patch bumps.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-05-06
+
+### Added
+
+- TUI: friendly folder names — `[Gmail]/Trash` renders as `Trash`,
+  `[Gmail]/Sent Mail` as `Sent`, etc., via the IMAP `special_use` attributes
+  (`\Trash`, `\Sent`, `\Drafts`, `\Junk`, `\Flagged`, `\All`, `\Archive`).
+  `INBOX` shows as `Inbox`. Server-side names unchanged.
+- TUI: two-line message rows — sender on top, subject below. Unread bold on both
+  lines; selection covers the full block.
+- TUI: animated spinner in the body pane while a header-only message is being
+  fetched (replaces the static `[fetching body…]` placeholder).
+
+### Changed
+
+- TUI: tracing output writes to the daily log file only when running in TUI mode
+  (`inbx` no-arg or `inbx tui`). The stderr layer corrupted the alt-screen on
+  errors. CLI subcommands still tee stderr + file.
+- TUI: dropped the `> ` highlight symbol from the messages list. The two-line
+  rows misaligned because the symbol gutter only shifted the first line;
+  REVERSED background now covers the full item cleanly.
+
+### Fixed
+
+- TUI: hide `\Noselect` virtual parent folders (e.g. Gmail's `[Gmail]`) from the
+  folders pane. They can't be selected anyway.
+
 ## [0.6.0] - 2026-05-06
 
 ### Changed
@@ -569,7 +596,8 @@ patch bumps.
   Actions release-plz workflow (publish gated off until first dry-run pass
   clears).
 
-[Unreleased]: https://github.com/kryptic-sh/inbx/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/kryptic-sh/inbx/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/kryptic-sh/inbx/releases/tag/v0.7.0
 [0.6.0]: https://github.com/kryptic-sh/inbx/releases/tag/v0.6.0
 [0.5.0]: https://github.com/kryptic-sh/inbx/releases/tag/v0.5.0
 [0.4.0]: https://github.com/kryptic-sh/inbx/releases/tag/v0.4.0
