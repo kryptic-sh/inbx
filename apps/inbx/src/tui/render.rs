@@ -202,7 +202,7 @@ fn draw_messages(f: &mut ratatui::Frame, app: &App, area: Rect) {
             let subj_style = if unread {
                 Style::default().add_modifier(Modifier::BOLD)
             } else {
-                Style::default().add_modifier(Modifier::DIM)
+                Style::default()
             };
             ListItem::new(vec![
                 Line::from(Span::styled(from, from_style)),
@@ -212,8 +212,7 @@ fn draw_messages(f: &mut ratatui::Frame, app: &App, area: Rect) {
         .collect();
     let list = List::new(items)
         .block(pane_block("messages", app.pane == Pane::Messages))
-        .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
-        .highlight_symbol("> ");
+        .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
     f.render_stateful_widget(list, area, &mut app.msg_state.clone());
 }
 
