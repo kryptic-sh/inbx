@@ -1,6 +1,6 @@
 [package]
-name = "inbx-sync-bin"
-description = "inbx-sync — multi-account IMAP IDLE sync daemon"
+name = "inbx-sync"
+description = "inbx-sync — sync engine library (multi-account IMAP IDLE loop)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,18 +9,15 @@ repository.workspace = true
 homepage.workspace = true
 authors.workspace = true
 
-[[bin]]
-name = "inbx-sync"
-path = "src/main.rs"
-
 [dependencies]
-inbx-sync.workspace = true
 inbx-ipc.workspace = true
 inbx-config.workspace = true
+inbx-net.workspace = true
+inbx-store.workspace = true
+inbx-render.workspace = true
+inbx-contacts.workspace = true
+mail-parser.workspace = true
 anyhow.workspace = true
-clap.workspace = true
 tokio.workspace = true
 tracing.workspace = true
-tracing-subscriber.workspace = true
-tracing-appender.workspace = true
-directories = "5"
+notify-rust.workspace = true

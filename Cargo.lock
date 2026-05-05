@@ -2594,6 +2594,7 @@ dependencies = [
  "inbx-pgp",
  "inbx-render",
  "inbx-store",
+ "inbx-sync",
  "mail-builder",
  "mail-parser",
  "notify-rust",
@@ -2775,9 +2776,6 @@ name = "inbx-sync"
 version = "0.5.0"
 dependencies = [
  "anyhow",
- "clap",
- "directories",
- "inbx-composer",
  "inbx-config",
  "inbx-contacts",
  "inbx-ipc",
@@ -2786,6 +2784,20 @@ dependencies = [
  "inbx-store",
  "mail-parser",
  "notify-rust",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "inbx-sync-bin"
+version = "0.5.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "directories",
+ "inbx-config",
+ "inbx-ipc",
+ "inbx-sync",
  "tokio",
  "tracing",
  "tracing-appender",

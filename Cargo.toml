@@ -11,6 +11,7 @@ members = [
     "crates/inbx-ical",
     "crates/inbx-composer",
     "crates/inbx-ipc",
+    "crates/inbx-sync",
     "apps/inbx",
     "apps/inbx-sync",
     "xtask",
@@ -96,6 +97,7 @@ inbx-contacts = { version = "0.5.0", path = "crates/inbx-contacts" }
 inbx-ical = { version = "0.5.0", path = "crates/inbx-ical" }
 inbx-composer = { version = "0.5.0", path = "crates/inbx-composer" }
 inbx-ipc = { version = "0.5.0", path = "crates/inbx-ipc" }
+inbx-sync = { version = "0.5.0", path = "crates/inbx-sync" }
 
 # PGP
 pgp = "0.19"
