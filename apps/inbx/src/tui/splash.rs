@@ -48,11 +48,10 @@ pub async fn play(term: &mut Term) -> Result<()> {
         })
         .collect();
 
-    let trail_len = 6u64;
-    // Animate until cursor finishes one pass + trail fully fades + headroom.
+    let trail_len = hjkl_splash::DEFAULT_TRAIL_LEN as u64;
     let done_tick = path.len() as u64 + trail_len + 15;
 
-    let mut splash = Splash::new(&art, &path);
+    let splash = Splash::new(&art, &path).with_period(Duration::from_millis(33));
     let mut events = EventStream::new();
 
     loop {
@@ -82,7 +81,6 @@ pub async fn play(term: &mut Term) -> Result<()> {
             }
         })?;
 
-        // Non-blocking poll for key events; any key exits splash early.
         let done = tokio::select! {
             ev = events.next() => {
                 matches!(ev, Some(Ok(Event::Key(_))) | None)
@@ -92,7 +90,6 @@ pub async fn play(term: &mut Term) -> Result<()> {
         if done || splash.tick() >= done_tick {
             break;
         }
-        splash.advance();
     }
 
     Ok(())
