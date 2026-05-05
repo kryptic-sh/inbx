@@ -1928,13 +1928,14 @@ impl App {
             }
             Some((_, None, folder, from_addr, subject, flags)) => {
                 self.body = format!(
-                    "[body not yet fetched — run `inbx fetch --bodies` to download]\n\n\
+                    "[fetching body…]\n\n\
                      folder: {}\nfrom: {}\nsubject: {}\nflags: {}",
                     folder,
                     from_addr.as_deref().unwrap_or(""),
                     subject.as_deref().unwrap_or(""),
                     flags,
                 );
+                self.fetch_current_body();
             }
         }
         #[cfg(feature = "tree-sitter")]
