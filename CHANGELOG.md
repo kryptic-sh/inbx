@@ -8,6 +8,8 @@ patch bumps.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-05-05
+
 ### Added
 
 - `inbx-sync` ↔ `inbx` TUI unix-socket IPC. TUI auto-detects a running sync
@@ -18,6 +20,11 @@ patch bumps.
   behind `--features tree-sitter`, uses `hjkl-bonsai 0.5`). Grammars are loaded
   on demand in a background thread; the preview panel renders plain text until
   the grammar resolves, then switches to styled output.
+
+### Fixed
+
+- `inbx-sync` now compiles cleanly on Windows (unused-variable errors gated
+  inside `#[cfg(unix)]` IPC blocks).
 
 ## [0.4.0] - 2026-05-05
 
@@ -489,7 +496,8 @@ patch bumps.
   Actions release-plz workflow (publish gated off until first dry-run pass
   clears).
 
-[Unreleased]: https://github.com/kryptic-sh/inbx/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/kryptic-sh/inbx/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/kryptic-sh/inbx/releases/tag/v0.5.0
 [0.4.0]: https://github.com/kryptic-sh/inbx/releases/tag/v0.4.0
 [0.3.2]: https://github.com/kryptic-sh/inbx/releases/tag/v0.3.2
 [0.3.1]: https://github.com/kryptic-sh/inbx/releases/tag/v0.3.1

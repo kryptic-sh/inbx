@@ -2561,7 +2561,7 @@ dependencies = [
 
 [[package]]
 name = "inbx"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -2600,7 +2600,7 @@ dependencies = [
 
 [[package]]
 name = "inbx-composer"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "hjkl-buffer",
@@ -2620,7 +2620,7 @@ dependencies = [
 
 [[package]]
 name = "inbx-config"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "hjkl-config",
  "inbx-pgp",
@@ -2634,7 +2634,7 @@ dependencies = [
 
 [[package]]
 name = "inbx-contacts"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "inbx-config",
@@ -2651,7 +2651,7 @@ dependencies = [
 
 [[package]]
 name = "inbx-dav"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "reqwest",
  "thiserror 2.0.18",
@@ -2659,7 +2659,7 @@ dependencies = [
 
 [[package]]
 name = "inbx-ical"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "icalendar",
  "inbx-dav",
@@ -2674,7 +2674,7 @@ dependencies = [
 
 [[package]]
 name = "inbx-ipc"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2685,7 +2685,7 @@ dependencies = [
 
 [[package]]
 name = "inbx-net"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "async-imap",
  "async-trait",
@@ -2715,7 +2715,7 @@ dependencies = [
 
 [[package]]
 name = "inbx-pgp"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "base64",
@@ -2736,7 +2736,7 @@ dependencies = [
 
 [[package]]
 name = "inbx-render"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "ammonia",
  "async-trait",
@@ -2752,7 +2752,7 @@ dependencies = [
 
 [[package]]
 name = "inbx-store"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "criterion",
  "gethostname 0.5.0",
@@ -2765,7 +2765,7 @@ dependencies = [
 
 [[package]]
 name = "inbx-sync"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "clap",
