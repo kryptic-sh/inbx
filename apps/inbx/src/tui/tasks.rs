@@ -7,11 +7,13 @@
 //! channel; the event loop's `tokio::select!` picks results up
 //! between (or alongside) key events.
 
+#[cfg(feature = "tree-sitter")]
+use std::sync::Arc;
+
 use inbx_net::sieve::SieveScript;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 /// Result of a background op, posted from the spawned task back to App.
-#[derive(Debug)]
 pub(super) enum TaskResult {
     /// `manual_sync` finished. Carries the new last_sync_unix and an
     /// optional error string for the status line.
@@ -47,6 +49,13 @@ pub(super) enum TaskResult {
     WatchSignal,
     /// An event arrived from the inbx-sync daemon over the IPC socket.
     SyncIpcEvent(inbx_ipc::Event),
+    /// A tree-sitter grammar finished loading (or failed). The `lang` key
+    /// matches the string used for the cache lookup in `App`.
+    #[cfg(feature = "tree-sitter")]
+    GrammarReady {
+        lang: &'static str,
+        result: Result<Arc<hjkl_bonsai::runtime::Grammar>, String>,
+    },
 }
 
 #[derive(Clone)]

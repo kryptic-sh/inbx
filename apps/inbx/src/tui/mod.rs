@@ -281,6 +281,19 @@ async fn handle_task_result(app: &mut App, result: tasks::TaskResult) -> Result<
                 }
             }
         }
+        #[cfg(feature = "tree-sitter")]
+        TaskResult::GrammarReady { lang, result } => {
+            match result {
+                Ok(_) => {
+                    tracing::debug!(%lang, "grammar loaded");
+                    // Grammar is already cached inside kick_grammar_load; just
+                    // redraw by letting the event loop continue.
+                }
+                Err(e) => {
+                    tracing::warn!(%lang, %e, "grammar load failed");
+                }
+            }
+        }
     }
     Ok(())
 }

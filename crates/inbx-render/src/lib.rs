@@ -1,6 +1,10 @@
 pub mod auth;
+pub mod lang;
 pub mod pgp;
 pub mod phishing;
+
+#[cfg(feature = "tree-sitter")]
+pub use hjkl_bonsai;
 
 use std::collections::{HashMap, HashSet};
 
@@ -52,6 +56,15 @@ pub struct PgpVerifyResult {
     pub error: Option<String>,
 }
 
+/// A MIME body part identified as source code, ready for syntax highlighting.
+#[derive(Debug, Clone)]
+pub struct CodeBody {
+    /// Tree-sitter language name (e.g. `"diff"`).
+    pub lang: &'static str,
+    /// Raw bytes of the body part.
+    pub bytes: Vec<u8>,
+}
+
 #[derive(Debug, Clone)]
 pub struct Rendered {
     /// Best-effort plaintext rendering for a TUI.
@@ -76,6 +89,9 @@ pub struct Rendered {
     /// Populated when the message contains a `Disposition-Notification-To:` header.
     /// Never auto-sent; the TUI must obtain explicit user confirmation.
     pub read_receipt_request: Option<ReadReceiptRequest>,
+    /// First body part whose Content-Type maps to a known tree-sitter language.
+    /// `None` when no such part is present.
+    pub code_body: Option<CodeBody>,
 }
 
 const TRACKER_HOSTS: &[&str] = &[
@@ -496,8 +512,24 @@ fn render_message_inner(raw: &[u8], policy: RemotePolicy) -> Result<Rendered> {
     let mut plain_parts: Vec<String> = Vec::new();
     let mut html_parts: Vec<String> = Vec::new();
     let mut inline_cids: HashMap<String, Vec<u8>> = HashMap::new();
+    let mut code_body: Option<CodeBody> = None;
 
     for part in parsed.parts.iter() {
+        // Check for a syntax-highlightable content type before matching body kind.
+        if code_body.is_none()
+            && let Some(ct) = part.content_type()
+        {
+            let mime = format!("{}/{}", ct.ctype(), ct.subtype().unwrap_or_default());
+            if let Some(lang) = lang::lang_for_content_type(&mime)
+                && let PartType::Text(t) = &part.body
+            {
+                code_body = Some(CodeBody {
+                    lang,
+                    bytes: t.as_bytes().to_vec(),
+                });
+            }
+        }
+
         match &part.body {
             PartType::Text(t) => plain_parts.push(t.to_string()),
             PartType::Html(h) => html_parts.push(h.to_string()),
@@ -544,6 +576,7 @@ fn render_message_inner(raw: &[u8], policy: RemotePolicy) -> Result<Rendered> {
         pgp_verify: None,
         autocrypt: None,
         read_receipt_request,
+        code_body,
     })
 }
 
@@ -807,5 +840,23 @@ mod tests {
                     Body text\r\n";
         let r = render_message(raw, RemotePolicy::Block).unwrap();
         assert!(r.read_receipt_request.is_none());
+    }
+
+    #[test]
+    fn patch_body_sets_code_body() {
+        let raw = b"From: a@x\r\nTo: b@y\r\nSubject: patch\r\n\
+                    Content-Type: text/x-patch; charset=utf-8\r\n\r\n\
+                    --- a/foo\r\n+++ b/foo\r\n@@ -1 +1 @@\r\n-old\r\n+new\r\n";
+        let r = render_message(raw, RemotePolicy::Block).unwrap();
+        let cb = r.code_body.expect("code_body present for text/x-patch");
+        assert_eq!(cb.lang, "diff");
+        assert!(cb.bytes.contains(&b'-'));
+    }
+
+    #[test]
+    fn plain_body_no_code_body() {
+        let raw = b"From: a@x\r\nTo: b@y\r\nSubject: hi\r\n\r\nhello\r\n";
+        let r = render_message(raw, RemotePolicy::Block).unwrap();
+        assert!(r.code_body.is_none());
     }
 }

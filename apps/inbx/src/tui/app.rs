@@ -133,6 +133,9 @@ pub(super) struct App {
     /// Populated by `refresh_body`; cleared when the user responds or the
     /// message changes.
     pub(super) current_receipt: Option<inbx_render::ReadReceiptRequest>,
+    /// Most recent `Rendered` for the previewed message. Used by the
+    /// tree-sitter highlight path in render.rs.
+    pub(super) current_rendered: Option<inbx_render::Rendered>,
     /// Cached `ContactsStore` opened lazily on first access (open is async +
     /// hits the disk; reused across reply / contacts-pane / pubkey-lookup).
     /// `Some(None)` after a failed open so we don't keep retrying.
@@ -150,7 +153,28 @@ pub(super) struct App {
     /// Unix timestamp of the last `Heartbeat` event from the IPC daemon.
     /// Used by a future status-line indicator (e.g. "synced 3m ago").
     pub(super) last_ipc_heartbeat_unix: Option<i64>,
+    /// Async grammar loader for tree-sitter highlighting.
+    #[cfg(feature = "tree-sitter")]
+    pub(super) grammar_loader:
+        std::sync::Arc<hjkl_bonsai::runtime::async_loader::AsyncGrammarLoader>,
+    /// Registry for lang-name → LangSpec lookups.
+    #[cfg(feature = "tree-sitter")]
+    pub(super) grammar_registry: hjkl_bonsai::runtime::GrammarRegistry,
+    /// Cache of loaded grammars keyed by language name.
+    /// `Some(None)` means load failed — do not retry.
+    #[cfg(feature = "tree-sitter")]
+    pub(super) grammar_cache: GrammarCache,
 }
+
+#[cfg(feature = "tree-sitter")]
+pub(super) type GrammarCache = std::sync::Arc<
+    tokio::sync::Mutex<
+        std::collections::HashMap<
+            &'static str,
+            Option<std::sync::Arc<hjkl_bonsai::runtime::Grammar>>,
+        >,
+    >,
+>;
 
 #[derive(Clone, Copy)]
 pub(super) enum IcalResponse {
@@ -327,6 +351,16 @@ impl App {
             Option<tokio::sync::mpsc::Receiver<inbx_ipc::Event>>,
         ) = (None, None);
 
+        #[cfg(feature = "tree-sitter")]
+        let (grammar_loader, grammar_registry) = {
+            let registry = hjkl_bonsai::runtime::GrammarRegistry::embedded()?;
+            let loader = hjkl_bonsai::runtime::GrammarLoader::user_default(registry.meta())?;
+            let async_loader = std::sync::Arc::new(
+                hjkl_bonsai::runtime::async_loader::AsyncGrammarLoader::new(loader),
+            );
+            (async_loader, registry)
+        };
+
         let mut app = Self {
             account,
             store,
@@ -363,10 +397,22 @@ impl App {
             contacts_store: None,
             receipt_responded: HashSet::new(),
             current_receipt: None,
+            current_rendered: None,
             watch_handle: None,
             watched_folder: None,
             sync_ipc,
             last_ipc_heartbeat_unix: None,
+            #[cfg(feature = "tree-sitter")]
+            grammar_loader,
+            #[cfg(feature = "tree-sitter")]
+            grammar_registry,
+            #[cfg(feature = "tree-sitter")]
+            grammar_cache: std::sync::Arc::new(tokio::sync::Mutex::new(
+                std::collections::HashMap::<
+                    &'static str,
+                    Option<std::sync::Arc<hjkl_bonsai::runtime::Grammar>>,
+                >::new(),
+            )),
         };
 
         // If IPC connected, spawn a pump task that forwards Events into the
@@ -1570,6 +1616,7 @@ impl App {
     pub(super) fn refresh_body(&mut self) {
         self.body_scroll = 0;
         self.current_receipt = None;
+        self.current_rendered = None;
         // Clone what we need before dropping the borrow on self.
         let snapshot = self.current_message().map(|m| {
             (
@@ -1587,12 +1634,14 @@ impl App {
             }
             Some((uid, Some(path), ..)) => {
                 self.body = render_path(&path);
-                // Detect read-receipt request for this message.
-                if !self.receipt_responded.contains(&uid)
-                    && let Ok(raw) = std::fs::read(&path)
+                // Parse the rendered message for receipt + code_body.
+                if let Ok(raw) = std::fs::read(&path)
                     && let Ok(rendered) = inbx_render::render_message(&raw, RemotePolicy::Block)
                 {
-                    self.current_receipt = rendered.read_receipt_request;
+                    if !self.receipt_responded.contains(&uid) {
+                        self.current_receipt = rendered.read_receipt_request.clone();
+                    }
+                    self.current_rendered = Some(rendered);
                 }
             }
             Some((_, None, folder, from_addr, subject, flags)) => {
@@ -1606,6 +1655,79 @@ impl App {
                 );
             }
         }
+        #[cfg(feature = "tree-sitter")]
+        self.kick_grammar_load();
+    }
+
+    /// If the current rendered message has a `code_body` and the grammar is not
+    /// yet cached, kick off an async load via the `AsyncGrammarLoader` and send
+    /// the result back as `TaskResult::GrammarReady`.
+    #[cfg(feature = "tree-sitter")]
+    pub(super) fn kick_grammar_load(&self) {
+        let Some(rendered) = self.current_rendered.as_ref() else {
+            return;
+        };
+        let Some(cb) = rendered.code_body.as_ref() else {
+            return;
+        };
+        let lang = cb.lang;
+
+        // Skip if already cached (success or failure sentinel).
+        {
+            // Non-blocking: if lock is contended just skip — next refresh will retry.
+            let Ok(cache) = self.grammar_cache.try_lock() else {
+                return;
+            };
+            if cache.contains_key(lang) {
+                return;
+            }
+        }
+
+        let Some(spec) = self.grammar_registry.by_name(lang) else {
+            // Language not in registry — cache a failure sentinel immediately.
+            if let Ok(mut cache) = self.grammar_cache.try_lock() {
+                cache.insert(lang, None);
+            }
+            return;
+        };
+
+        // Dispatch load via AsyncGrammarLoader (deduplicates concurrent calls).
+        let async_loader = self.grammar_loader.clone();
+        let meta = self.grammar_registry.meta().clone();
+        let spec = spec.clone();
+        let cache = self.grammar_cache.clone();
+        let tx = self.task_tx.0.clone();
+
+        tokio::task::spawn_blocking(move || {
+            let handle = async_loader.load_async(lang.to_owned(), spec.clone(), meta.clone());
+            // recv_blocking returns the PathBuf to the compiled .so.
+            // Then Grammar::load through the inner loader finds it in user tier.
+            let result = handle
+                .recv_blocking()
+                .map_err(|e| e.to_string())
+                .and_then(|_| {
+                    hjkl_bonsai::runtime::Grammar::load(lang, &spec, async_loader.inner(), &meta)
+                        .map(std::sync::Arc::new)
+                        .map_err(|e| e.to_string())
+                });
+
+            let send_result = match &result {
+                Ok(g) => {
+                    let mut guard = cache.blocking_lock();
+                    guard.insert(lang, Some(g.clone()));
+                    Ok(g.clone())
+                }
+                Err(e) => {
+                    let mut guard = cache.blocking_lock();
+                    guard.insert(lang, None);
+                    Err(e.clone())
+                }
+            };
+            let _ = tx.send(super::tasks::TaskResult::GrammarReady {
+                lang,
+                result: send_result,
+            });
+        });
     }
 
     pub(super) fn step_list(&mut self, delta: i32) {

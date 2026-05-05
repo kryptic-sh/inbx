@@ -9,6 +9,9 @@ repository.workspace = true
 homepage.workspace = true
 authors.workspace = true
 
+[features]
+tree-sitter = ["dep:hjkl-bonsai"]
+
 [dependencies]
 thiserror.workspace = true
 mail-parser.workspace = true
@@ -17,6 +20,7 @@ html2text.workspace = true
 inbx-pgp.workspace = true
 async-trait.workspace = true
 base64.workspace = true
+hjkl-bonsai = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "macros"] }

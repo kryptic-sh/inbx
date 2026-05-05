@@ -14,6 +14,10 @@ patch bumps.
   daemon at startup and listens for `FolderUpdated` events instead of running
   its own watch loop. Linux/macOS only; Windows TUI continues to use the
   in-process watch.
+- Optional tree-sitter syntax highlighting for `text/x-patch` bodies (gated
+  behind `--features tree-sitter`, uses `hjkl-bonsai 0.5`). Grammars are loaded
+  on demand in a background thread; the preview panel renders plain text until
+  the grammar resolves, then switches to styled output.
 
 ## [0.4.0] - 2026-05-05
 

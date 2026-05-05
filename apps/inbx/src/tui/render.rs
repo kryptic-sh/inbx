@@ -189,15 +189,163 @@ fn draw_messages(f: &mut ratatui::Frame, app: &App, area: Rect) {
 }
 
 fn draw_preview(f: &mut ratatui::Frame, app: &App, area: Rect) {
-    let title = app
+    #[allow(unused_mut)]
+    let mut title = app
         .current_message()
         .and_then(|m| m.subject.clone())
         .unwrap_or_else(|| "preview".into());
+
+    #[cfg(feature = "tree-sitter")]
+    {
+        // Title hint while grammar is loading (cb.lang not yet in cache).
+        if let Some(cb) = app
+            .current_rendered
+            .as_ref()
+            .and_then(|r| r.code_body.as_ref())
+            && app
+                .grammar_cache
+                .try_lock()
+                .ok()
+                .is_none_or(|c| !c.contains_key(cb.lang))
+        {
+            title = format!("{title}  [highlighting {}…]", cb.lang);
+        }
+
+        if let Some(styled) = try_draw_highlighted_preview(app) {
+            let para = Paragraph::new(styled)
+                .block(pane_block(&title, app.pane == Pane::Preview))
+                .wrap(Wrap { trim: false })
+                .scroll((app.body_scroll, 0));
+            f.render_widget(para, area);
+            return;
+        }
+    }
+
     let para = Paragraph::new(app.body.as_str())
         .block(pane_block(&title, app.pane == Pane::Preview))
         .wrap(Wrap { trim: false })
         .scroll((app.body_scroll, 0));
     f.render_widget(para, area);
+}
+
+/// Map a tree-sitter capture name to an inbx ratatui-0.29 `Style`.
+/// Bypasses bonsai's `DotFallbackTheme` to avoid a cross-version `Color`
+/// bridge (bonsai targets ratatui 0.30, inbx is on 0.29).
+#[cfg(feature = "tree-sitter")]
+fn style_for_capture(capture: &str) -> ratatui::style::Style {
+    use ratatui::style::{Color, Modifier, Style};
+    // Dot-fallback: try the longest prefix first.
+    let mut s = capture;
+    loop {
+        if let Some(style) = base_style(s) {
+            return style;
+        }
+        match s.rfind('.') {
+            Some(i) => s = &s[..i],
+            None => return Style::default(),
+        }
+    }
+    fn base_style(c: &str) -> Option<Style> {
+        Some(match c {
+            "markup.diff.added" | "diff.plus" => Style::default().fg(Color::Green),
+            "markup.diff.removed" | "diff.minus" => Style::default().fg(Color::Red),
+            "markup.diff.changed" => Style::default().fg(Color::Yellow),
+            "markup.heading" | "diff.header" => Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+            "comment" => Style::default().fg(Color::DarkGray),
+            "string" => Style::default().fg(Color::Green),
+            "keyword" => Style::default().fg(Color::Magenta),
+            "function" => Style::default().fg(Color::Blue),
+            "type" => Style::default().fg(Color::Yellow),
+            "number" | "constant" => Style::default().fg(Color::Cyan),
+            _ => return None,
+        })
+    }
+}
+
+/// When a grammar for the current message's `code_body` is cached, return a
+/// syntax-highlighted `Text`; otherwise return `None` (caller falls back to
+/// plain render).
+#[cfg(feature = "tree-sitter")]
+fn try_draw_highlighted_preview(app: &App) -> Option<ratatui::text::Text<'static>> {
+    use hjkl_bonsai::Highlighter;
+
+    let rendered = app.current_rendered.as_ref()?;
+    let cb = rendered.code_body.as_ref()?;
+
+    // Non-blocking cache lookup — skip if lock contended.
+    let cache = app.grammar_cache.try_lock().ok()?;
+    let grammar = cache.get(cb.lang)?.as_ref()?.clone();
+    drop(cache);
+
+    let mut hl = Highlighter::new(grammar).ok()?;
+    let spans = hl.highlight(&cb.bytes);
+
+    let text_str = String::from_utf8_lossy(&cb.bytes).into_owned();
+    let mut lines: Vec<ratatui::text::Line<'static>> = Vec::new();
+    let mut current: Vec<ratatui::text::Span<'static>> = Vec::new();
+
+    let mut last = 0usize;
+    for span in &spans {
+        let range = span.byte_range.clone();
+        let style = style_for_capture(span.capture());
+
+        // Flush any un-styled bytes between last span and this one.
+        if range.start > last {
+            let frag = text_str[last..range.start].to_owned();
+            flush_text(
+                &mut lines,
+                &mut current,
+                frag,
+                ratatui::style::Style::default(),
+            );
+        }
+        let end = range.end.min(text_str.len());
+        if range.start < end {
+            let frag = text_str[range.start..end].to_owned();
+            flush_text(&mut lines, &mut current, frag, style);
+        }
+        last = range.end;
+    }
+    // Remainder after last span.
+    if last < text_str.len() {
+        let frag = text_str[last..].to_owned();
+        flush_text(
+            &mut lines,
+            &mut current,
+            frag,
+            ratatui::style::Style::default(),
+        );
+    }
+    if !current.is_empty() {
+        lines.push(ratatui::text::Line::from(current));
+    }
+
+    Some(ratatui::text::Text::from(lines))
+}
+
+/// Split `frag` on newlines, appending to `current` line and pushing completed
+/// lines into `lines`.
+#[cfg(feature = "tree-sitter")]
+fn flush_text(
+    lines: &mut Vec<ratatui::text::Line<'static>>,
+    current: &mut Vec<ratatui::text::Span<'static>>,
+    frag: String,
+    style: ratatui::style::Style,
+) {
+    let mut parts = frag.split('\n');
+    if let Some(first) = parts.next()
+        && !first.is_empty()
+    {
+        current.push(ratatui::text::Span::styled(first.to_owned(), style));
+    }
+    for part in parts {
+        lines.push(ratatui::text::Line::from(std::mem::take(current)));
+        if !part.is_empty() {
+            current.push(ratatui::text::Span::styled(part.to_owned(), style));
+        }
+    }
 }
 
 fn draw_status(f: &mut ratatui::Frame, app: &App, area: Rect) {

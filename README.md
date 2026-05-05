@@ -139,6 +139,18 @@ apk add --allow-untrusted inbx-*.apk   # download .apk from releases page
 Grab the tarball for your platform from the
 [releases page](https://github.com/kryptic-sh/inbx/releases).
 
+## Features
+
+| Feature       | Crates                | Description                                                                                                                |
+| ------------- | --------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| `tree-sitter` | `inbx`, `inbx-render` | Syntax highlighting for `text/x-patch` / `text/x-diff` bodies via `hjkl-bonsai 0.5`. Grammars loaded on demand at runtime. |
+
+Enable with:
+
+```bash
+cargo build --features tree-sitter
+```
+
 ## Build
 
 ```
