@@ -370,8 +370,7 @@ pub async fn sync_once(
 
     // Prune local rows whose UID is no longer present on the server (deleted /
     // moved to another folder server-side).
-    let server_uids: std::collections::HashSet<i64> =
-        rows.iter().map(|r| r.uid as i64).collect();
+    let server_uids: std::collections::HashSet<i64> = rows.iter().map(|r| r.uid as i64).collect();
     let local_uids = store
         .folder_uids(folder, uidvalidity as i64)
         .await

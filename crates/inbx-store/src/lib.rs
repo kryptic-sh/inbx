@@ -501,13 +501,12 @@ impl Store {
     /// Return every UID currently stored for `folder` at the given uidvalidity.
     /// Use to compare against the server's authoritative UID set when pruning.
     pub async fn folder_uids(&self, folder: &str, uidvalidity: i64) -> Result<Vec<i64>> {
-        let uids: Vec<i64> = sqlx::query_scalar(
-            "SELECT uid FROM messages WHERE folder = ?1 AND uidvalidity = ?2",
-        )
-        .bind(folder)
-        .bind(uidvalidity)
-        .fetch_all(&self.pool)
-        .await?;
+        let uids: Vec<i64> =
+            sqlx::query_scalar("SELECT uid FROM messages WHERE folder = ?1 AND uidvalidity = ?2")
+                .bind(folder)
+                .bind(uidvalidity)
+                .fetch_all(&self.pool)
+                .await?;
         Ok(uids)
     }
 
