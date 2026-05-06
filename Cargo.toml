@@ -111,7 +111,7 @@ hjkl-splash = "0.2"
 hjkl-bonsai = "0.5"
 hjkl-editor = "0.3"
 hjkl-buffer = { version = "0.3", features = ["ratatui"] }
-hjkl-engine = { version = "0.3", features = ["crossterm"] }
+hjkl-engine = { version = "0.4", features = ["crossterm"] }
 hjkl-clipboard = "0.5"
 hjkl-form = "0.3"
 hjkl-picker = "0.3"
