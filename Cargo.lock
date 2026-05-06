@@ -2729,7 +2729,7 @@ dependencies = [
  "base64",
  "keyring",
  "pgp",
- "rand 0.8.6",
+ "rand 0.9.4",
  "reqwest",
  "serde",
  "sha1",
