@@ -410,6 +410,22 @@
         color: var(--fg-muted);
         font-style: italic;
       }
+      .install-note {
+        color: var(--fg-muted);
+        margin: 0 0 20px;
+      }
+      .install-sample {
+        margin-top: 20px;
+      }
+      .install-code {
+        margin: 0;
+        padding: 14px 16px;
+        font-size: 13px;
+        line-height: 1.6;
+        overflow-x: auto;
+        color: var(--fg);
+        font-family: var(--mono);
+      }
       .term .body {
         font-family: var(--mono);
         font-size: 13px;
@@ -945,7 +961,7 @@
       <section id="install">
         <h2>install</h2>
         <h3>Prebuilt binaries on every tagged release.</h3>
-        <p style="color: var(--fg-muted); margin: 0 0 20px">
+        <p class="install-note">
           macOS via Homebrew tap, Arch via AUR, Alpine .apk, or grab a prebuilt
           binary. Linux (x86_64) — .tar.gz. macOS (Apple Silicon) — .tar.gz.
           Windows (x64) — .zip. SHA-256 sidecars on every artifact. More targets
@@ -974,84 +990,53 @@
             >all releases ↗</a
           >
         </div>
-        <div class="term" style="margin-top: 20px">
+        <div class="term install-sample">
           <div class="chrome">
             <span class="dot r"></span><span class="dot y"></span
             ><span class="dot g"></span>
             <span class="title">inbx — macOS (Homebrew)</span>
           </div>
           <pre
-            style="
-              margin: 0;
-              padding: 14px 16px;
-              font-size: 13px;
-              line-height: 1.6;
-              overflow-x: auto;
-              color: var(--fg);
-              font-family: var(--mono);
-            "
+            class="install-code"
           ><span class="ok">$</span> brew install kryptic-sh/tap/inbx
 <span class="ok">$</span> inbx</pre>
         </div>
-        <div class="term" style="margin-top: 20px">
+        <div class="term install-sample">
           <div class="chrome">
             <span class="dot r"></span><span class="dot y"></span
             ><span class="dot g"></span>
             <span class="title">inbx — Arch Linux (AUR)</span>
           </div>
           <pre
-            style="
-              margin: 0;
-              padding: 14px 16px;
-              font-size: 13px;
-              line-height: 1.6;
-              overflow-x: auto;
-              color: var(--fg);
-              font-family: var(--mono);
-            "
-          >
-          <pre><span class="ok">$</span> yay -S inbx-bin</pre>
-          <pre><span class="cm"># or </span></pre>
-          <pre><span class="ok">$</span> paru -S inbx-bin</pre>
-
-<span class="cm"># installs inbx + inbx-sync to /usr/bin/, auto-tracks tagged releases</span></pre>
+            class="install-code"
+          ><span class="ok">$</span> yay -S inbx-bin</pre>
+          <pre
+            class="install-code"
+          ><span class="ok">$</span> paru -S inbx-bin</pre>
+          <pre
+            class="install-code"
+          ><span class="cm"># installs inbx + inbx-sync to /usr/bin/, auto-tracks tagged releases</span></pre>
         </div>
-        <div class="term" style="margin-top: 20px">
+        <div class="term install-sample">
           <div class="chrome">
             <span class="dot r"></span><span class="dot y"></span
             ><span class="dot g"></span>
             <span class="title">inbx — Alpine Linux</span>
           </div>
           <pre
-            style="
-              margin: 0;
-              padding: 14px 16px;
-              font-size: 13px;
-              line-height: 1.6;
-              overflow-x: auto;
-              color: var(--fg);
-              font-family: var(--mono);
-            "
+            class="install-code"
           ><span class="ok">$</span> <span class="cm"># download .apk from releases page, then:</span>
 <span class="ok">$</span> apk add --allow-untrusted inbx-*.apk
 <span class="ok">$</span> inbx</pre>
         </div>
-        <div class="term" style="margin-top: 20px">
+        <div class="term install-sample">
           <div class="chrome">
             <span class="dot r"></span><span class="dot y"></span
             ><span class="dot g"></span>
             <span class="title">inbx — from source</span>
           </div>
           <pre
-            style="
-              margin: 0;
-              padding: 14px 16px;
-              font-size: 13px;
-              line-height: 1.6;
-              overflow-x: auto;
-              color: var(--fg);
-              font-family: var(--mono);
-            "
+            class="install-code"
           ><span class="ok">$</span> git clone https://github.com/kryptic-sh/inbx
 <span class="ok">$</span> cd inbx
 <span class="ok">$</span> cargo build --release
