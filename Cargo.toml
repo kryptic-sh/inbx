@@ -51,7 +51,7 @@ futures-util = "0.3"
 bytes = "1"
 
 # TUI
-ratatui = "0.29"
+ratatui = "0.30"
 crossterm = { version = "0.29", features = ["event-stream"] }
 
 # IMAP / TLS
