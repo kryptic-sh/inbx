@@ -2120,6 +2120,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "hjkl-buffer"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "22a56e4162c8cc2d4b040c7be2c21e4b09b0d3c09c731d750c873d88bfd0a3a0"
+dependencies = [
+ "ratatui 0.30.0",
+ "regex",
+ "unicode-width 0.2.0",
+]
+
+[[package]]
 name = "hjkl-clipboard"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2149,20 +2160,35 @@ version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7cb5654dab3aca0c5799b89196390f513504d5653f2c3aaf8074c07434cf94c5"
 dependencies = [
- "hjkl-buffer",
- "hjkl-engine",
+ "hjkl-buffer 0.3.3",
+ "hjkl-engine 0.3.8",
  "regex",
 ]
 
 [[package]]
 name = "hjkl-engine"
-version = "0.3.3"
+version = "0.3.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ce37f6a04fabdbc19665db83f6879f87d40dc1e51e0b779ecace216b21a2b0dc"
+checksum = "13d1855e54f1feafb088a00d3658dc24ce3af205b3bd3b6196b57e2c7c7b919d"
 dependencies = [
  "bitflags 2.11.1",
  "crossterm 0.29.0",
- "hjkl-buffer",
+ "hjkl-buffer 0.3.3",
+ "ratatui 0.30.0",
+ "regex",
+ "serde",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "hjkl-engine"
+version = "0.5.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "758cfe6832b7480235269d6b63683fd464f5ff225b2d97f5b289b711f07ce0ee"
+dependencies = [
+ "bitflags 2.11.1",
+ "crossterm 0.29.0",
+ "hjkl-buffer 0.6.0",
  "ratatui 0.30.0",
  "regex",
  "serde",
@@ -2175,8 +2201,8 @@ version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "05640cecfd86b4baeb16d2423d3d23ea4f8ed30bd74a3a9e29e65e2d285ca621"
 dependencies = [
- "hjkl-buffer",
- "hjkl-engine",
+ "hjkl-buffer 0.3.3",
+ "hjkl-engine 0.3.8",
 ]
 
 [[package]]
@@ -2186,7 +2212,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "27d1f6fcb06622c85a697bc1c5d6b63965c651242c83c0bf163499f64c6d6c32"
 dependencies = [
  "crossterm 0.29.0",
- "hjkl-buffer",
+ "hjkl-buffer 0.3.3",
  "hjkl-form",
  "ignore",
  "ratatui 0.30.0",
@@ -2200,7 +2226,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e68aec168ae29d9b8cf3ff9d13057e9d608223d7ce190b24b864f24b43d2e14f"
 dependencies = [
  "crossterm 0.29.0",
- "hjkl-engine",
+ "hjkl-engine 0.3.8",
  "hjkl-form",
  "ratatui 0.30.0",
 ]
@@ -2579,7 +2605,7 @@ dependencies = [
  "hjkl-bonsai",
  "hjkl-clipboard",
  "hjkl-editor",
- "hjkl-engine",
+ "hjkl-engine 0.5.6",
  "hjkl-form",
  "hjkl-picker",
  "hjkl-ratatui",
@@ -2611,7 +2637,7 @@ name = "inbx-composer"
 version = "0.7.0"
 dependencies = [
  "async-trait",
- "hjkl-buffer",
+ "hjkl-buffer 0.3.3",
  "hjkl-clipboard",
  "hjkl-editor",
  "hjkl-form",
