@@ -108,7 +108,7 @@ which = "8"
 
 # hjkl deps use caret-minor pins; consumers track minor bumps from crates.io.
 hjkl-splash = "0.2"
-hjkl-bonsai = "0.5"
+hjkl-bonsai = "0.6"
 hjkl-editor = "0.3"
 hjkl-buffer = { version = "0.3", features = ["ratatui"] }
 hjkl-engine = { version = "0.3", features = ["crossterm"] }
