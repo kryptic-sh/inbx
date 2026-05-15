@@ -897,10 +897,11 @@
           </div>
           <div class="feat">
             <div class="icon">04 — STORAGE</div>
-            <h4>Maildir + SQLite</h4>
+            <h4>Maildir + SQLite + tantivy</h4>
             <p>
-              On-disk Maildir per account. SQLite index for threading and
-              metadata. Offline-first.
+              On-disk Maildir per account. SQLite index in WAL mode (TUI + sync
+              hold the DB concurrently). tantivy full-text index for search.
+              Offline-first.
             </p>
           </div>
           <div class="feat">
@@ -909,15 +910,55 @@
             <p>
               Composer embeds <a href="https://hjkl.kryptic.sh/">hjkl</a> — the
               same modal editor. Headers and body share one FSM. MIME built with
-              mail-builder.
+              mail-builder. <kbd>&lt;Space&gt;t</kbd> opens a template picker;
+              PGP key lookup runs inline.
             </p>
           </div>
           <div class="feat">
-            <div class="icon">06 — SECURITY</div>
+            <div class="icon">06 — FOLDERS</div>
+            <h4>Multi-folder sync · friendly names</h4>
+            <p>
+              Each cycle syncs every server folder; IMAP IDLE / JMAP push
+              triggers a full re-sync. <code>[Gmail]/Trash</code> renders as
+              <code>Trash</code>, <code>\Noselect</code> virtual parents hidden.
+              Two-line message rows: sender on top, subject below.
+            </p>
+          </div>
+          <div class="feat">
+            <div class="icon">07 — DAEMON</div>
+            <h4>inbx-sync IPC daemon</h4>
+            <p>
+              Optional <code>inbx-sync</code> daemon (or
+              <code>inbx sync</code> subcommand) runs the IDLE / fetch /
+              indexing loop out of process. TUI auto-detects via unix-socket
+              IPC; falls back to in-process sync when the daemon isn't running.
+            </p>
+          </div>
+          <div class="feat">
+            <div class="icon">08 — DAV</div>
+            <h4>CalDAV + CardDAV + Sieve</h4>
+            <p>
+              Two-way CalDAV via <code>inbx cal put|delete|rsvp</code>. CardDAV
+              auto-push on contact upsert. ManageSieve overlay caches the
+              session across list/get/put. Etag-aware delta fetches.
+            </p>
+          </div>
+          <div class="feat">
+            <div class="icon">09 — PGP</div>
+            <h4>PGP — gpg or local keys</h4>
+            <p>
+              Per-account <code>pgp.key_source</code> picks between the system
+              GnuPG keyring or inbx-managed keys on disk. Composer signs and
+              encrypts inline.
+            </p>
+          </div>
+          <div class="feat">
+            <div class="icon">10 — SECURITY</div>
             <h4>TLS or nothing</h4>
             <p>
               Implicit TLS or STARTTLS only. Never falls through to plaintext.
               Remote content blocked by default. HTML sanitized via ammonia.
+              Keyring backend selected per platform — no mock-keystore fallback.
             </p>
           </div>
         </div>
