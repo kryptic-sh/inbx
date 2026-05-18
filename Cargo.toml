@@ -64,7 +64,7 @@ tokio-socks = "0.5"
 # Mail parsing
 mail-parser = "0.10"
 ammonia = "4"
-html2text = "0.13"
+html2text = "0.17"
 icalendar = "0.16"
 
 # SMTP
