@@ -5,7 +5,7 @@ Modal-vim email client. Rust workspace.
 [![CI](https://github.com/kryptic-sh/inbx/actions/workflows/ci.yml/badge.svg)](https://github.com/kryptic-sh/inbx/actions/workflows/ci.yml)
 [![release](https://img.shields.io/github/v/release/kryptic-sh/inbx)](https://github.com/kryptic-sh/inbx/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Website](https://img.shields.io/badge/website-inbx.kryptic.sh-7ee787)](https://inbx.kryptic.sh)
+[![Website](https://img.shields.io/badge/website-kryptic.sh%2Finbx-7ee787)](https://www.kryptic.sh/inbx/)
 
 Sibling to [sqeel](https://github.com/kryptic-sh/sqeel),
 [buffr](https://github.com/kryptic-sh/buffr),
