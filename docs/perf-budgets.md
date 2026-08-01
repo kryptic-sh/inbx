@@ -17,8 +17,12 @@ Numbers captured on 2026-05-03, Linux 6.19 / release build, in-memory SQLite.
 ## How to Run
 
 ```bash
-rtk cargo bench -p inbx-store
+cargo bench -p inbx-store
 ```
+
+Bench ids, in the order of the table above: `from_pool_list_folders`,
+`list_messages_200`, `search_hello_50`, `ingest_100`, `ingest_1000` — all in
+`crates/inbx-store/benches/store.rs`.
 
 Criterion HTML reports land in `target/criterion/`.
 

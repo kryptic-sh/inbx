@@ -1,4 +1,4 @@
-# Threat Model — inbx v0.1.x
+# Threat Model — inbx
 
 Terse reference. Covers data inbx owns and the threats the current codebase does
 — and does not — mitigate. Read alongside `SECURITY.md`.
@@ -16,22 +16,32 @@ Terse reference. Covers data inbx owns and the threats the current codebase does
 
 ## Assets
 
-| Asset                     | Location                                     | Sensitivity                         |
-| ------------------------- | -------------------------------------------- | ----------------------------------- |
-| Maildir messages          | `~/.local/share/inbx/<acct>/Maildir/`        | high                                |
-| SQLite FTS index          | `~/.local/share/inbx/<acct>/messages.sqlite` | high                                |
-| Contacts + pubkeys        | `~/.local/share/inbx/<acct>/contacts.sqlite` | high                                |
-| inbx-managed PGP keys     | `~/.local/share/inbx/<acct>/pgp/*.asc`       | critical                            |
-| gnupg keys                | `~/.gnupg/`                                  | critical (managed by gpg, not inbx) |
-| OAuth2 refresh tokens     | OS keyring only — never on disk              | critical                            |
-| App passwords             | OS keyring only — never on disk              | critical                            |
-| Config (hosts, usernames) | `~/.config/inbx/config.toml`                 | medium                              |
+| Asset                     | Location                                                  | Sensitivity                         |
+| ------------------------- | --------------------------------------------------------- | ----------------------------------- |
+| Maildir messages          | `~/.local/share/inbx/<acct>/<folder>/{cur,new,tmp}/`      | high                                |
+| SQLite index + FTS5       | `~/.local/share/inbx/<acct>/index.sqlite`                 | high                                |
+| Contacts + pubkeys        | `~/.local/share/inbx/<acct>/contacts.sqlite`              | high                                |
+| Cached CalDAV events      | `~/.local/share/inbx/<acct>/calendar/<uid>.ics`           | medium                              |
+| Log files                 | `~/.local/share/inbx/log/inbx.YYYY-MM-DD`                 | medium                              |
+| inbx-managed PGP keys     | `~/.local/share/inbx/<acct>/pgp/<fpr>.{pub,sec}.asc`      | critical                            |
+| gnupg keys                | `~/.gnupg/`                                               | critical (managed by gpg, not inbx) |
+| Sync daemon IPC socket    | `$XDG_RUNTIME_DIR/inbx-sync.sock` (`$TMPDIR` on macOS)    | medium                              |
+| OAuth2 refresh tokens     | OS keyring only — never on disk                           | critical                            |
+| App passwords             | OS keyring only — never on disk                           | critical                            |
+| Config (hosts, usernames) | `~/.config/inbx/config.toml`, `~/.config/inbx/theme.toml` | medium                              |
+
+Folder names map to directories with `/` replaced by `.` (Maildir++), so
+`INBOX/Work` lands at `<acct>/INBOX.Work/`.
 
 **Mode note.** `inbx-store` creates the data directory with `create_dir_all` but
 does not explicitly `chmod` the SQLite files. File mode is set by the process
-umask (typically `0600` or `0640` depending on user config). `inbx-pgp::gnupg`
-sets gpg homedir to `0o700` on creation. `inbx-managed` key files inherit umask;
-users who need hard `0600` should set `umask 0077` in their shell profile.
+umask (typically `0600` or `0640` depending on user config). The same applies to
+Maildir files, cached `.ics` events, log files, and `inbx-managed` key files —
+users who need hard `0600` should set `umask 0077` in their shell profile. The
+two exceptions that do set an explicit mode: the sync daemon's IPC socket is
+chmod `0600`, and `inbx-pgp::gnupg` chmods the **throw-away** temp homedirs it
+builds for verify / import to `0o700`. inbx never chmods the user's real
+`~/.gnupg` — that stays gpg's responsibility.
 
 ---
 
@@ -47,7 +57,7 @@ are protected only by the OS keyring daemon (which may be unlocked on a live
 session or trivially bypassed at rest if the keyring is backed by a plaintext
 file on an unencrypted volume).
 
-**Mitigation.** **None from inbx.** inbx does **not** encrypt at rest in v0.1.x.
+**Mitigation.** **None from inbx.** inbx does **not** encrypt anything at rest.
 Rely on full-disk encryption (LUKS on Linux, FileVault on macOS, BitLocker on
 Windows). This is the primary residual risk acknowledged by this model.
 
@@ -99,12 +109,16 @@ beyond the user's own files.
 
 **Mitigation.**
 
-- `inbx-net::imap` uses `rustls` with `webpki-roots`; rejects invalid certs. No
-  plaintext fallback, no STARTTLS-downgrade path in the current handshake.
+- `inbx-net::imap` uses `rustls` with `webpki-roots`; rejects invalid certs.
+  There is no plaintext mode. STARTTLS is an explicit per-account setting and
+  hard-fails (`Error::StarttlsUnsupported`) when the server does not advertise
+  the capability — it never falls through to an unencrypted session.
 - ManageSieve client (`inbx-net::sieve`) connects over implicit TLS to
   port 4190. Same `rustls` stack.
-- OAuth2 refresh tokens are exchanged only over HTTPS with the provider's JWKS
-  endpoint. Stored in the OS keyring; never written to disk plaintext.
+- OAuth2 codes and refresh tokens are exchanged only over the provider's HTTPS
+  token endpoint (`oauth2.googleapis.com/token`,
+  `login.microsoftonline.com/{tenant}/oauth2/v2.0/token`). Stored in the OS
+  keyring; never written to disk plaintext.
 
 ---
 
@@ -130,13 +144,23 @@ radius.
 
 **Mitigation.**
 
-- HTML is sanitized; no external resources loaded by default.
-- Tracking pixels detected and stripped; user notified.
-- Attachments opened only via explicit user action (`xdg-open`). MIME type
-  sniffed; extension never trusted.
+- HTML is sanitized via `ammonia` and converted to text; every render call site
+  passes `RemotePolicy::Block`, so no external resource is ever fetched. There
+  is no per-sender allow-list — remote content cannot currently be enabled.
+- Tracking pixels (1x1 images, known beacon hosts) are detected while remote
+  images are blocked, and reported to the user.
+- Attachments are written to `~/Downloads/` on an explicit keystroke and never
+  opened or executed — inbx spawns no handler for them. Content sniffing is
+  **not** performed anywhere; the composer guesses outgoing content types from
+  the filename extension.
 - Calendar invites require explicit Accept/Tentative/Decline; no auto-response.
 - Read receipts require explicit `Y` keystroke; never sent automatically.
 - Phishing heuristics (display-name / domain mismatch) flagged on render.
+
+**Known gap.** `save_attachment` joins the MIME part's filename onto the
+downloads directory without sanitising it, so a crafted `filename` containing
+path separators can escape `~/Downloads/`. Tracked as a code fix, not a
+documented mitigation.
 
 ---
 
@@ -156,9 +180,11 @@ Hidden volumes, dummy traffic, decoy key material. Out of scope.
 
 ### Memory scrubbing
 
-Zeroing PGP secret-key material after use. `pgp` (rpgp) does not expose a
-`Zeroize`-impl wrapper for secret key bytes in v0.14.x. Tracked as future work;
-not blocking v0.1.x.
+inbx itself does not depend on `zeroize` and does not scrub passphrases, key
+bytes, or decrypted message buffers it holds. The pinned `pgp` (rpgp) release
+does derive `ZeroizeOnDrop` on its plain secret-key params, so key material
+inside rpgp's own types is cleared; anything inbx copies out of them is not.
+Tracked as future work.
 
 ### Process-level isolation
 
@@ -172,7 +198,9 @@ process. Future: apply a restrictive seccomp profile to the rendering crate
 
 - `SECURITY.md` — vulnerability reporting policy, supported versions
 - `crates/inbx-net/src/sieve.rs` — ManageSieve TLS connect
-- `crates/inbx-pgp/src/gnupg.rs` — gpg homedir `0o700` setup
+- `crates/inbx-pgp/src/gnupg.rs` — throw-away gpg homedir `0o700` setup
+- `crates/inbx-ipc/src/server.rs` — IPC socket chmod `0600`
+- `apps/inbx/src/tui/app.rs` — `save_attachment` (writes to `~/Downloads/`)
 - `crates/inbx-render/src/phishing.rs` — phishing heuristics
 - `crates/inbx-render/src/auth.rs` — DKIM/SPF/DMARC badge
 

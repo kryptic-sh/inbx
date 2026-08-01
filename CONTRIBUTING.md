@@ -9,22 +9,32 @@ design can be sanity-checked early.
 ```bash
 git clone git@github.com:kryptic-sh/inbx.git
 cd inbx
-rustup toolchain install stable    # rust-toolchain.toml pins this for you
-cargo test --workspace
+cargo test --workspace    # rust-toolchain.toml pins the toolchain for you
 ```
+
+`rust-toolchain.toml` pins an exact channel (with `rustfmt` + `clippy`), so
+rustup installs the right compiler on the first cargo invocation. Linux builds
+need `libdbus-1-dev` + `pkg-config` for the keyring backend.
 
 ## Workspace layout
 
-- `crates/inbx-core` — shared types, error handling
-- `crates/inbx-net` — IMAP/SMTP/MS-Graph transports
-- `crates/inbx-store` — local message store and search index
-- `crates/inbx-render` — HTML sanitisation, text rendering
-- `crates/inbx-composer` — compose and send pipeline
+- `crates/inbx-net` — IMAP / SMTP / JMAP / MS-Graph / OAuth2 / ManageSieve
+- `crates/inbx-store` — Maildir + SQLite index, FTS5 search, outbox, threading
+- `crates/inbx-config` — config loading (no auto-write defaults), theme, keyring
+- `crates/inbx-pgp` — gnupg shell-out + rpgp key sources, WKD, PGP/MIME
+- `crates/inbx-render` — HTML sanitisation, text rendering, auth + phishing
+- `crates/inbx-dav` — shared CalDAV/CardDAV PROPFIND + XML scrape helpers
 - `crates/inbx-contacts` — address book
-- `crates/inbx-config` — config loading (no auto-write defaults)
 - `crates/inbx-ical` — calendar attachment handling
+- `crates/inbx-composer` — compose and send pipeline
+- `crates/inbx-ipc` — unix-socket event channel between the daemon and the TUI
+- `crates/inbx-sync` — sync engine library (IDLE loop, outbox drain)
 - `apps/inbx` — CLI + TUI binary
 - `apps/inbx-sync` — background sync daemon
+- `xtask` — cargo-xtask stub; no tasks are defined yet
+
+There is no `inbx-core` crate. It was planned, ended up empty, and was dropped
+at v0.1.3 — see the note in `PLAN.md`.
 
 ## MSRV policy
 
@@ -32,8 +42,11 @@ cargo test --workspace
 bumps land freely when new features are useful. Any bump must be logged in
 `CHANGELOG.md` under the version that introduces it.
 
-CI runs stable + beta on every PR. Nightly is reserved for `cargo fuzz` runs in
-cron jobs only.
+CI (`.github/workflows/ci.yml`) runs `rustfmt`, `clippy`, `cargo deny check`,
+and the test suite on every PR and every push to `main`. Tests run on
+ubuntu-latest, macos-latest, and windows-latest, on stable only — there is no
+beta or nightly job. Release artifacts (binaries, `.apk`, AUR, Homebrew) build
+only on `v*` tags.
 
 ## Pull requests
 
@@ -42,63 +55,61 @@ cron jobs only.
   `feat`, `fix`, `docs`, `refactor`, `test`, `chore`, `perf`, `ci`, `build`.
   Scope optional.
 - Run before pushing:
-  - `cargo fmt`
+  - `cargo fmt --all`
   - `cargo clippy --all-targets --all-features -- -D warnings`
-  - `cargo test --all-features`
-- New public API needs rustdoc and (where applicable) a `///` example.
-  `#![deny(missing_docs)]` is enforced on `inbx-core`.
-- Performance-sensitive changes: include a criterion bench in
-  `crates/<crate>/benches/`. CI fails if budgets regress (see `PLAN.md`
-  "Performance Budgets").
+  - `cargo test --workspace --all-features`
 
-## Snapshot tests
+  CI runs the same three, except that the test job uses `cargo nextest run` plus
+  a separate `cargo test --doc` pass.
 
-Golden tests use [`insta`](https://insta.rs/) and live next to the unit tests
-under `tests/snapshots/`. After intentional output changes:
+- New public API needs rustdoc and (where applicable) a `///` example. No crate
+  enables `#![deny(missing_docs)]` today, so this is convention, not a lint.
+
+## Benchmarks
+
+`crates/inbx-store` has a criterion bench (`benches/store.rs`) covering cold
+start, folder switch, FTS5 search, and JWZ threader ingest:
 
 ```bash
-INSTA_UPDATE=always cargo test
-# or, interactively:
-cargo insta review
+cargo bench -p inbx-store
 ```
 
-Commit the updated `*.snap` files alongside the change.
+Budgets and the last measured numbers are in
+[`docs/perf-budgets.md`](docs/perf-budgets.md); the targets they track are in
+`PLAN.md` "Performance Budgets". CI does **not** run benches — regressions are
+caught by running them locally.
 
-## Property + fuzz tests
-
-- proptest regressions live in `proptest-regressions/`. Commit failing seeds so
-  CI replays them.
-- `cargo fuzz` harnesses live under each crate's `fuzz/` directory and run on
-  cron with the nightly toolchain. Local reproduction:
-  ```bash
-  cd crates/inbx-net/fuzz
-  cargo +nightly fuzz run <target>
-  ```
+There are currently no `insta` snapshot tests, no proptest suites, and no
+`cargo fuzz` harnesses in this repo. `PLAN.md` "Testing" lists those as intent,
+not as something you can run today.
 
 ## Releases
 
-Each `inbx-*` crate lives in its own submodule and ships independently. Cutting
-a release is the **BCTP** flow: bump the patch in `Cargo.toml`, regenerate
-`Cargo.lock`, commit `chore: bump version`, tag `vX.Y.Z`, push commit + tag. The
-tag triggers `release.yml` which publishes to crates.io.
+Everything lives in one workspace — a single version in the root `Cargo.toml`
+covers every crate, and nothing is published to crates.io.
+
+Cutting a release is the **BCTP** flow: bump the version in `Cargo.toml`,
+regenerate `Cargo.lock`, commit `chore: bump version`, tag `vX.Y.Z`, push commit
+plus tag. The tag triggers the release jobs in `.github/workflows/ci.yml`, which
+verify the tag matches the manifest version, build binaries for
+`x86_64-unknown-linux-gnu`, `x86_64-unknown-linux-musl`,
+`x86_64-pc-windows-msvc` and `aarch64-apple-darwin`, upload archives plus sha256
+sidecars to the GitHub release, then publish the AUR `inbx-bin` package, an
+Alpine `.apk`, and the Homebrew tap formula.
 
 Patch for bug fixes / docs; minor for additive public API; major for breaking
 changes.
 
-To **yank** a broken release:
-
-```bash
-cargo yank --version X.Y.Z -p <crate>
-```
-
-Yank is not delete: consumers pinned to `=X.Y.Z` still resolve. Document the
-reason in `CHANGELOG.md` under a `### Yanked` heading for that version.
+Since nothing ships to crates.io there is no `cargo yank` path. To withdraw a
+broken release, delete or mark the GitHub release and ship a fixed tag; note the
+reason in `CHANGELOG.md` under the affected version.
 
 ## Reporting bugs / requesting features
 
-Use the issue templates in `.github/ISSUE_TEMPLATE/`. For security issues, see
-`SECURITY.md` — do not file public issues.
+Open a GitHub issue — there are no issue templates in this repo. For security
+issues, see `SECURITY.md` — do not file public issues.
 
 ## Code of Conduct
 
-This project follows the [Contributor Covenant](CODE_OF_CONDUCT.md).
+This project follows the
+[kryptic-sh organisation Code of Conduct](https://github.com/kryptic-sh/.github).

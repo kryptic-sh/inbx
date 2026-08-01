@@ -6,7 +6,8 @@ use tracing_subscriber::util::SubscriberInitExt as _;
 
 /// Tracing init. When `tui` is true, suppresses stderr output so log writes
 /// don't corrupt the alt-screen — file-only. When false, tees stderr + file.
-/// File path: `$XDG_STATE_HOME/inbx/log/inbx.YYYY-MM-DD`.
+/// File path: `<data_local_dir>/inbx/log/inbx.YYYY-MM-DD`
+/// (`~/.local/share/inbx/log/` on Linux).
 fn init_logging(tui: bool) -> Option<tracing_appender::non_blocking::WorkerGuard> {
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
         tracing_subscriber::EnvFilter::new(

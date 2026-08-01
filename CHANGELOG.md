@@ -8,10 +8,36 @@ patch bumps.
 
 ## [Unreleased]
 
+### Added
+
+- TUI: `<Space>R` marks the current folder read — adds `\Seen` on the server for
+  every unread message in the loaded list (the most recent 200), then updates
+  the local flags in one `mutate_flags` call. Runs as a background task so the
+  status-line spinner animates. Closes #34.
+- TUI: per-folder unread badge in the sidebar. Folders with unread mail render
+  as `Name  (N)` in the unread accent colour. Closes #32.
+- TUI: relative timestamp on each message row (`12s`, `3m`, `2h`, `4d`), right
+  aligned, with the sender truncated to make room. Closes #27.
+
 ### Changed
 
+- Logging: default `EnvFilter` is now
+  `info,html5ever=error,markup5ever=error,ammonia=warn,html2text=warn`.
+  `html5ever` / `markup5ever` logged a WARN per element on every ammonia
+  sanitise pass and drowned the log file. `RUST_LOG` still overrides. Closes
+  #36.
 - Pinned `mlugg/setup-zig` to zig 0.15.1 to skip `build.zig.zon` lookup and fix
   post-step CI noise.
+
+### Fixed
+
+- Docs: `README.md`, `CONTRIBUTING.md`, `SECURITY.md`, `PLAN.md`, and
+  `docs/threat-model.md` corrected against the tree — the workspace listings
+  named a nonexistent `inbx-core` crate and omitted `inbx-pgp`, `inbx-dav`,
+  `inbx-ipc`, and `inbx-sync`, and several security claims (sequoia-openpgp,
+  MIME sniffing, `xdg-open` for attachments, a webview HTML sandbox, cron
+  `cargo deny`, insta/proptest/fuzz suites, crates.io publishing) described
+  behaviour the code does not have.
 
 ## [0.7.0] - 2026-05-06
 
