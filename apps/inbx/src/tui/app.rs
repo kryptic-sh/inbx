@@ -376,6 +376,25 @@ impl MovePickerState {
     }
 }
 
+/// The basename to write an attachment under, from its MIME `filename`.
+///
+/// The name arrives in the message's headers, so it is chosen by whoever sent
+/// the mail. `Path::join` discards its base entirely when handed an absolute
+/// path and happily walks upwards through `..`, so passing the header value
+/// through unchecked lets a crafted message write anywhere the user can —
+/// `filename="../../.bashrc"` or an absolute path both escape `~/Downloads`.
+///
+/// Only the final component survives, and a name with no usable component
+/// (empty, `..`, `/`, a bare directory) falls back to a fixed one rather than
+/// writing to the directory itself.
+fn attachment_file_name(name: &str) -> &str {
+    std::path::Path::new(name)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .filter(|n| !n.is_empty() && *n != ".." && *n != ".")
+        .unwrap_or("attachment")
+}
+
 impl App {
     pub(super) async fn new(account: Account, store: Store) -> Result<Self> {
         let folders = list_selectable_folders(&store).await?;
@@ -1713,7 +1732,7 @@ impl App {
                 std::path::PathBuf::from(home).join("Downloads")
             });
         std::fs::create_dir_all(&downloads)?;
-        let dest = downloads.join(name);
+        let dest = downloads.join(attachment_file_name(name));
         std::fs::write(&dest, data)?;
         self.status = format!("saved {} bytes → {}", data.len(), dest.display());
         Ok(())
@@ -2951,5 +2970,58 @@ mod tests {
         // Defensive: real flag tokens are `\Seen` but normalize anyway.
         let rows = vec![flagged(1, "\\SEEN"), flagged(2, "\\seen"), flagged(3, "")];
         assert_eq!(unread_count(&rows), 1);
+    }
+
+    /// An attachment filename is chosen by the sender, so it is hostile input.
+    #[test]
+    fn attachment_file_name_keeps_only_the_basename() {
+        assert_eq!(attachment_file_name("report.pdf"), "report.pdf");
+        assert_eq!(
+            attachment_file_name("invoice 2026.xlsx"),
+            "invoice 2026.xlsx"
+        );
+        // A relative escape: `join` would walk out of ~/Downloads.
+        assert_eq!(attachment_file_name("../../../.bashrc"), ".bashrc");
+        // An absolute path: `join` would discard ~/Downloads entirely.
+        assert_eq!(
+            attachment_file_name("/home/victim/.ssh/authorized_keys"),
+            "authorized_keys"
+        );
+        // Nothing usable left: never write to the directory itself.
+        for hostile in ["", "..", ".", "/", "../", "foo/.."] {
+            assert_eq!(
+                attachment_file_name(hostile),
+                "attachment",
+                "{hostile:?} must not resolve to a path of its own"
+            );
+        }
+    }
+
+    /// The property that matters: whatever the sender writes, the result is a
+    /// single component that cannot climb out of the directory it is joined to.
+    #[test]
+    fn attachment_file_name_never_escapes_its_directory() {
+        let base = std::path::Path::new("/home/victim/Downloads");
+        for name in [
+            "ok.txt",
+            "../escape",
+            "../../../../etc/passwd",
+            "/etc/passwd",
+            "a/b/c.txt",
+            "..",
+            "",
+        ] {
+            let joined = base.join(attachment_file_name(name));
+            assert!(
+                joined.starts_with(base),
+                "{name:?} escaped to {}",
+                joined.display()
+            );
+            assert_eq!(
+                joined.components().count(),
+                base.components().count() + 1,
+                "{name:?} added more than one component"
+            );
+        }
     }
 }
