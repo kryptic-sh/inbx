@@ -157,10 +157,11 @@ radius.
 - Read receipts require explicit `Y` keystroke; never sent automatically.
 - Phishing heuristics (display-name / domain mismatch) flagged on render.
 
-**Known gap.** `save_attachment` joins the MIME part's filename onto the
-downloads directory without sanitising it, so a crafted `filename` containing
-path separators can escape `~/Downloads/`. Tracked as a code fix, not a
-documented mitigation.
+The MIME filename is attacker-chosen, so only its final component is used:
+`Path::join` discards its base when handed an absolute path and walks upward
+through `..`, and a name with nothing usable left falls back to a fixed one.
+Pinned by `attachment_file_name_never_escapes_its_directory`, which asserts the
+joined path stays under the base and gains exactly one component.
 
 ---
 
