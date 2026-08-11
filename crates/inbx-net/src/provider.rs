@@ -13,26 +13,39 @@
 //! left on their direct call paths; they are not hot-path and either have no
 //! JMAP equivalent in scope or belong to separate milestones.
 //!
-//! ## UID / ID mapping
-//!
-//! IMAP UIDs are u32 integers.  JMAP email IDs are opaque strings.  The
-//! existing codebase already solves this in `cmd_jmap` (main.rs) with a
-//! deterministic FNV-1a hash that folds the JMAP string id into a positive
-//! i64.  `JmapProvider` reuses the same `jmap_id_to_uid` helper — no new
-//! DB column, no side-table.  The hash is collision-resistant enough for a
-//! single account's message space (billions of messages before birthday
-//! collision becomes a concern), and the reverse mapping (uid → JMAP id) is
-//! stored as the `message_id` field by the provider so the store can round-
-//! trip without separate infrastructure.  NOTE: `jmap_id` is embedded in the
-//! `provider_id` field when we need the raw JMAP id back (e.g. Email/set).
-//! We carry it through `fetch_headers` by stashing it in `message_id` when
-//! the message has no RFC 5322 Message-ID — callers that need it can look
-//! there.  A cleaner path (separate column) is left for follow-up if needed.
+//! Opaque provider IDs map to stable positive i64 values through the canonical
+//! hash helpers in `inbx_net`; the raw ID is retained in `provider_id` for
+//! reverse lookup and snapshot reconciliation.
 
 use crate::{graph, imap, jmap};
 use inbx_config::{Account, Transport};
 
 pub use crate::imap::{FolderInfo, HeaderRow};
+
+/// A successful header fetch.  Metadata belongs to the folder snapshot, not a
+/// message row, so it remains available for empty folders.
+#[derive(Debug, Clone)]
+pub struct HeaderSnapshot {
+    pub rows: Vec<HeaderRow>,
+    /// Only a complete snapshot may be used to remove local messages.
+    pub complete: bool,
+    pub transport: SnapshotTransport,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SnapshotTransport {
+    Imap { uidvalidity: i64 },
+    Opaque,
+}
+
+impl SnapshotTransport {
+    pub const fn uidvalidity(self) -> i64 {
+        match self {
+            Self::Imap { uidvalidity } => uidvalidity,
+            Self::Opaque => 0,
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Error
@@ -74,7 +87,7 @@ pub trait MailProvider: Send + Sync {
         folder: &str,
         since_uid: Option<i64>,
         limit: u32,
-    ) -> Result<Vec<HeaderRow>>;
+    ) -> Result<HeaderSnapshot>;
 
     /// Fetch raw RFC 5322 body for the message at `uid` in `folder`.
     async fn fetch_body(&mut self, folder: &str, uid: i64) -> Result<Vec<u8>>;
@@ -127,6 +140,11 @@ pub trait MailProvider: Send + Sync {
     /// Subscribe or unsubscribe from a folder.  `on = true` subscribes.
     async fn subscribe_folder(&mut self, name: &str, on: bool) -> Result<()>;
 
+    /// Close the underlying connection when the transport has one.
+    async fn logout(&mut self) -> Result<()> {
+        Ok(())
+    }
+
     /// Fetch raw RFC 5322 bodies for multiple UIDs in one round-trip.
     ///
     /// Default implementation loops `fetch_body` one at a time.  IMAP overrides
@@ -143,6 +161,10 @@ pub trait MailProvider: Send + Sync {
 // ---------------------------------------------------------------------------
 // IMAP impl
 // ---------------------------------------------------------------------------
+
+fn imap_uid(uid: i64) -> Result<u32> {
+    u32::try_from(uid).map_err(|_| Error::AutoDetect("IMAP UID must fit u32".into()))
+}
 
 /// Thin wrapper that owns an authenticated IMAP session and implements
 /// `MailProvider` by delegating to the existing free functions in `imap.rs`.
@@ -161,17 +183,24 @@ impl MailProvider for ImapProvider {
         folder: &str,
         since_uid: Option<i64>,
         _limit: u32,
-    ) -> Result<Vec<HeaderRow>> {
-        let (_uidvalidity, rows) = if let Some(uid) = since_uid.filter(|&u| u > 0) {
-            imap::fetch_headers_since(&mut self.session, folder, uid as u32).await?
+    ) -> Result<HeaderSnapshot> {
+        let (uidvalidity, rows) = if let Some(uid) = since_uid.filter(|&u| u > 0) {
+            let uid = imap_uid(uid)?;
+            imap::fetch_headers_since(&mut self.session, folder, uid).await?
         } else {
             imap::fetch_headers(&mut self.session, folder).await?
         };
-        Ok(rows)
+        Ok(HeaderSnapshot {
+            rows,
+            complete: since_uid.is_none(),
+            transport: SnapshotTransport::Imap {
+                uidvalidity: i64::from(uidvalidity),
+            },
+        })
     }
 
     async fn fetch_body(&mut self, folder: &str, uid: i64) -> Result<Vec<u8>> {
-        let pairs = imap::fetch_bodies(&mut self.session, folder, &[uid as u32]).await?;
+        let pairs = imap::fetch_bodies(&mut self.session, folder, &[imap_uid(uid)?]).await?;
         pairs.into_iter().next().map(|(_, raw)| raw).ok_or_else(|| {
             Error::Imap(imap::Error::Imap(async_imap::error::Error::No(
                 "body not found".into(),
@@ -190,7 +219,7 @@ impl MailProvider for ImapProvider {
             imap::store_flags(
                 &mut self.session,
                 folder,
-                &[uid as u32],
+                &[imap_uid(uid)?],
                 "+FLAGS",
                 &add.join(" "),
             )
@@ -200,7 +229,7 @@ impl MailProvider for ImapProvider {
             imap::store_flags(
                 &mut self.session,
                 folder,
-                &[uid as u32],
+                &[imap_uid(uid)?],
                 "-FLAGS",
                 &remove.join(" "),
             )
@@ -210,7 +239,7 @@ impl MailProvider for ImapProvider {
     }
 
     async fn move_message(&mut self, folder: &str, uid: i64, dest: &str) -> Result<()> {
-        Ok(imap::uid_move(&mut self.session, folder, &[uid as u32], dest).await?)
+        Ok(imap::uid_move(&mut self.session, folder, &[imap_uid(uid)?], dest).await?)
     }
 
     async fn send(&mut self, _raw: &[u8]) -> Result<()> {
@@ -245,9 +274,14 @@ impl MailProvider for ImapProvider {
         Ok(imap::subscribe_folder(&mut self.session, name, on).await?)
     }
 
+    async fn logout(&mut self) -> Result<()> {
+        self.session.logout().await.map_err(imap::Error::from)?;
+        Ok(())
+    }
+
     async fn fetch_bodies(&mut self, folder: &str, uids: &[i64]) -> Result<Vec<(i64, Vec<u8>)>> {
-        let u32_uids: Vec<u32> = uids.iter().map(|&u| u as u32).collect();
-        let pairs = imap::fetch_bodies(&mut self.session, folder, &u32_uids).await?;
+        let u32_uids: Result<Vec<u32>> = uids.iter().copied().map(imap_uid).collect();
+        let pairs = imap::fetch_bodies(&mut self.session, folder, &u32_uids?).await?;
         Ok(pairs.into_iter().map(|(u, raw)| (u as i64, raw)).collect())
     }
 }
@@ -363,8 +397,12 @@ mod tests {
             _folder: &str,
             _since_uid: Option<i64>,
             _limit: u32,
-        ) -> Result<Vec<HeaderRow>> {
-            Ok(vec![])
+        ) -> Result<HeaderSnapshot> {
+            Ok(HeaderSnapshot {
+                rows: vec![],
+                complete: true,
+                transport: SnapshotTransport::Opaque,
+            })
         }
 
         async fn fetch_body(&mut self, _folder: &str, _uid: i64) -> Result<Vec<u8>> {
@@ -414,6 +452,13 @@ mod tests {
         }
     }
 
+    #[test]
+    fn imap_uid_rejects_negative_and_overflow_values() {
+        assert!(imap_uid(-1).is_err());
+        assert!(imap_uid(i64::from(u32::MAX) + 1).is_err());
+        assert_eq!(imap_uid(i64::from(u32::MAX)).unwrap(), u32::MAX);
+    }
+
     #[tokio::test]
     async fn mock_provider_dyn_compat() {
         // Must compile as Box<dyn MailProvider>.
@@ -426,8 +471,8 @@ mod tests {
     #[tokio::test]
     async fn mock_provider_fetch_headers() {
         let mut p = MockProvider;
-        let rows = p.fetch_headers("INBOX", None, 100).await.unwrap();
-        assert!(rows.is_empty());
+        let snapshot = p.fetch_headers("INBOX", None, 100).await.unwrap();
+        assert!(snapshot.rows.is_empty());
     }
 
     #[tokio::test]
@@ -435,6 +480,60 @@ mod tests {
         let mut p = MockProvider;
         let body = p.fetch_body("INBOX", 1).await.unwrap();
         assert!(!body.is_empty());
+    }
+
+    #[tokio::test]
+    async fn opaque_ids_with_matching_low_32_bits_remain_distinct_in_store() {
+        use inbx_store::{MessageRow, Store};
+        use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+
+        let first = "dEWq2kXU1RQQxVgy";
+        let second = "hhON8vh9f5y6GdM0";
+        let first_uid = crate::jmap::jmap_id_to_uid(first);
+        let second_uid = crate::jmap::jmap_id_to_uid(second);
+        assert_eq!(first_uid as u32, second_uid as u32);
+        assert_ne!(first_uid, second_uid);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(SqliteConnectOptions::new().in_memory(true))
+            .await
+            .unwrap();
+        sqlx::migrate!("../inbx-store/migrations")
+            .run(&pool)
+            .await
+            .unwrap();
+        let store = Store::from_pool(pool);
+        for (uid, provider_id) in [(first_uid, first), (second_uid, second)] {
+            store
+                .upsert_message(&MessageRow {
+                    folder: "Inbox".into(),
+                    uid,
+                    uidvalidity: 0,
+                    message_id: None,
+                    subject: None,
+                    from_addr: None,
+                    to_addrs: None,
+                    date_unix: None,
+                    flags: String::new(),
+                    maildir_path: None,
+                    headers_only: 1,
+                    fetched_at_unix: 0,
+                    in_reply_to: None,
+                    refs: None,
+                    thread_id: None,
+                    provider_id: Some(provider_id.into()),
+                })
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            store.provider_id_for("Inbox", first_uid).await.unwrap(),
+            Some(first.into())
+        );
+        assert_eq!(
+            store.provider_id_for("Inbox", second_uid).await.unwrap(),
+            Some(second.into())
+        );
     }
 
     /// Verify the Graph error variant can be constructed and formatted.

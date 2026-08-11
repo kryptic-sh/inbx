@@ -21,3 +21,6 @@ anyhow.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 notify-rust.workspace = true
+
+[dev-dependencies]
+sqlx.workspace = true

@@ -14,6 +14,85 @@ use inbx_config::Account;
 use mail_parser::MessageParser;
 use tokio::task::JoinSet;
 
+/// Result of applying one provider folder snapshot to the local store.
+#[derive(Debug, Clone)]
+pub struct SnapshotApply {
+    pub applied: bool,
+    pub new_rows: Vec<inbx_net::HeaderRow>,
+}
+
+impl SnapshotApply {
+    pub fn new_count(&self) -> usize {
+        self.new_rows.len()
+    }
+}
+
+/// Convert the network-facing snapshot into the store-owned protocol-neutral input.
+pub async fn apply_snapshot(
+    store: &inbx_store::Store,
+    folder: &str,
+    generation: i64,
+    snapshot: inbx_net::provider::HeaderSnapshot,
+) -> Result<SnapshotApply> {
+    let transport = match snapshot.transport {
+        inbx_net::provider::SnapshotTransport::Imap { uidvalidity } => {
+            inbx_store::SnapshotTransport::Imap { uidvalidity }
+        }
+        inbx_net::provider::SnapshotTransport::Opaque => inbx_store::SnapshotTransport::Opaque,
+    };
+    let rows = snapshot
+        .rows
+        .into_iter()
+        .map(|header| inbx_store::SnapshotHeader {
+            uid: header.uid,
+            uidvalidity: i64::from(header.uidvalidity),
+            message_id: header.message_id,
+            subject: header.subject,
+            from_addr: header.from_addr,
+            to_addrs: header.to_addrs,
+            date_unix: header.date_unix,
+            flags: header.flags,
+            fetched_at_unix: header.fetched_at_unix,
+            provider_id: header.provider_id,
+        })
+        .collect();
+    let output = store
+        .apply_snapshot(inbx_store::SnapshotInput {
+            folder: folder.to_owned(),
+            generation,
+            complete: snapshot.complete,
+            transport,
+            rows,
+        })
+        .await?;
+    Ok(SnapshotApply {
+        applied: output.applied,
+        new_rows: output
+            .new_rows
+            .into_iter()
+            .map(|header| {
+                Ok(inbx_net::HeaderRow {
+                    uid: header.uid,
+                    uidvalidity: u32::try_from(header.uidvalidity).map_err(|_| {
+                        anyhow::anyhow!(
+                            "store snapshot uidvalidity {} cannot fit u32",
+                            header.uidvalidity
+                        )
+                    })?,
+                    message_id: header.message_id,
+                    subject: header.subject,
+                    from_addr: header.from_addr,
+                    to_addrs: header.to_addrs,
+                    date_unix: header.date_unix,
+                    flags: header.flags,
+                    fetched_at_unix: header.fetched_at_unix,
+                    provider_id: header.provider_id,
+                })
+            })
+            .collect::<Result<_>>()?,
+    })
+}
+
 /// Configuration for a sync run.
 ///
 /// All fields are `pub`; no builder needed — just fill in the struct.
@@ -347,8 +426,8 @@ pub async fn sync_once(
         }
     }
 
-    let mut session = inbx_net::connect_imap(account).await?;
-    let folders = inbx_net::list_folders(&mut session).await?;
+    let mut provider = inbx_net::connect_provider(account, Some(&store)).await?;
+    let folders = provider.list_folders().await?;
     for f in &folders {
         store
             .upsert_folder(&inbx_store::FolderRow {
@@ -366,74 +445,22 @@ pub async fn sync_once(
             })
             .await?;
     }
-    let (uidvalidity, rows) = inbx_net::fetch_headers(&mut session, folder).await?;
-
-    // Prune local rows whose UID is no longer present on the server (deleted /
-    // moved to another folder server-side).
-    let server_uids: std::collections::HashSet<i64> = rows.iter().map(|r| r.uid as i64).collect();
-    let local_uids = store
-        .folder_uids(folder, uidvalidity as i64)
-        .await
-        .unwrap_or_default();
-    let stale: Vec<i64> = local_uids
-        .into_iter()
-        .filter(|u| !server_uids.contains(u))
-        .collect();
-    if !stale.is_empty() {
-        tracing::debug!(account = %account.name, %folder, count = stale.len(), "pruning stale local rows");
-        store.delete_messages(folder, &stale).await?;
+    // Always request a complete snapshot: pruning is only sound after a
+    // successful full fetch, never after a provider delta or failed stream.
+    let generation = store.reserve_snapshot_generation(folder).await?;
+    let snapshot = provider.fetch_headers(folder, None, 1000).await?;
+    let uidvalidity = snapshot.transport.uidvalidity();
+    let applied = apply_snapshot(&store, folder, generation, snapshot).await?;
+    if !applied.applied {
+        let _ = provider.logout().await;
+        return Ok(0);
     }
-
-    let prev = store.folder_uidvalidity(folder).await?;
-    if let Some(prev) = prev
-        && prev as u32 != uidvalidity
-    {
-        tracing::warn!(prev, new = uidvalidity, %folder, "UIDVALIDITY changed; wiping");
-        store.wipe_folder_messages(folder).await?;
-    }
-    let pre_max = store
-        .folder_max_uid(folder, uidvalidity as i64)
-        .await?
-        .unwrap_or(0);
-    store
-        .upsert_folder(&inbx_store::FolderRow {
-            name: folder.to_string(),
-            delim: None,
-            special_use: None,
-            attrs: None,
-            uidvalidity: Some(uidvalidity as i64),
-            uidnext: None,
-            delta_link: None,
-        })
-        .await?;
-    for h in &rows {
-        store
-            .upsert_message(&inbx_store::MessageRow {
-                folder: folder.to_string(),
-                uid: h.uid as i64,
-                uidvalidity: h.uidvalidity as i64,
-                message_id: h.message_id.clone(),
-                subject: h.subject.clone(),
-                from_addr: h.from_addr.clone(),
-                to_addrs: h.to_addrs.clone(),
-                date_unix: h.date_unix,
-                flags: h.flags.clone(),
-                maildir_path: None,
-                headers_only: 1,
-                fetched_at_unix: h.fetched_at_unix,
-                in_reply_to: None,
-                refs: None,
-                thread_id: None,
-                provider_id: h.provider_id.clone(),
-            })
-            .await?;
-    }
-    let new_count = rows.iter().filter(|h| (h.uid as i64) > pre_max).count();
+    let new_count = applied.new_count();
+    let new_rows = applied.new_rows;
     if notify && new_count > 0 {
         let summary = format!("{new_count} new in {}", account.name);
-        let body = rows
+        let body = new_rows
             .iter()
-            .filter(|h| (h.uid as i64) > pre_max)
             .take(5)
             .map(|h| {
                 format!(
@@ -456,21 +483,16 @@ pub async fn sync_once(
     if fetch_bodies {
         let pending = store.list_unfetched(folder, body_limit).await?;
         if !pending.is_empty() {
-            let uids: Vec<u32> = pending.iter().map(|u| *u as u32).collect();
-            let bodies = inbx_net::fetch_bodies(&mut session, folder, &uids).await?;
+            let uids: Vec<i64> = pending;
+            let bodies = provider.fetch_bodies(folder, &uids).await?;
             // Open contacts store once for the entire body batch (best-effort).
             let contacts = inbx_contacts::ContactsStore::open(&account.name).await.ok();
             for (uid, raw) in bodies {
                 let path = store.write_maildir(folder, &raw, "\\Seen")?;
+                index_in_store(&store, folder, uid, uidvalidity, &raw).await?;
                 store
-                    .set_maildir_path(
-                        folder,
-                        uid as i64,
-                        uidvalidity as i64,
-                        &path.to_string_lossy(),
-                    )
+                    .set_maildir_path(folder, uid, uidvalidity, &path.to_string_lossy())
                     .await?;
-                index_in_store(&store, folder, uid as i64, uidvalidity as i64, &raw).await?;
                 // Harvest Autocrypt header from each incoming body (best-effort).
                 if let Some(cs) = &contacts {
                     harvest_autocrypt(cs, &raw).await;
@@ -478,7 +500,7 @@ pub async fn sync_once(
             }
         }
     }
-    let _ = session.logout().await;
+    let _ = provider.logout().await;
     Ok(new_count as u32)
 }
 
@@ -569,4 +591,202 @@ pub async fn index_in_store(
         .index_for_search(folder, uid, uidvalidity, subject, &from, &to, &body)
         .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use inbx_net::{HeaderRow, provider::HeaderSnapshot, provider::SnapshotTransport};
+    use inbx_store::{MessageRow, Store};
+    use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+
+    use super::apply_snapshot;
+
+    fn header(uid: i64, provider_id: Option<&str>) -> HeaderRow {
+        HeaderRow {
+            uid,
+            uidvalidity: 0,
+            message_id: None,
+            subject: None,
+            from_addr: None,
+            to_addrs: None,
+            date_unix: None,
+            flags: String::new(),
+            fetched_at_unix: 0,
+            provider_id: provider_id.map(str::to_owned),
+        }
+    }
+
+    async fn store() -> Store {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(SqliteConnectOptions::new().in_memory(true))
+            .await
+            .unwrap();
+        sqlx::migrate!("../inbx-store/migrations")
+            .run(&pool)
+            .await
+            .unwrap();
+        Store::from_pool(pool)
+    }
+
+    fn row(uid: i64, provider_id: Option<&str>) -> MessageRow {
+        MessageRow {
+            folder: "Inbox".to_owned(),
+            uid,
+            uidvalidity: 0,
+            message_id: None,
+            subject: None,
+            from_addr: None,
+            to_addrs: None,
+            date_unix: None,
+            flags: String::new(),
+            maildir_path: None,
+            headers_only: 1,
+            fetched_at_unix: 0,
+            in_reply_to: None,
+            refs: None,
+            thread_id: None,
+            provider_id: provider_id.map(str::to_owned),
+        }
+    }
+
+    #[tokio::test]
+    async fn stale_snapshot_apply_preserves_applied_flag_and_has_no_new_rows() {
+        let store = store().await;
+        let stale = store.reserve_snapshot_generation("Inbox").await.unwrap();
+        store.reserve_snapshot_generation("Inbox").await.unwrap();
+        let result = apply_snapshot(
+            &store,
+            "Inbox",
+            stale,
+            HeaderSnapshot {
+                rows: vec![header(1, None)],
+                complete: true,
+                transport: SnapshotTransport::Imap { uidvalidity: 0 },
+            },
+        )
+        .await
+        .unwrap();
+        assert!(!result.applied);
+        assert!(result.new_rows.is_empty());
+    }
+
+    #[tokio::test]
+    async fn complete_and_partial_snapshots_prune_by_their_identity() {
+        let store = store().await;
+        store.upsert_message(&row(1, None)).await.unwrap();
+        apply_snapshot(
+            &store,
+            "Inbox",
+            store.reserve_snapshot_generation("Inbox").await.unwrap(),
+            HeaderSnapshot {
+                rows: vec![],
+                complete: false,
+                transport: SnapshotTransport::Imap { uidvalidity: 0 },
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(store.list_messages("Inbox", 10).await.unwrap().len(), 1);
+        apply_snapshot(
+            &store,
+            "Inbox",
+            store.reserve_snapshot_generation("Inbox").await.unwrap(),
+            HeaderSnapshot {
+                rows: vec![],
+                complete: true,
+                transport: SnapshotTransport::Imap { uidvalidity: 0 },
+            },
+        )
+        .await
+        .unwrap();
+        assert!(store.list_messages("Inbox", 10).await.unwrap().is_empty());
+
+        store.upsert_message(&row(1, Some("old"))).await.unwrap();
+        apply_snapshot(
+            &store,
+            "Inbox",
+            store.reserve_snapshot_generation("Inbox").await.unwrap(),
+            HeaderSnapshot {
+                rows: vec![],
+                complete: false,
+                transport: SnapshotTransport::Opaque,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(store.list_messages("Inbox", 10).await.unwrap().len(), 1);
+        apply_snapshot(
+            &store,
+            "Inbox",
+            store.reserve_snapshot_generation("Inbox").await.unwrap(),
+            HeaderSnapshot {
+                rows: vec![],
+                complete: true,
+                transport: SnapshotTransport::Opaque,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(store.list_messages("Inbox", 10).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn uidvalidity_reset_replaces_old_rows_and_legacy_ids_are_not_new() {
+        let store = store().await;
+        store
+            .upsert_folder(&inbx_store::FolderRow {
+                name: "Inbox".into(),
+                delim: None,
+                special_use: None,
+                attrs: None,
+                uidvalidity: Some(1),
+                uidnext: None,
+                delta_link: None,
+            })
+            .await
+            .unwrap();
+        store.upsert_message(&row(1, None)).await.unwrap();
+        let mut incoming = header(2, None);
+        incoming.uidvalidity = 2;
+        let applied = apply_snapshot(
+            &store,
+            "Inbox",
+            store.reserve_snapshot_generation("Inbox").await.unwrap(),
+            HeaderSnapshot {
+                rows: vec![incoming],
+                complete: true,
+                transport: SnapshotTransport::Imap { uidvalidity: 2 },
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(applied.new_count(), 1);
+        assert_eq!(store.list_messages("Inbox", 10).await.unwrap()[0].uid, 2);
+
+        let mut legacy = row(427_567_909, Some("test"));
+        legacy.maildir_path = Some("cur/body".into());
+        legacy.headers_only = 0;
+        store.upsert_message(&legacy).await.unwrap();
+        let applied = apply_snapshot(
+            &store,
+            "Inbox",
+            store.reserve_snapshot_generation("Inbox").await.unwrap(),
+            HeaderSnapshot {
+                rows: vec![header(8_783_962_037_831_871_269, Some("test"))],
+                complete: false,
+                transport: SnapshotTransport::Opaque,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(applied.new_count(), 0);
+        let migrated = store.list_messages("Inbox", 10).await.unwrap();
+        assert!(
+            migrated
+                .iter()
+                .any(|message| message.uid == 8_783_962_037_831_871_269
+                    && message.maildir_path.as_deref() == Some("cur/body"))
+        );
+    }
 }

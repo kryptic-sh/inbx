@@ -12,12 +12,18 @@ pub use threading::normalize_subject;
 pub enum Error {
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
+    #[error("thread root not found for {0}")]
+    ThreadRoot(String),
     #[error("sqlx: {0}")]
     Sqlx(#[from] sqlx::Error),
     #[error("migrate: {0}")]
     Migrate(#[from] sqlx::migrate::MigrateError),
     #[error("config: {0}")]
     Config(#[from] inbx_config::Error),
+    #[error("invalid snapshot: {0}")]
+    InvalidSnapshot(&'static str),
+    #[error("snapshot generation {generation} was not reserved for folder {folder}")]
+    UnreservedSnapshotGeneration { folder: String, generation: i64 },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -68,6 +74,50 @@ pub struct MessageRow {
     pub provider_id: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SnapshotTransport {
+    Imap { uidvalidity: i64 },
+    Opaque,
+}
+
+impl SnapshotTransport {
+    pub fn uidvalidity(self) -> i64 {
+        match self {
+            Self::Imap { uidvalidity } => uidvalidity,
+            Self::Opaque => 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SnapshotHeader {
+    pub uid: i64,
+    pub uidvalidity: i64,
+    pub message_id: Option<String>,
+    pub subject: Option<String>,
+    pub from_addr: Option<String>,
+    pub to_addrs: Option<String>,
+    pub date_unix: Option<i64>,
+    pub flags: String,
+    pub fetched_at_unix: i64,
+    pub provider_id: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SnapshotInput {
+    pub folder: String,
+    pub generation: i64,
+    pub complete: bool,
+    pub transport: SnapshotTransport,
+    pub rows: Vec<SnapshotHeader>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SnapshotOutput {
+    pub applied: bool,
+    pub new_rows: Vec<SnapshotHeader>,
+}
+
 #[derive(Clone)]
 pub struct Store {
     pool: SqlitePool,
@@ -110,6 +160,247 @@ impl Store {
 
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// Reserve a database-issued generation before starting a folder fetch.
+    /// A later reservation makes an older fetched snapshot ineligible to apply.
+    pub async fn reserve_snapshot_generation(&self, folder: &str) -> Result<i64> {
+        let row: (i64,) = sqlx::query_as(
+            "INSERT INTO folders (name, snapshot_generation, latest_reserved_generation)
+             VALUES (?1, 0, 1)
+             ON CONFLICT(name) DO UPDATE SET
+               latest_reserved_generation = folders.latest_reserved_generation + 1
+             RETURNING latest_reserved_generation",
+        )
+        .bind(folder)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row.0)
+    }
+
+    /// Apply a validated provider snapshot in one SQLite transaction.
+    pub async fn apply_snapshot(&self, input: SnapshotInput) -> Result<SnapshotOutput> {
+        use std::collections::{HashMap, HashSet};
+
+        let mut provider_ids = HashSet::new();
+        let mut message_id_counts = HashMap::new();
+        let mut uids = HashSet::new();
+        if input.transport == SnapshotTransport::Opaque {
+            for row in &input.rows {
+                let Some(provider_id) = row.provider_id.as_ref() else {
+                    return Err(Error::InvalidSnapshot(
+                        "opaque snapshot is missing a provider id",
+                    ));
+                };
+                if !provider_ids.insert(provider_id) {
+                    return Err(Error::InvalidSnapshot(
+                        "opaque snapshot has duplicate provider ids",
+                    ));
+                }
+                if !uids.insert(row.uid) {
+                    return Err(Error::InvalidSnapshot(
+                        "opaque snapshot has duplicate canonical uids",
+                    ));
+                }
+                if let Some(message_id) = &row.message_id {
+                    *message_id_counts
+                        .entry(message_id.as_str())
+                        .or_insert(0usize) += 1;
+                }
+            }
+        }
+
+        let mut tx = self.pool.begin().await?;
+        let reserved: Option<(i64, i64)> = sqlx::query_as(
+            "SELECT snapshot_generation, latest_reserved_generation FROM folders WHERE name = ?1",
+        )
+        .bind(&input.folder)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some((snapshot_generation, latest_reserved_generation)) = reserved else {
+            tx.rollback().await?;
+            return Err(Error::UnreservedSnapshotGeneration {
+                folder: input.folder.clone(),
+                generation: input.generation,
+            });
+        };
+        if input.generation <= 0 {
+            tx.rollback().await?;
+            return Err(Error::UnreservedSnapshotGeneration {
+                folder: input.folder.clone(),
+                generation: input.generation,
+            });
+        }
+        if input.generation < latest_reserved_generation || input.generation <= snapshot_generation
+        {
+            tx.rollback().await?;
+            return Ok(SnapshotOutput {
+                applied: false,
+                new_rows: Vec::new(),
+            });
+        }
+        if input.generation > latest_reserved_generation {
+            tx.rollback().await?;
+            return Err(Error::UnreservedSnapshotGeneration {
+                folder: input.folder.clone(),
+                generation: input.generation,
+            });
+        }
+
+        let previous_uidvalidity: Option<(Option<i64>,)> =
+            sqlx::query_as("SELECT uidvalidity FROM folders WHERE name = ?1")
+                .bind(&input.folder)
+                .fetch_optional(&mut *tx)
+                .await?;
+        let uidvalidity = input.transport.uidvalidity();
+        let old_provider_ids: HashSet<String> = sqlx::query_scalar(
+            "SELECT provider_id FROM messages WHERE folder = ?1 AND provider_id IS NOT NULL",
+        )
+        .bind(&input.folder)
+        .fetch_all(&mut *tx)
+        .await?
+        .into_iter()
+        .collect();
+        let old_max: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(MAX(uid), 0) FROM messages WHERE folder = ?1 AND uidvalidity = ?2",
+        )
+        .bind(&input.folder)
+        .bind(uidvalidity)
+        .fetch_one(&mut *tx)
+        .await?;
+        let mut reconciled_provider_ids: HashSet<String> = HashSet::new();
+
+        if matches!(input.transport, SnapshotTransport::Imap { .. })
+            && previous_uidvalidity
+                .and_then(|(uidvalidity,)| uidvalidity)
+                .is_some_and(|old| old != uidvalidity)
+        {
+            sqlx::query("DELETE FROM messages WHERE folder = ?1")
+                .bind(&input.folder)
+                .execute(&mut *tx)
+                .await?;
+        }
+        sqlx::query(
+            "INSERT INTO folders (name, uidvalidity, snapshot_generation, latest_reserved_generation)
+             VALUES (?1, ?2, ?3, ?3)
+             ON CONFLICT(name) DO UPDATE SET
+                uidvalidity = excluded.uidvalidity,
+                snapshot_generation = excluded.snapshot_generation",
+        ).bind(&input.folder).bind(uidvalidity).bind(input.generation).execute(&mut *tx).await?;
+
+        if input.transport == SnapshotTransport::Opaque {
+            for (index, row) in input.rows.iter().enumerate() {
+                let provider_id = row.provider_id.as_deref().expect("validated above");
+                // A legacy null-provider row is only rekeyed when one stable identity agrees.
+                let low_uid = (row.uid as u64 & u32::MAX as u64) as i64;
+                let xor_uid = row.uid ^ index as i64;
+                let candidates: Vec<(i64, i64)> = if row
+                    .message_id
+                    .as_deref()
+                    .is_some_and(|message_id| message_id_counts[message_id] == 1)
+                {
+                    sqlx::query_as(
+                        "SELECT uid, uidvalidity FROM messages WHERE folder = ?1 AND provider_id IS NULL
+                         AND (message_id = ?2 OR uid = ?3 OR uid = ?4 OR uid = ?5)",
+                    )
+                    .bind(&input.folder)
+                    .bind(&row.message_id)
+                    .bind(row.uid)
+                    .bind(low_uid)
+                    .bind(xor_uid)
+                    .fetch_all(&mut *tx)
+                    .await?
+                } else {
+                    sqlx::query_as(
+                        "SELECT uid, uidvalidity FROM messages WHERE folder = ?1 AND provider_id IS NULL
+                         AND (uid = ?2 OR uid = ?3 OR uid = ?4)",
+                    )
+                    .bind(&input.folder)
+                    .bind(row.uid)
+                    .bind(low_uid)
+                    .bind(xor_uid)
+                    .fetch_all(&mut *tx)
+                    .await?
+                };
+                if candidates.len() == 1 {
+                    let (old_uid, old_uv) = candidates[0];
+                    sqlx::query("DELETE FROM messages WHERE folder = ?1 AND provider_id = ?2")
+                        .bind(&input.folder)
+                        .bind(provider_id)
+                        .execute(&mut *tx)
+                        .await?;
+                    sqlx::query("UPDATE messages SET uid = ?3, uidvalidity = ?4, provider_id = ?5 WHERE folder = ?1 AND uid = ?2 AND uidvalidity = ?6")
+                        .bind(&input.folder).bind(old_uid).bind(row.uid).bind(row.uidvalidity).bind(provider_id).bind(old_uv).execute(&mut *tx).await?;
+                    reconciled_provider_ids.insert(provider_id.to_owned());
+                } else if candidates.len() > 1 {
+                    tracing::warn!(folder = %input.folder, provider_id, candidates = candidates.len(), "ambiguous legacy opaque rows left unresolved");
+                }
+                let keeper: Option<(i64, i64)> = sqlx::query_as(
+                    "SELECT uid, uidvalidity FROM messages WHERE folder = ?1 AND provider_id = ?2
+                     ORDER BY (maildir_path IS NOT NULL) DESC, headers_only ASC, fetched_at_unix DESC, uid DESC LIMIT 1",
+                ).bind(&input.folder).bind(provider_id).fetch_optional(&mut *tx).await?;
+                if let Some((old_uid, old_uv)) = keeper {
+                    sqlx::query("DELETE FROM messages WHERE folder = ?1 AND provider_id = ?2 AND NOT (uid = ?3 AND uidvalidity = ?4)")
+                        .bind(&input.folder).bind(provider_id).bind(old_uid).bind(old_uv).execute(&mut *tx).await?;
+                    if old_uid != row.uid || old_uv != row.uidvalidity {
+                        sqlx::query("UPDATE messages SET uid = ?3, uidvalidity = ?4 WHERE folder = ?1 AND uid = ?2 AND uidvalidity = ?5")
+                            .bind(&input.folder).bind(old_uid).bind(row.uid).bind(row.uidvalidity).bind(old_uv).execute(&mut *tx).await?;
+                    }
+                }
+            }
+        }
+        for row in &input.rows {
+            sqlx::query("INSERT INTO messages (folder, uid, uidvalidity, message_id, subject, from_addr, to_addrs, date_unix, flags, maildir_path, headers_only, fetched_at_unix, provider_id)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, 1, ?10, ?11)
+                         ON CONFLICT(folder, uid, uidvalidity) DO UPDATE SET message_id=excluded.message_id, subject=excluded.subject, from_addr=excluded.from_addr, to_addrs=excluded.to_addrs, date_unix=excluded.date_unix, flags=excluded.flags, headers_only=MIN(excluded.headers_only,messages.headers_only), fetched_at_unix=excluded.fetched_at_unix, provider_id=COALESCE(excluded.provider_id,messages.provider_id)")
+                .bind(&input.folder).bind(row.uid).bind(row.uidvalidity).bind(&row.message_id).bind(&row.subject).bind(&row.from_addr).bind(&row.to_addrs).bind(row.date_unix).bind(&row.flags).bind(row.fetched_at_unix).bind(&row.provider_id).execute(&mut *tx).await?;
+        }
+        if input.complete {
+            match input.transport {
+                SnapshotTransport::Imap { .. } => {
+                    let uids: HashSet<i64> = input.rows.iter().map(|row| row.uid).collect();
+                    let existing: Vec<i64> = sqlx::query_scalar(
+                        "SELECT uid FROM messages WHERE folder = ?1 AND uidvalidity = ?2",
+                    )
+                    .bind(&input.folder)
+                    .bind(uidvalidity)
+                    .fetch_all(&mut *tx)
+                    .await?;
+                    for uid in existing.into_iter().filter(|uid| !uids.contains(uid)) {
+                        sqlx::query("DELETE FROM messages WHERE folder = ?1 AND uid = ?2 AND uidvalidity = ?3").bind(&input.folder).bind(uid).bind(uidvalidity).execute(&mut *tx).await?;
+                    }
+                }
+                SnapshotTransport::Opaque => {
+                    for id in old_provider_ids
+                        .iter()
+                        .filter(|id| !provider_ids.contains(*id))
+                    {
+                        sqlx::query("DELETE FROM messages WHERE folder = ?1 AND provider_id = ?2")
+                            .bind(&input.folder)
+                            .bind(id)
+                            .execute(&mut *tx)
+                            .await?;
+                    }
+                    // Null-provider rows are retained unless safely merged above.
+                }
+            }
+        }
+        let new_rows = input
+            .rows
+            .iter()
+            .filter(|row| match input.transport {
+                SnapshotTransport::Opaque => row.provider_id.as_ref().is_some_and(|id| {
+                    !old_provider_ids.contains(id) && !reconciled_provider_ids.contains(id.as_str())
+                }),
+                SnapshotTransport::Imap { .. } => row.uid > old_max,
+            })
+            .cloned()
+            .collect();
+        tx.commit().await?;
+        Ok(SnapshotOutput {
+            applied: true,
+            new_rows,
+        })
     }
 
     pub async fn upsert_folder(&self, f: &FolderRow) -> Result<()> {
@@ -205,7 +496,7 @@ impl Store {
                 date_unix = excluded.date_unix,
                 flags = excluded.flags,
                 maildir_path = COALESCE(excluded.maildir_path, messages.maildir_path),
-                headers_only = excluded.headers_only,
+                headers_only = MIN(excluded.headers_only, messages.headers_only),
                 fetched_at_unix = excluded.fetched_at_unix,
                 in_reply_to = COALESCE(excluded.in_reply_to, messages.in_reply_to),
                 refs = COALESCE(excluded.refs, messages.refs),
@@ -230,6 +521,87 @@ impl Store {
         .bind(&m.provider_id)
         .execute(&self.pool)
         .await?;
+        Ok(())
+    }
+
+    pub async fn folder_provider_ids(&self, folder: &str) -> Result<Vec<String>> {
+        let rows: Vec<(String,)> = sqlx::query_as(
+            "SELECT provider_id FROM messages WHERE folder = ?1 AND provider_id IS NOT NULL",
+        )
+        .bind(folder)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(|(id,)| id).collect())
+    }
+
+    /// Re-key a legacy opaque row to the canonical UID derived from its provider ID.
+    ///
+    /// Older releases used truncated/index-XOR UIDs.  A provider ID identifies the
+    /// logical message, so collapse every duplicate to the richest row before the
+    /// current snapshot upsert refreshes its headers.
+    pub async fn rekey_opaque_message(
+        &self,
+        folder: &str,
+        provider_id: &str,
+        uid: i64,
+        uidvalidity: i64,
+    ) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        let keeper: Option<(i64, i64)> = sqlx::query_as(
+            "SELECT uid, uidvalidity FROM messages
+             WHERE folder = ?1 AND provider_id = ?2
+             ORDER BY (maildir_path IS NOT NULL) DESC, headers_only ASC,
+                      fetched_at_unix DESC, uid DESC
+             LIMIT 1",
+        )
+        .bind(folder)
+        .bind(provider_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some((old_uid, old_uidvalidity)) = keeper else {
+            tx.commit().await?;
+            return Ok(());
+        };
+
+        sqlx::query(
+            "DELETE FROM messages WHERE folder = ?1 AND provider_id = ?2
+             AND NOT (uid = ?3 AND uidvalidity = ?4)",
+        )
+        .bind(folder)
+        .bind(provider_id)
+        .bind(old_uid)
+        .bind(old_uidvalidity)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "UPDATE messages SET uid = ?3, uidvalidity = ?4
+             WHERE folder = ?1 AND uid = ?2 AND uidvalidity = ?5",
+        )
+        .bind(folder)
+        .bind(old_uid)
+        .bind(uid)
+        .bind(uidvalidity)
+        .bind(old_uidvalidity)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Delete opaque rows absent from a complete provider snapshot.
+    pub async fn delete_provider_ids_not_in(
+        &self,
+        folder: &str,
+        provider_ids: &std::collections::HashSet<String>,
+    ) -> Result<()> {
+        let existing = self.folder_provider_ids(folder).await?;
+        for provider_id in existing.into_iter().filter(|id| !provider_ids.contains(id)) {
+            sqlx::query("DELETE FROM messages WHERE folder = ?1 AND provider_id = ?2")
+                .bind(folder)
+                .bind(provider_id)
+                .execute(&self.pool)
+                .await?;
+        }
         Ok(())
     }
 
@@ -306,7 +678,7 @@ impl Store {
         let rows: Vec<MessageRow> = sqlx::query_as(
             "SELECT folder, uid, uidvalidity, message_id, subject, from_addr, to_addrs,
                     date_unix, flags, maildir_path, headers_only, fetched_at_unix,
-                    in_reply_to, refs, thread_id
+                    in_reply_to, refs, thread_id, provider_id
              FROM messages
              WHERE thread_id = ?1
              ORDER BY date_unix ASC NULLS LAST",
@@ -433,7 +805,7 @@ impl Store {
         let rows: Vec<MessageRow> = sqlx::query_as(
             "SELECT m.folder, m.uid, m.uidvalidity, m.message_id, m.subject, m.from_addr,
                     m.to_addrs, m.date_unix, m.flags, m.maildir_path, m.headers_only,
-                    m.fetched_at_unix, m.in_reply_to, m.refs, m.thread_id
+                    m.fetched_at_unix, m.in_reply_to, m.refs, m.thread_id, m.provider_id
              FROM messages_fts f
              JOIN messages m ON m.id = f.rowid
              WHERE f.messages_fts MATCH ?1
@@ -543,11 +915,39 @@ impl Store {
         Ok(())
     }
 
+    /// Drop opaque-provider messages by their exact provider IDs.
+    pub async fn delete_messages_by_provider_ids(
+        &self,
+        folder: &str,
+        ids: &[String],
+    ) -> Result<()> {
+        const SQLITE_BIND_LIMIT: usize = 999;
+        const PROVIDER_ID_BATCH_SIZE: usize = SQLITE_BIND_LIMIT - 1;
+
+        for ids in ids.chunks(PROVIDER_ID_BATCH_SIZE) {
+            let placeholders = (1..=ids.len())
+                .map(|i| format!("?{}", i + 1))
+                .collect::<Vec<_>>()
+                .join(",");
+            let sql = format!(
+                "DELETE FROM messages WHERE folder = ?1 AND provider_id IN ({placeholders})"
+            );
+            let mut query = sqlx::query(&sql).bind(folder);
+            for id in ids {
+                query = query.bind(id);
+            }
+            query.execute(&self.pool).await?;
+        }
+        Ok(())
+    }
+
     /// Drop all messages with `\Deleted` set (mirrors server EXPUNGE locally).
     pub async fn purge_deleted(&self, folder: &str) -> Result<u64> {
         let res = sqlx::query(
             "DELETE FROM messages
-             WHERE folder = ?1 AND flags LIKE '%\\Deleted%' ESCAPE '\\\\'",
+             WHERE folder = ?1
+               AND (instr(' ' || flags || ' ', ' \\Deleted ') > 0
+                    OR instr(' ' || flags || ' ', ' Deleted ') > 0)",
         )
         .bind(folder)
         .execute(&self.pool)
@@ -594,7 +994,7 @@ impl Store {
         let rows: Vec<MessageRow> = sqlx::query_as(
             "SELECT folder, uid, uidvalidity, message_id, subject, from_addr, to_addrs,
                     date_unix, flags, maildir_path, headers_only, fetched_at_unix,
-                    in_reply_to, refs, thread_id
+                    in_reply_to, refs, thread_id, provider_id
              FROM messages
              WHERE folder = ?1
              ORDER BY date_unix DESC NULLS LAST
@@ -769,6 +1169,479 @@ mod tests {
             Some(pid.to_string()),
             "provider_id must survive flag refresh"
         );
+    }
+
+    #[tokio::test]
+    async fn opaque_rekey_preserves_downloaded_legacy_state() {
+        let store = make_in_memory_store().await;
+        let old_uid = 427_567_909;
+        let full_uid = 8_783_962_037_831_871_269;
+        let mut legacy = make_row("Inbox", old_uid, Some("test"));
+        legacy.maildir_path = Some("cur/downloaded:2,S".to_owned());
+        legacy.headers_only = 0;
+        legacy.thread_id = Some("thread".to_owned());
+        store.upsert_message(&legacy).await.unwrap();
+
+        store
+            .rekey_opaque_message("Inbox", "test", full_uid, 0)
+            .await
+            .unwrap();
+        let rows = store.list_messages("Inbox", 10).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].uid, full_uid);
+        assert_eq!(rows[0].maildir_path.as_deref(), Some("cur/downloaded:2,S"));
+        assert_eq!(rows[0].headers_only, 0);
+        assert_eq!(rows[0].thread_id.as_deref(), Some("thread"));
+    }
+
+    #[tokio::test]
+    async fn snapshot_generation_rejects_unreserved_future_apply_and_keeps_unused_reservations() {
+        let store = make_in_memory_store().await;
+        let first = store.reserve_snapshot_generation("Inbox").await.unwrap();
+        assert_eq!(first, 1);
+        let generations: (i64, i64) = sqlx::query_as(
+            "SELECT snapshot_generation, latest_reserved_generation FROM folders WHERE name = ?1",
+        )
+        .bind("Inbox")
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+        assert_eq!(generations, (0, 1));
+
+        let input = |generation| SnapshotInput {
+            folder: "Inbox".into(),
+            generation,
+            complete: true,
+            transport: SnapshotTransport::Imap { uidvalidity: 1 },
+            rows: Vec::new(),
+        };
+        assert!(matches!(
+            store.apply_snapshot(input(first + 1)).await,
+            Err(Error::UnreservedSnapshotGeneration { .. })
+        ));
+        let unused = store.reserve_snapshot_generation("Inbox").await.unwrap();
+        assert_eq!(unused, 2);
+        let generations: (i64, i64) = sqlx::query_as(
+            "SELECT snapshot_generation, latest_reserved_generation FROM folders WHERE name = ?1",
+        )
+        .bind("Inbox")
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+        assert_eq!(generations, (0, 2));
+    }
+
+    #[tokio::test]
+    async fn snapshot_generation_rejects_zero_for_unreserved_upserted_folder() {
+        let store = make_in_memory_store().await;
+        store
+            .upsert_folder(&FolderRow {
+                name: "Inbox".into(),
+                delim: None,
+                special_use: None,
+                attrs: None,
+                uidvalidity: None,
+                uidnext: None,
+                delta_link: None,
+            })
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            store
+                .apply_snapshot(SnapshotInput {
+                    folder: "Inbox".into(),
+                    generation: 0,
+                    complete: true,
+                    transport: SnapshotTransport::Imap { uidvalidity: 1 },
+                    rows: vec![SnapshotHeader {
+                        uid: 1,
+                        uidvalidity: 1,
+                        message_id: None,
+                        subject: None,
+                        from_addr: None,
+                        to_addrs: None,
+                        date_unix: None,
+                        flags: String::new(),
+                        fetched_at_unix: 0,
+                        provider_id: None,
+                    }],
+                })
+                .await,
+            Err(Error::UnreservedSnapshotGeneration { generation: 0, .. })
+        ));
+        assert!(store.list_messages("Inbox", 10).await.unwrap().is_empty());
+        let generations: (i64, i64) = sqlx::query_as(
+            "SELECT snapshot_generation, latest_reserved_generation FROM folders WHERE name = ?1",
+        )
+        .bind("Inbox")
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+        assert_eq!(generations, (0, 0));
+    }
+
+    #[tokio::test]
+    async fn snapshot_generation_replay_does_not_prune_applied_snapshot() {
+        let store = make_in_memory_store().await;
+        let generation = store.reserve_snapshot_generation("Inbox").await.unwrap();
+        let initial = store
+            .apply_snapshot(SnapshotInput {
+                folder: "Inbox".into(),
+                generation,
+                complete: true,
+                transport: SnapshotTransport::Imap { uidvalidity: 1 },
+                rows: vec![SnapshotHeader {
+                    uid: 1,
+                    uidvalidity: 1,
+                    message_id: None,
+                    subject: None,
+                    from_addr: None,
+                    to_addrs: None,
+                    date_unix: None,
+                    flags: String::new(),
+                    fetched_at_unix: 0,
+                    provider_id: None,
+                }],
+            })
+            .await
+            .unwrap();
+        assert!(initial.applied);
+        let generations: (i64, i64) = sqlx::query_as(
+            "SELECT snapshot_generation, latest_reserved_generation FROM folders WHERE name = ?1",
+        )
+        .bind("Inbox")
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+        assert_eq!(generations, (generation, generation));
+
+        let replay = store
+            .apply_snapshot(SnapshotInput {
+                folder: "Inbox".into(),
+                generation,
+                complete: true,
+                transport: SnapshotTransport::Imap { uidvalidity: 1 },
+                rows: Vec::new(),
+            })
+            .await
+            .unwrap();
+        assert!(!replay.applied);
+        assert!(replay.new_rows.is_empty());
+        let rows = store.list_messages("Inbox", 10).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].uid, 1);
+    }
+
+    #[tokio::test]
+    async fn snapshot_generation_rejects_stale_apply() {
+        let store = make_in_memory_store().await;
+        let older = store.reserve_snapshot_generation("Inbox").await.unwrap();
+        let newer = store.reserve_snapshot_generation("Inbox").await.unwrap();
+        let input = |generation, uid| SnapshotInput {
+            folder: "Inbox".into(),
+            generation,
+            complete: true,
+            transport: SnapshotTransport::Imap { uidvalidity: 1 },
+            rows: vec![SnapshotHeader {
+                uid,
+                uidvalidity: 1,
+                message_id: None,
+                subject: None,
+                from_addr: None,
+                to_addrs: None,
+                date_unix: None,
+                flags: String::new(),
+                fetched_at_unix: 0,
+                provider_id: None,
+            }],
+        };
+        assert!(store.apply_snapshot(input(newer, 2)).await.unwrap().applied);
+        assert!(!store.apply_snapshot(input(older, 1)).await.unwrap().applied);
+        assert_eq!(store.list_messages("Inbox", 10).await.unwrap()[0].uid, 2);
+    }
+
+    #[tokio::test]
+    async fn snapshot_trigger_failure_rolls_back_every_mutation() {
+        let store = make_in_memory_store().await;
+        store
+            .upsert_folder(&FolderRow {
+                name: "Inbox".into(),
+                delim: None,
+                special_use: None,
+                attrs: None,
+                uidvalidity: Some(1),
+                uidnext: Some(7),
+                delta_link: None,
+            })
+            .await
+            .unwrap();
+        let mut old = make_row("Inbox", 1, None);
+        old.uidvalidity = 1;
+        old.maildir_path = Some("cur/body".into());
+        old.headers_only = 0;
+        old.thread_id = Some("thread".into());
+        store.upsert_message(&old).await.unwrap();
+        store
+            .index_for_search("Inbox", 1, 1, "oldsecret", "", "", "oldsecret")
+            .await
+            .unwrap();
+        sqlx::query("CREATE TRIGGER reject_snapshot BEFORE INSERT ON messages WHEN NEW.uid = 2 BEGIN SELECT RAISE(ABORT, 'reject'); END").execute(store.pool()).await.unwrap();
+        let generation = store.reserve_snapshot_generation("Inbox").await.unwrap();
+        let result = store
+            .apply_snapshot(SnapshotInput {
+                folder: "Inbox".into(),
+                generation,
+                complete: true,
+                transport: SnapshotTransport::Imap { uidvalidity: 2 },
+                rows: vec![SnapshotHeader {
+                    uid: 2,
+                    uidvalidity: 2,
+                    message_id: None,
+                    subject: Some("new".into()),
+                    from_addr: None,
+                    to_addrs: None,
+                    date_unix: None,
+                    flags: String::new(),
+                    fetched_at_unix: 1,
+                    provider_id: None,
+                }],
+            })
+            .await;
+        assert!(result.is_err());
+        assert_eq!(store.folder_uidvalidity("Inbox").await.unwrap(), Some(1));
+        let rows = store.list_messages("Inbox", 10).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].maildir_path.as_deref(), Some("cur/body"));
+        assert_eq!(rows[0].thread_id.as_deref(), Some("thread"));
+        assert_eq!(store.search("oldsecret", 10).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn delete_provider_ids_removes_exact_rows_and_fts() {
+        let store = make_in_memory_store().await;
+        let mut deleted = make_row("Inbox", 1, Some("graph-deleted"));
+        deleted.uidvalidity = 1;
+        store.upsert_message(&deleted).await.unwrap();
+        store
+            .index_for_search("Inbox", 1, 1, "removedsecret", "", "", "removedsecret")
+            .await
+            .unwrap();
+        let mut kept = make_row("Inbox", 2, Some("graph-kept"));
+        kept.uidvalidity = 1;
+        store.upsert_message(&kept).await.unwrap();
+
+        store
+            .delete_messages_by_provider_ids("Inbox", &["graph-deleted".into()])
+            .await
+            .unwrap();
+        assert_eq!(store.list_messages("Inbox", 10).await.unwrap().len(), 1);
+        assert_eq!(
+            store.provider_id_for("Inbox", 2).await.unwrap().as_deref(),
+            Some("graph-kept")
+        );
+        assert!(store.search("removedsecret", 10).await.unwrap().is_empty());
+        store
+            .delete_messages_by_provider_ids("Inbox", &[])
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn opaque_snapshot_new_rows_are_selected_by_provider_id() {
+        let store = make_in_memory_store().await;
+        let existing = SnapshotHeader {
+            uid: 1,
+            uidvalidity: 0,
+            message_id: None,
+            subject: None,
+            from_addr: None,
+            to_addrs: None,
+            date_unix: None,
+            flags: String::new(),
+            fetched_at_unix: 0,
+            provider_id: Some("opaque-existing".into()),
+        };
+        let generation = store.reserve_snapshot_generation("Inbox").await.unwrap();
+        store
+            .apply_snapshot(SnapshotInput {
+                folder: "Inbox".into(),
+                generation,
+                complete: true,
+                transport: SnapshotTransport::Opaque,
+                rows: vec![existing.clone()],
+            })
+            .await
+            .unwrap();
+        let mut new = existing.clone();
+        new.uid = 2;
+        new.provider_id = Some("opaque-new".into());
+        let output = store
+            .apply_snapshot(SnapshotInput {
+                folder: "Inbox".into(),
+                generation: store.reserve_snapshot_generation("Inbox").await.unwrap(),
+                complete: true,
+                transport: SnapshotTransport::Opaque,
+                rows: vec![existing, new],
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            output
+                .new_rows
+                .iter()
+                .map(|row| row.provider_id.as_deref())
+                .collect::<Vec<_>>(),
+            [Some("opaque-new")]
+        );
+    }
+
+    #[tokio::test]
+    async fn purge_deleted_matches_complete_flag_tokens() {
+        let store = make_in_memory_store().await;
+        for (uid, flags) in [
+            (1, "\\Deleted"),
+            (2, "\\Seen \\Deleted \\Flagged"),
+            (3, "Deleted"),
+            (4, "\\Seen Deleted \\Flagged"),
+            (5, "DeletedFoo"),
+            (6, "\\DeletedFoo"),
+        ] {
+            let mut row = make_row("Inbox", uid, None);
+            row.flags = flags.into();
+            store.upsert_message(&row).await.unwrap();
+        }
+
+        assert_eq!(store.purge_deleted("Inbox").await.unwrap(), 4);
+        let rows = store.list_messages("Inbox", 10).await.unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows.iter().map(|row| row.uid).collect::<Vec<_>>(), [5, 6]);
+    }
+
+    #[tokio::test]
+    async fn delete_trigger_removes_fts_before_rowid_reuse() {
+        let store = make_in_memory_store().await;
+        let mut old = make_row("Inbox", 1, None);
+        old.uidvalidity = 1;
+        store.upsert_message(&old).await.unwrap();
+        store
+            .index_for_search("Inbox", 1, 1, "oldsecret", "", "", "oldsecret")
+            .await
+            .unwrap();
+        store.delete_messages("Inbox", &[1]).await.unwrap();
+        let mut replacement = make_row("Inbox", 2, None);
+        replacement.uidvalidity = 1;
+        store.upsert_message(&replacement).await.unwrap();
+        assert!(store.search("oldsecret", 10).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn opaque_snapshot_preserves_unambiguous_legacy_message_id() {
+        let store = make_in_memory_store().await;
+        let mut legacy = make_row("Inbox", 99, None);
+        legacy.message_id = Some("stable@example.test".into());
+        legacy.maildir_path = Some("cur/downloaded".into());
+        legacy.headers_only = 0;
+        store.upsert_message(&legacy).await.unwrap();
+        let generation = store.reserve_snapshot_generation("Inbox").await.unwrap();
+        let output = store
+            .apply_snapshot(SnapshotInput {
+                folder: "Inbox".into(),
+                generation,
+                complete: true,
+                transport: SnapshotTransport::Opaque,
+                rows: vec![SnapshotHeader {
+                    uid: 500,
+                    uidvalidity: 0,
+                    message_id: Some("stable@example.test".into()),
+                    subject: None,
+                    from_addr: None,
+                    to_addrs: None,
+                    date_unix: None,
+                    flags: String::new(),
+                    fetched_at_unix: 1,
+                    provider_id: Some("provider-500".into()),
+                }],
+            })
+            .await
+            .unwrap();
+        assert!(output.new_rows.is_empty());
+        let rows = store.list_messages("Inbox", 10).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].uid, 500);
+        assert_eq!(rows[0].provider_id.as_deref(), Some("provider-500"));
+        assert_eq!(rows[0].maildir_path.as_deref(), Some("cur/downloaded"));
+    }
+
+    #[tokio::test]
+    async fn opaque_snapshot_does_not_rekey_duplicate_message_ids() {
+        let store = make_in_memory_store().await;
+        let mut legacy = make_row("Inbox", 99, None);
+        legacy.message_id = Some("stable@example.test".into());
+        legacy.maildir_path = Some("cur/downloaded".into());
+        legacy.headers_only = 0;
+        store.upsert_message(&legacy).await.unwrap();
+        let generation = store.reserve_snapshot_generation("Inbox").await.unwrap();
+        let header = SnapshotHeader {
+            uid: 500,
+            uidvalidity: 0,
+            message_id: Some("stable@example.test".into()),
+            subject: None,
+            from_addr: None,
+            to_addrs: None,
+            date_unix: None,
+            flags: String::new(),
+            fetched_at_unix: 1,
+            provider_id: Some("provider-500".into()),
+        };
+        let mut duplicate = header.clone();
+        duplicate.uid = 501;
+        duplicate.provider_id = Some("provider-501".into());
+        store
+            .apply_snapshot(SnapshotInput {
+                folder: "Inbox".into(),
+                generation,
+                complete: true,
+                transport: SnapshotTransport::Opaque,
+                rows: vec![header, duplicate],
+            })
+            .await
+            .unwrap();
+        let rows = store.list_messages("Inbox", 10).await.unwrap();
+        let legacy = rows.iter().find(|row| row.uid == 99).unwrap();
+        assert_eq!(legacy.provider_id, None);
+        assert_eq!(legacy.maildir_path.as_deref(), Some("cur/downloaded"));
+    }
+
+    #[tokio::test]
+    async fn opaque_snapshot_rejects_invalid_identity_before_mutation() {
+        let store = make_in_memory_store().await;
+        let generation = store.reserve_snapshot_generation("Inbox").await.unwrap();
+        let row = SnapshotHeader {
+            uid: 1,
+            uidvalidity: 0,
+            message_id: None,
+            subject: None,
+            from_addr: None,
+            to_addrs: None,
+            date_unix: None,
+            flags: String::new(),
+            fetched_at_unix: 0,
+            provider_id: None,
+        };
+        assert!(matches!(
+            store
+                .apply_snapshot(SnapshotInput {
+                    folder: "Inbox".into(),
+                    generation,
+                    complete: true,
+                    transport: SnapshotTransport::Opaque,
+                    rows: vec![row]
+                })
+                .await,
+            Err(Error::InvalidSnapshot(_))
+        ));
+        assert!(store.list_messages("Inbox", 10).await.unwrap().is_empty());
     }
 
     /// Missing uid returns None.

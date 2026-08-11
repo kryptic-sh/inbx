@@ -1,15 +1,13 @@
-use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_imap::Authenticator;
 use async_imap::Session;
 use async_imap::imap_proto::types::NameAttribute;
-use futures_util::StreamExt;
+use futures_util::{TryStream, TryStreamExt};
 use inbx_config::{Account, AuthMethod, TlsMode};
 
-use crate::{oauth, proxy};
+use crate::{oauth, proxy, tls};
 use rustls::pki_types::ServerName;
-use rustls::{ClientConfig, RootCertStore};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufStream};
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
@@ -41,18 +39,17 @@ pub enum Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-fn tls_config() -> Arc<ClientConfig> {
-    let mut roots = RootCertStore::empty();
-    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    Arc::new(
-        ClientConfig::builder()
-            .with_root_certificates(roots)
-            .with_no_client_auth(),
-    )
+/// Collect an authoritative protocol stream without converting item errors into
+/// a partial result.
+async fn collect_stream<T, E, S>(stream: S) -> std::result::Result<Vec<T>, E>
+where
+    S: TryStream<Ok = T, Error = E>,
+{
+    stream.try_collect().await
 }
 
 async fn upgrade_tls(stream: TcpStream, host: &str) -> Result<TlsStream<TcpStream>> {
-    let connector = TlsConnector::from(tls_config());
+    let connector = TlsConnector::from(tls::CLIENT_CONFIG.clone());
     let server_name = ServerName::try_from(host.to_string())?;
     Ok(connector.connect(server_name, stream).await?)
 }
@@ -177,8 +174,7 @@ pub struct FolderInfo {
 /// Enumerate all mailboxes via `LIST "" "*"`.
 pub async fn list_folders(session: &mut ImapSession) -> Result<Vec<FolderInfo>> {
     let stream = session.list(Some(""), Some("*")).await?;
-    let names: Vec<async_imap::types::Name> =
-        stream.filter_map(|r| async move { r.ok() }).collect().await;
+    let names: Vec<async_imap::types::Name> = collect_stream(stream).await?;
 
     let mut out = Vec::with_capacity(names.len());
     for n in &names {
@@ -217,7 +213,7 @@ pub async fn list_folders(session: &mut ImapSession) -> Result<Vec<FolderInfo>> 
 
 #[derive(Debug, Clone)]
 pub struct HeaderRow {
-    pub uid: u32,
+    pub uid: i64,
     pub uidvalidity: u32,
     pub message_id: Option<String>,
     pub subject: Option<String>,
@@ -298,8 +294,7 @@ pub async fn fetch_headers_uids(
     let stream = session
         .uid_fetch(set, "(UID FLAGS ENVELOPE INTERNALDATE)")
         .await?;
-    let fetches: Vec<async_imap::types::Fetch> =
-        stream.filter_map(|r| async move { r.ok() }).collect().await;
+    let fetches: Vec<async_imap::types::Fetch> = collect_stream(stream).await?;
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -317,10 +312,10 @@ pub async fn fetch_headers_uids(
         let from_addr = env.and_then(|e| e.from.as_ref()).map(|v| format_addrs(v));
         let to_addrs = env.and_then(|e| e.to.as_ref()).map(|v| format_addrs(v));
         let date_unix = f.internal_date().map(|d| d.timestamp());
-        let flags: Vec<String> = f.flags().map(|fl| format!("{fl:?}")).collect();
+        let flags: Vec<String> = f.flags().map(imap_flag_token).collect();
         let flags = flags.join(" ");
         out.push(HeaderRow {
-            uid,
+            uid: i64::from(uid),
             uidvalidity,
             message_id,
             subject,
@@ -350,8 +345,7 @@ pub async fn fetch_headers(
     let stream = session
         .uid_fetch("1:*", "(UID FLAGS ENVELOPE INTERNALDATE)")
         .await?;
-    let fetches: Vec<async_imap::types::Fetch> =
-        stream.filter_map(|r| async move { r.ok() }).collect().await;
+    let fetches: Vec<async_imap::types::Fetch> = collect_stream(stream).await?;
 
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -372,11 +366,11 @@ pub async fn fetch_headers(
         let to_addrs = env.and_then(|e| e.to.as_ref()).map(|v| format_addrs(v));
         let date_unix = f.internal_date().map(|d| d.timestamp());
 
-        let flags: Vec<String> = f.flags().map(|fl| format!("{fl:?}")).collect();
+        let flags: Vec<String> = f.flags().map(imap_flag_token).collect();
         let flags = flags.join(" ");
 
         out.push(HeaderRow {
-            uid,
+            uid: i64::from(uid),
             uidvalidity,
             message_id,
             subject,
@@ -409,8 +403,7 @@ pub async fn fetch_headers_since(
     let stream = session
         .uid_fetch(&seq, "(UID FLAGS ENVELOPE INTERNALDATE)")
         .await?;
-    let fetches: Vec<async_imap::types::Fetch> =
-        stream.filter_map(|r| async move { r.ok() }).collect().await;
+    let fetches: Vec<async_imap::types::Fetch> = collect_stream(stream).await?;
 
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -435,11 +428,11 @@ pub async fn fetch_headers_since(
         let to_addrs = env.and_then(|e| e.to.as_ref()).map(|v| format_addrs(v));
         let date_unix = f.internal_date().map(|d| d.timestamp());
 
-        let flags: Vec<String> = f.flags().map(|fl| format!("{fl:?}")).collect();
+        let flags: Vec<String> = f.flags().map(imap_flag_token).collect();
         let flags = flags.join(" ");
 
         out.push(HeaderRow {
-            uid,
+            uid: i64::from(uid),
             uidvalidity,
             message_id,
             subject,
@@ -472,8 +465,7 @@ pub async fn fetch_bodies(
     session.select(folder).await?;
     let set = uid_set(uids);
     let stream = session.uid_fetch(set, "(UID BODY.PEEK[])").await?;
-    let fetches: Vec<async_imap::types::Fetch> =
-        stream.filter_map(|r| async move { r.ok() }).collect().await;
+    let fetches: Vec<async_imap::types::Fetch> = collect_stream(stream).await?;
     let mut out = Vec::with_capacity(fetches.len());
     for f in fetches {
         let Some(uid) = f.uid else { continue };
@@ -558,8 +550,7 @@ pub async fn store_flags(
         .join(",");
     let arg = format!("({flags})");
     let stream = session.uid_store(set, format!("{op} {arg}")).await?;
-    let _: Vec<async_imap::types::Fetch> =
-        stream.filter_map(|r| async move { r.ok() }).collect().await;
+    let _: Vec<async_imap::types::Fetch> = collect_stream(stream).await?;
     Ok(())
 }
 
@@ -567,7 +558,7 @@ pub async fn store_flags(
 pub async fn expunge_folder(session: &mut ImapSession, folder: &str) -> Result<u32> {
     session.select(folder).await?;
     let stream = session.expunge().await?;
-    let removed: Vec<u32> = stream.filter_map(|r| async move { r.ok() }).collect().await;
+    let removed: Vec<u32> = collect_stream(stream).await?;
     Ok(removed.len() as u32)
 }
 
@@ -646,6 +637,19 @@ pub async fn append_message(session: &mut ImapSession, folder: &str, raw: &[u8])
     Ok(())
 }
 
+fn imap_flag_token(flag: async_imap::types::Flag<'_>) -> String {
+    match flag {
+        async_imap::types::Flag::Seen => "\\Seen".into(),
+        async_imap::types::Flag::Answered => "\\Answered".into(),
+        async_imap::types::Flag::Flagged => "\\Flagged".into(),
+        async_imap::types::Flag::Deleted => "\\Deleted".into(),
+        async_imap::types::Flag::Draft => "\\Draft".into(),
+        async_imap::types::Flag::Recent => "\\Recent".into(),
+        async_imap::types::Flag::MayCreate => "\\*".into(),
+        async_imap::types::Flag::Custom(value) => value.to_string(),
+    }
+}
+
 fn format_addrs(addrs: &[async_imap::imap_proto::types::Address<'_>]) -> String {
     addrs
         .iter()
@@ -671,4 +675,39 @@ fn format_addrs(addrs: &[async_imap::imap_proto::types::Address<'_>]) -> String 
         })
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+#[cfg(test)]
+mod tests {
+    use std::borrow::Cow;
+
+    use super::{collect_stream, imap_flag_token};
+
+    #[test]
+    fn imap_flag_tokens_are_canonical_not_debug_labels() {
+        use async_imap::types::Flag;
+
+        for (flag, expected) in [
+            (Flag::Seen, "\\Seen"),
+            (Flag::Answered, "\\Answered"),
+            (Flag::Flagged, "\\Flagged"),
+            (Flag::Deleted, "\\Deleted"),
+            (Flag::Draft, "\\Draft"),
+            (Flag::Recent, "\\Recent"),
+            (Flag::MayCreate, "\\*"),
+            (Flag::Custom(Cow::Borrowed("$custom")), "$custom"),
+        ] {
+            assert_eq!(imap_flag_token(flag), expected);
+        }
+        assert_ne!(
+            format!("{:?}", Flag::Deleted),
+            imap_flag_token(Flag::Deleted)
+        );
+    }
+
+    #[tokio::test]
+    async fn authoritative_stream_error_is_not_a_partial_vector() {
+        let stream = futures_util::stream::iter([Ok::<_, &'static str>(1), Err("bad item")]);
+        assert_eq!(collect_stream(stream).await, Err("bad item"));
+    }
 }

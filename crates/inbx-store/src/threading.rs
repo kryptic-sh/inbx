@@ -1,14 +1,36 @@
-use sqlx::SqlitePool;
+use sqlx::{QueryBuilder, Sqlite, SqlitePool};
 
 use crate::Result;
 
+/// SQLite permits at most 32766 bindings; each placeholder consumes three.
+const PLACEHOLDER_BATCH_SIZE: usize = 10_000;
+
+fn placeholder_batches<'a>(
+    refs: &'a [&'a str],
+    batch_size: usize,
+) -> impl Iterator<Item = &'a [&'a str]> {
+    refs.chunks(batch_size.max(1))
+}
+
 pub(crate) struct Threader<'a> {
     pool: &'a SqlitePool,
+    placeholder_batch_size: usize,
 }
 
 impl<'a> Threader<'a> {
     pub(crate) fn new(pool: &'a SqlitePool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            placeholder_batch_size: PLACEHOLDER_BATCH_SIZE,
+        }
+    }
+
+    #[cfg(test)]
+    fn with_placeholder_batch_size(pool: &'a SqlitePool, placeholder_batch_size: usize) -> Self {
+        Self {
+            pool,
+            placeholder_batch_size,
+        }
     }
 
     /// Insert / update a container for `message_id`, link its References
@@ -44,16 +66,17 @@ impl<'a> Threader<'a> {
             chain.push(irt);
         }
 
-        // Upsert placeholder containers for all referenced ids.
-        for &ref_id in &chain {
-            sqlx::query(
-                "INSERT INTO thread_containers (message_id, root_id, has_message)
-                 VALUES (?1, ?1, 0)
-                 ON CONFLICT(message_id) DO NOTHING",
-            )
-            .bind(ref_id)
-            .execute(self.pool)
-            .await?;
+        if !chain.is_empty() {
+            for batch in placeholder_batches(&chain, self.placeholder_batch_size) {
+                let mut query = QueryBuilder::<Sqlite>::new(
+                    "INSERT INTO thread_containers (message_id, root_id, has_message) ",
+                );
+                query.push_values(batch, |mut row, ref_id| {
+                    row.push_bind(ref_id).push_bind(ref_id).push_bind(0);
+                });
+                query.push(" ON CONFLICT(message_id) DO NOTHING");
+                query.build().execute(self.pool).await?;
+            }
         }
 
         // Link consecutive pairs in the chain: chain[i] is parent of chain[i+1].
@@ -220,42 +243,40 @@ impl<'a> Threader<'a> {
     /// Walk parent_id chain from `start` upward.
     /// Returns the message_id of the root (the one with parent_id IS NULL).
     async fn find_root(&self, start: &str) -> Result<String> {
-        let mut current = start.to_string();
-        // Guard against cycles (shouldn't happen after cycle checks, but be safe).
-        for _ in 0..1000 {
-            let row: Option<(Option<String>,)> =
-                sqlx::query_as("SELECT parent_id FROM thread_containers WHERE message_id = ?1")
-                    .bind(&current)
-                    .fetch_optional(self.pool)
-                    .await?;
-            match row {
-                Some((Some(parent),)) => current = parent,
-                _ => break,
-            }
-        }
-        Ok(current)
+        let root: Option<(String,)> = sqlx::query_as(
+            "WITH RECURSIVE ancestors(id, parent_id) AS (
+                 SELECT message_id, parent_id FROM thread_containers WHERE message_id = ?1
+                 UNION
+                 SELECT tc.message_id, tc.parent_id
+                 FROM thread_containers tc JOIN ancestors ON tc.message_id = ancestors.parent_id
+             )
+             SELECT id FROM ancestors WHERE parent_id IS NULL LIMIT 1",
+        )
+        .bind(start)
+        .fetch_optional(self.pool)
+        .await?;
+        root.map(|(id,)| id)
+            .ok_or_else(|| crate::Error::ThreadRoot(start.to_string()))
     }
 
     /// Returns true if setting `node`'s parent to `proposed_parent` would
     /// create a cycle. We walk upward from `proposed_parent`; if we reach
     /// `node`, it's a cycle.
     async fn would_create_cycle(&self, node: &str, proposed_parent: &str) -> Result<bool> {
-        let mut current = proposed_parent.to_string();
-        for _ in 0..1000 {
-            if current == node {
-                return Ok(true);
-            }
-            let row: Option<(Option<String>,)> =
-                sqlx::query_as("SELECT parent_id FROM thread_containers WHERE message_id = ?1")
-                    .bind(&current)
-                    .fetch_optional(self.pool)
-                    .await?;
-            match row {
-                Some((Some(parent),)) => current = parent,
-                _ => break,
-            }
-        }
-        Ok(false)
+        let hit: Option<(i64,)> = sqlx::query_as(
+            "WITH RECURSIVE ancestors(id, parent_id) AS (
+                 SELECT message_id, parent_id FROM thread_containers WHERE message_id = ?1
+                 UNION
+                 SELECT tc.message_id, tc.parent_id
+                 FROM thread_containers tc JOIN ancestors ON tc.message_id = ancestors.parent_id
+             )
+             SELECT 1 FROM ancestors WHERE id = ?2 LIMIT 1",
+        )
+        .bind(proposed_parent)
+        .bind(node)
+        .fetch_optional(self.pool)
+        .await?;
+        Ok(hit.is_some())
     }
 }
 
@@ -328,4 +349,51 @@ fn is_reply_or_fwd(s: &str) -> bool {
         || lower.starts_with("fwd:")
         || lower.starts_with("fw:")
         || (lower.starts_with("re[") && lower.contains("]:"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+
+    #[tokio::test]
+    async fn placeholder_batches_link_every_chain_parent() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(SqliteConnectOptions::new().in_memory(true))
+            .await
+            .unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        let refs = (0..5).map(|i| format!("ref-{i}")).collect::<Vec<_>>();
+        let ref_ids = refs.iter().map(String::as_str).collect::<Vec<_>>();
+        assert_eq!(
+            placeholder_batches(&ref_ids, 2)
+                .map(|batch| batch.len())
+                .collect::<Vec<_>>(),
+            vec![2, 2, 1]
+        );
+        Threader::with_placeholder_batch_size(&pool, 2)
+            .ingest("message", None, &refs, None)
+            .await
+            .unwrap();
+        for (index, id) in refs.iter().enumerate() {
+            let parent: Option<String> =
+                sqlx::query_scalar("SELECT parent_id FROM thread_containers WHERE message_id = ?1")
+                    .bind(id)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(
+                parent.as_deref(),
+                index.checked_sub(1).map(|i| refs[i].as_str())
+            );
+        }
+        let parent: Option<String> = sqlx::query_scalar(
+            "SELECT parent_id FROM thread_containers WHERE message_id = 'message'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(parent.as_deref(), Some("ref-4"));
+    }
 }

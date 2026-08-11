@@ -5,7 +5,7 @@ use anyhow::Result;
 use hjkl_clipboard::{Clipboard, MimeType as ClipMime, Selection};
 use hjkl_picker::Picker;
 use inbx_composer::{Composer, FocusedEditor, Identity};
-use inbx_config::Account;
+use inbx_config::{Account, Transport};
 use inbx_contacts::{Contact, ContactsStore, PubkeyLookup};
 use inbx_render::RemotePolicy;
 use inbx_store::{FolderRow, MessageRow, OutboxRow, Store};
@@ -393,6 +393,13 @@ fn attachment_file_name(name: &str) -> &str {
         .and_then(|n| n.to_str())
         .filter(|n| !n.is_empty() && *n != ".." && *n != ".")
         .unwrap_or("attachment")
+}
+
+fn validate_imap_copy_uid(transport: &Transport, uid: i64) -> Result<u32> {
+    if !matches!(transport, Transport::Imap) {
+        anyhow::bail!("inbx cp is only supported for IMAP accounts");
+    }
+    u32::try_from(uid).map_err(Into::into)
 }
 
 impl App {
@@ -1233,9 +1240,9 @@ impl App {
         let Some(msg) = self.current_message().cloned() else {
             return Ok(());
         };
-        // UID COPY is IMAP-only — connect_imap directly.
+        let uid = validate_imap_copy_uid(&self.account.transport, msg.uid)?;
         let mut session = inbx_net::connect_imap(&self.account).await?;
-        inbx_net::uid_copy(&mut session, &source, &[msg.uid as u32], target).await?;
+        inbx_net::uid_copy(&mut session, &source, &[uid], target).await?;
         let _ = session.logout().await;
         self.status = format!("copied uid {} → {target}", msg.uid);
         Ok(())
@@ -2105,65 +2112,19 @@ async fn do_manual_sync(
     use super::tasks::TaskResult;
     let result: anyhow::Result<(i64, usize, usize)> = async {
         let mut provider = inbx_net::connect_provider(&account, Some(&store)).await?;
-        let rows = provider.fetch_headers(&folder_name, None, 500).await?;
-        // JMAP uses uidvalidity=0; IMAP rows carry real uidvalidity but
-        // HeaderRow.uidvalidity is already u32→i64 clean.
-        let uidvalidity: i64 = rows.first().map(|r| r.uidvalidity as i64).unwrap_or(0);
-        let prev = store.folder_uidvalidity(&folder_name).await?;
-        if let Some(prev) = prev
-            && prev as u32 != uidvalidity as u32
-            && uidvalidity != 0
-        {
-            store.wipe_folder_messages(&folder_name).await?;
+        let generation = store.reserve_snapshot_generation(&folder_name).await?;
+        let snapshot = provider.fetch_headers(&folder_name, None, 500).await?;
+        let total = snapshot.rows.len();
+        let applied = inbx_sync::apply_snapshot(&store, &folder_name, generation, snapshot).await?;
+        if !applied.applied {
+            anyhow::bail!("snapshot superseded before it could be applied");
         }
-        store
-            .upsert_folder(&inbx_store::FolderRow {
-                name: folder_name.clone(),
-                delim: None,
-                special_use: None,
-                attrs: None,
-                uidvalidity: Some(uidvalidity),
-                uidnext: None,
-                delta_link: None,
-            })
-            .await?;
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
-        let pre_max = store
-            .folder_max_uid(&folder_name, uidvalidity)
-            .await?
-            .unwrap_or(0);
-        let mut new_count = 0usize;
-        for h in &rows {
-            if (h.uid as i64) > pre_max {
-                new_count += 1;
-            }
-            store
-                .upsert_message(&inbx_store::MessageRow {
-                    folder: folder_name.clone(),
-                    uid: h.uid as i64,
-                    uidvalidity: h.uidvalidity as i64,
-                    message_id: h.message_id.clone(),
-                    subject: h.subject.clone(),
-                    from_addr: h.from_addr.clone(),
-                    to_addrs: h.to_addrs.clone(),
-                    date_unix: h.date_unix,
-                    flags: h.flags.clone(),
-                    maildir_path: None,
-                    headers_only: 1,
-                    fetched_at_unix: now,
-                    in_reply_to: None,
-                    refs: None,
-                    thread_id: None,
-                    provider_id: h.provider_id.clone(),
-                })
-                .await?;
-        }
-        // IMAP sessions need logout; JMAP is stateless HTTP (no-op).
         drop(provider);
-        Ok((now, new_count, rows.len()))
+        Ok((now, applied.new_count(), total))
     }
     .await;
     match result {
@@ -2201,6 +2162,8 @@ async fn do_fetch_body(
         let raw = provider.fetch_body(&folder_name, uid).await?;
         drop(provider);
         let path = store.write_maildir(&folder_name, &raw, &flags)?;
+        // Leave the row unfetched if indexing fails so the next sync retries it.
+        inbx_sync::index_in_store(&store, &folder_name, uid, uidvalidity, &raw).await?;
         store
             .set_maildir_path(&folder_name, uid, uidvalidity, &path.to_string_lossy())
             .await?;
@@ -2814,7 +2777,7 @@ async fn do_watch(
                     tokio::time::sleep(std::time::Duration::from_secs(75)).await;
                     continue;
                 }
-                tracing::debug!(count = messages.len(), "watch: Graph delta — new messages");
+                tracing::debug!(count = messages.len(), "watch: Graph delta — changes");
             }
         }
 
@@ -2838,6 +2801,23 @@ impl Drop for App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn copy_validation_requires_imap_and_valid_uid() {
+        assert!(validate_imap_copy_uid(&Transport::Graph, 7).is_err());
+        assert!(
+            validate_imap_copy_uid(
+                &Transport::Jmap {
+                    session_url: "https://jmap.example.test/session".into(),
+                },
+                7,
+            )
+            .is_err()
+        );
+        assert!(validate_imap_copy_uid(&Transport::Imap, -1).is_err());
+        assert!(validate_imap_copy_uid(&Transport::Imap, i64::from(u32::MAX) + 1).is_err());
+        assert_eq!(validate_imap_copy_uid(&Transport::Imap, 42).unwrap(), 42);
+    }
 
     #[test]
     fn search_step_wraps_forward_at_end() {

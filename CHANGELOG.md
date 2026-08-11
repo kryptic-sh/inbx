@@ -31,6 +31,28 @@ patch bumps.
 
 ### Fixed
 
+- Sync: IMAP, JMAP, and Graph accounts now use their configured provider for
+  folder snapshots. Complete snapshots are validated and applied atomically with
+  database-issued generations, preventing partial, stale, unreserved, or
+  replayed results from pruning newer local state.
+- JMAP and Graph: preserve full opaque message identities, validate complete
+  pagination and provider-level errors, batch JMAP requests to advertised server
+  limits, reject continuation loops, require Graph delta checkpoints, process
+  tombstones in final-occurrence order, and persist delta state only after all
+  message processing succeeds.
+- JMAP: download exact RFC 5322 bodies through the session `downloadUrl`,
+  surface per-object mutation failures, preserve mailbox hierarchy with lossless
+  path escaping, and expunge every deleted-message batch.
+- IMAP: store canonical flag tokens and purge both canonical and legacy deleted
+  tokens locally after successful server expunge.
+- Storage: snapshot reconciliation preserves ambiguous legacy rows, avoids false
+  new-mail notifications for rows it safely rekeys, removes stale FTS entries on
+  message deletion, and batches thread ingestion below SQLite's bind limit.
+- Network hardening: propagate IMAP stream item errors, bound JMAP EventSource
+  records and ManageSieve responses, and require valid bounded ManageSieve
+  post-literal delimiters.
+- Sync: index downloaded bodies before recording their Maildir paths so failed
+  indexing cannot leave rows marked as completely fetched.
 - Docs: `README.md`, `CONTRIBUTING.md`, `SECURITY.md`, `PLAN.md`, and
   `docs/threat-model.md` corrected against the tree — the workspace listings
   named a nonexistent `inbx-core` crate and omitted `inbx-pgp`, `inbx-dav`,

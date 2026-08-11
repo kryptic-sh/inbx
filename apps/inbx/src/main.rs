@@ -310,7 +310,7 @@ enum Cmd {
         #[arg(value_parser = ["read", "unread", "star", "unstar", "trash"])]
         verb: String,
         #[arg(num_args = 1.., required = true)]
-        uid: Vec<u32>,
+        uid: Vec<i64>,
     },
     /// EXPUNGE messages flagged \Deleted in a folder.
     Expunge {
@@ -328,7 +328,7 @@ enum Cmd {
         #[arg(long)]
         to: String,
         #[arg(long, num_args = 1.., required = true)]
-        uid: Vec<u32>,
+        uid: Vec<i64>,
     },
     /// UID COPY messages between folders.
     Cp {
@@ -348,7 +348,7 @@ enum Cmd {
         #[arg(long, default_value = "INBOX")]
         folder: String,
         #[arg(long, num_args = 1.., required = true)]
-        uid: Vec<u32>,
+        uid: Vec<i64>,
         /// Flags to add (repeatable, e.g. `--add "\\Seen"`).
         #[arg(long = "add")]
         add: Vec<String>,
@@ -1105,13 +1105,13 @@ async fn main() -> Result<()> {
                 from,
                 to,
                 uid,
-            } => cmd_move_or_copy(account, from, to, uid, false).await,
+            } => cmd_move_or_copy(account, from, to, uid).await,
             Cmd::Cp {
                 account,
                 from,
                 to,
                 uid,
-            } => cmd_move_or_copy(account, from, to, uid, true).await,
+            } => cmd_copy(account, from, to, uid).await,
             Cmd::Flag {
                 account,
                 folder,
@@ -1400,7 +1400,7 @@ async fn graph_delta_tick(acct: &inbx_config::Account, folder: &str) -> Result<(
         tracing::debug!("Graph delta: no changes; sleeping 75s");
         tokio::time::sleep(std::time::Duration::from_secs(75)).await;
     } else {
-        tracing::info!(count = messages.len(), "Graph delta: new messages");
+        tracing::info!(count = messages.len(), "Graph delta: changes");
     }
     Ok(())
 }
@@ -1481,7 +1481,7 @@ async fn cmd_mark(
     account: Option<String>,
     folder: String,
     verb: String,
-    uids: Vec<u32>,
+    uids: Vec<i64>,
 ) -> Result<()> {
     let cfg = inbx_config::load()?;
     let acct = pick_account(&cfg, account.as_deref())?.clone();
@@ -1506,16 +1506,15 @@ async fn cmd_mark(
     let store = inbx_store::Store::open(&acct.name).await?;
     let mut provider = inbx_net::connect_provider(&acct, Some(&store)).await?;
     for &uid in &uids {
-        provider
-            .set_flags(&folder, uid as i64, &add, &remove)
-            .await?;
+        provider.set_flags(&folder, uid, &add, &remove).await?;
     }
     drop(provider);
-    let local_uids: Vec<i64> = uids.iter().map(|u| *u as i64).collect();
+    let local_count = uids.len();
+    let local_uids = uids;
     store
         .mutate_flags(&folder, &local_uids, &add, &remove)
         .await?;
-    println!("{verb}: {} message(s) in {folder}", uids.len());
+    println!("{verb}: {local_count} message(s) in {folder}");
     Ok(())
 }
 
@@ -1535,40 +1534,38 @@ async fn cmd_move_or_copy(
     account: Option<String>,
     from: String,
     to: String,
-    uids: Vec<u32>,
-    copy: bool,
+    uids: Vec<i64>,
 ) -> Result<()> {
     let cfg = inbx_config::load()?;
     let acct = pick_account(&cfg, account.as_deref())?.clone();
-    if copy {
-        // UID COPY has no cross-protocol equivalent on JMAP/Graph — bail unless IMAP.
-        if !matches!(acct.transport, inbx_config::Transport::Imap) {
-            bail!(
-                "inbx cp not yet supported on JMAP/Graph; use inbx mv or the provider-specific subcommand"
-            );
-        }
-        let mut session = inbx_net::connect_imap(&acct).await?;
-        inbx_net::uid_copy(&mut session, &from, &uids, &to).await?;
-        let _ = session.logout().await;
-        println!("copied {} message(s) {from} → {to}", uids.len());
-    } else {
-        let store = inbx_store::Store::open(&acct.name).await?;
-        let mut provider = inbx_net::connect_provider(&acct, Some(&store)).await?;
-        for &uid in &uids {
-            provider.move_message(&from, uid as i64, &to).await?;
-        }
-        drop(provider);
-        let local: Vec<i64> = uids.iter().map(|u| *u as i64).collect();
-        store.delete_messages(&from, &local).await?;
-        println!("moved {} message(s) {from} → {to}", uids.len());
+    let store = inbx_store::Store::open(&acct.name).await?;
+    let mut provider = inbx_net::connect_provider(&acct, Some(&store)).await?;
+    for &uid in &uids {
+        provider.move_message(&from, uid, &to).await?;
     }
+    drop(provider);
+    store.delete_messages(&from, &uids).await?;
+    println!("moved {} message(s) {from} → {to}", uids.len());
+    Ok(())
+}
+
+async fn cmd_copy(account: Option<String>, from: String, to: String, uids: Vec<u32>) -> Result<()> {
+    let cfg = inbx_config::load()?;
+    let acct = pick_account(&cfg, account.as_deref())?.clone();
+    if !matches!(acct.transport, inbx_config::Transport::Imap) {
+        bail!("inbx cp is only supported for IMAP accounts");
+    }
+    let mut session = inbx_net::connect_imap(&acct).await?;
+    inbx_net::uid_copy(&mut session, &from, &uids, &to).await?;
+    let _ = session.logout().await;
+    println!("copied {} message(s) {from} → {to}", uids.len());
     Ok(())
 }
 
 async fn cmd_flag(
     account: Option<String>,
     folder: String,
-    uids: Vec<u32>,
+    uids: Vec<i64>,
     add: Vec<String>,
     del: Vec<String>,
 ) -> Result<()> {
@@ -1583,13 +1580,12 @@ async fn cmd_flag(
     let mut provider = inbx_net::connect_provider(&acct, Some(&store)).await?;
     for &uid in &uids {
         provider
-            .set_flags(&folder, uid as i64, &add_refs, &del_refs)
+            .set_flags(&folder, uid, &add_refs, &del_refs)
             .await?;
     }
     drop(provider);
-    let local: Vec<i64> = uids.iter().map(|u| *u as i64).collect();
     store
-        .mutate_flags(&folder, &local, &add_refs, &del_refs)
+        .mutate_flags(&folder, &uids, &add_refs, &del_refs)
         .await?;
     println!("flags updated on {} message(s) in {folder}", uids.len());
     Ok(())
@@ -2147,7 +2143,7 @@ async fn cmd_jmap(action: JmapCmd) -> Result<()> {
                 })
                 .await?;
             let emails = client.fetch_inbox_headers(limit).await?;
-            for (i, e) in emails.iter().enumerate() {
+            for e in &emails {
                 let from = e
                     .from
                     .as_ref()
@@ -2163,7 +2159,7 @@ async fn cmd_jmap(action: JmapCmd) -> Result<()> {
                 store
                     .upsert_message(&inbx_store::MessageRow {
                         folder: "Inbox".into(),
-                        uid: jmap_uid(&e.id, i),
+                        uid: inbx_net::jmap_id_to_uid(&e.id),
                         uidvalidity: 0,
                         message_id: e.message_id.as_ref().and_then(|v| v.first()).cloned(),
                         subject: e.subject.clone(),
@@ -2259,14 +2255,41 @@ async fn cmd_jmap(action: JmapCmd) -> Result<()> {
     Ok(())
 }
 
-fn jmap_uid(id: &str, idx: usize) -> i64 {
-    let mut h: u64 = 0xcbf29ce484222325;
-    for b in id.as_bytes() {
-        h ^= *b as u64;
-        h = h.wrapping_mul(0x100000001b3);
+fn partition_graph_delta(
+    messages: Vec<inbx_net::graph::GraphMessage>,
+) -> (Vec<inbx_net::graph::GraphMessage>, Vec<String>) {
+    let mut seen = std::collections::HashSet::new();
+    let mut final_messages = messages
+        .into_iter()
+        .rev()
+        .filter(|message| seen.insert(message.id.clone()))
+        .collect::<Vec<_>>();
+    final_messages.reverse();
+
+    let mut live = Vec::new();
+    let mut removed = Vec::new();
+    for message in final_messages {
+        if message.is_removed() {
+            removed.push(message.id);
+        } else {
+            live.push(message);
+        }
     }
-    let h = (h ^ (idx as u64)) & 0x7fff_ffff_ffff_ffff;
-    h as i64
+    (live, removed)
+}
+
+fn completed_graph_delta_link(link: &str, processing: Result<usize>) -> Result<(usize, &str)> {
+    Ok((processing?, link))
+}
+
+async fn persist_graph_delta_link(
+    store: &inbx_store::Store,
+    link: &str,
+    processing: Result<usize>,
+) -> Result<usize> {
+    let (indexed, link) = completed_graph_delta_link(link, processing)?;
+    store.set_delta_link("Inbox", Some(link)).await?;
+    Ok(indexed)
 }
 
 async fn cmd_graph(action: GraphCmd) -> Result<()> {
@@ -2315,60 +2338,69 @@ async fn cmd_graph(action: GraphCmd) -> Result<()> {
             let (messages, new_delta) = client
                 .delta_messages("inbox", prev_delta.as_deref())
                 .await?;
-            if let Some(link) = new_delta.as_deref() {
-                store.set_delta_link("Inbox", Some(link)).await?;
-            }
-            for (i, m) in messages.iter().enumerate() {
-                let date_unix = m.received.as_deref().and_then(parse_iso8601);
-                let from = m.from.as_ref().map(|r| r.formatted());
-                let to = if m.to.is_empty() {
-                    None
-                } else {
-                    Some(
-                        m.to.iter()
-                            .map(|r| r.formatted())
-                            .collect::<Vec<_>>()
-                            .join(", "),
-                    )
-                };
-                let row = inbx_store::MessageRow {
-                    folder: "Inbox".into(),
-                    // Synthesize a stable integer id from the Graph string id.
-                    uid: graph_uid(&m.id, i),
-                    uidvalidity: 0,
-                    message_id: m.message_id.clone(),
-                    subject: m.subject.clone(),
-                    from_addr: from,
-                    to_addrs: to,
-                    date_unix,
-                    flags: if m.is_read {
-                        "\\Seen".into()
+            let (live_messages, removed_ids) = partition_graph_delta(messages);
+            let processing = async {
+                for m in &live_messages {
+                    let date_unix = m.received.as_deref().and_then(parse_iso8601);
+                    let from = m.from.as_ref().map(|r| r.formatted());
+                    let to = if m.to.is_empty() {
+                        None
                     } else {
-                        String::new()
-                    },
-                    maildir_path: None,
-                    headers_only: 1,
-                    fetched_at_unix: now,
-                    in_reply_to: None,
-                    refs: None,
-                    thread_id: None,
-                    provider_id: Some(m.id.clone()),
-                };
-                store.upsert_message(&row).await?;
-                if bodies {
-                    let raw = client.fetch_mime(&m.id).await?;
-                    let path = store.write_maildir(
-                        "Inbox",
-                        &raw,
-                        if m.is_read { "\\Seen" } else { "" },
-                    )?;
-                    store
-                        .set_maildir_path("Inbox", row.uid, 0, &path.to_string_lossy())
-                        .await?;
-                    index_message(&store, "Inbox", row.uid, 0, &raw).await?;
+                        Some(
+                            m.to.iter()
+                                .map(|r| r.formatted())
+                                .collect::<Vec<_>>()
+                                .join(", "),
+                        )
+                    };
+                    let row = inbx_store::MessageRow {
+                        folder: "Inbox".into(),
+                        // Synthesize a stable integer id from the Graph string id.
+                        uid: inbx_net::graph_id_to_uid(&m.id),
+                        uidvalidity: 0,
+                        message_id: m.message_id.clone(),
+                        subject: m.subject.clone(),
+                        from_addr: from,
+                        to_addrs: to,
+                        date_unix,
+                        flags: if m.is_read {
+                            "\\Seen".into()
+                        } else {
+                            String::new()
+                        },
+                        maildir_path: None,
+                        headers_only: 1,
+                        fetched_at_unix: now,
+                        in_reply_to: None,
+                        refs: None,
+                        thread_id: None,
+                        provider_id: Some(m.id.clone()),
+                    };
+                    store.upsert_message(&row).await?;
+                    if bodies {
+                        let raw = client.fetch_mime(&m.id).await?;
+                        let path = store.write_maildir(
+                            "Inbox",
+                            &raw,
+                            if m.is_read { "\\Seen" } else { "" },
+                        )?;
+                        index_message(&store, "Inbox", row.uid, 0, &raw).await?;
+                        store
+                            .set_maildir_path("Inbox", row.uid, 0, &path.to_string_lossy())
+                            .await?;
+                    }
                 }
+                store
+                    .delete_messages_by_provider_ids("Inbox", &removed_ids)
+                    .await?;
+                Ok(live_messages.len())
             }
-            println!("Inbox: {} messages indexed", messages.len());
+            .await;
+            let indexed = persist_graph_delta_link(&store, new_delta.as_str(), processing).await?;
+            println!(
+                "Inbox: {indexed} messages indexed, {} tombstones removed",
+                removed_ids.len()
+            );
         }
         GraphCmd::Send { account, no_save } => {
             use std::io::Read as _;
@@ -2390,17 +2422,6 @@ async fn cmd_graph(action: GraphCmd) -> Result<()> {
         }
     }
     Ok(())
-}
-
-fn graph_uid(id: &str, idx: usize) -> i64 {
-    // FNV-1a 64-bit, then sign-bit-clear so it fits comfortably in INTEGER.
-    let mut h: u64 = 0xcbf29ce484222325;
-    for b in id.as_bytes() {
-        h ^= *b as u64;
-        h = h.wrapping_mul(0x100000001b3);
-    }
-    let h = (h ^ (idx as u64)) & 0x7fff_ffff_ffff_ffff;
-    h as i64
 }
 
 fn parse_iso8601(s: &str) -> Option<i64> {
@@ -3789,9 +3810,9 @@ async fn cmd_fetch(
     }
     println!("folders: {}", folders.len());
 
+    let generation = store.reserve_snapshot_generation(&folder).await?;
     tracing::info!(folder = %folder, since, "fetching headers");
-    let (uidvalidity, rows) = if since > 0 && matches!(acct.transport, inbx_config::Transport::Imap)
-    {
+    let snapshot = if since > 0 && matches!(acct.transport, inbx_config::Transport::Imap) {
         // Date-filtered fast path — UID SEARCH SINCE <date> then fetch
         // only those UIDs.  The MailProvider trait has no days-ago filter,
         // so we drop to a raw IMAP session just for this step.
@@ -3800,70 +3821,34 @@ async fn cmd_fetch(
         let (uv, fetched) =
             inbx_net::fetch_headers_uids(&mut session, &folder, Some(&uids)).await?;
         let _ = session.logout().await;
-        (uv as i64, fetched)
+        inbx_net::provider::HeaderSnapshot {
+            transport: inbx_net::provider::SnapshotTransport::Imap {
+                uidvalidity: i64::from(uv),
+            },
+            rows: fetched,
+            complete: false,
+        }
     } else {
         if since > 0 {
             tracing::warn!("--since ignored: not yet supported on JMAP / Graph");
         }
-        let rows = provider.fetch_headers(&folder, None, body_limit).await?;
-        // Derive UIDVALIDITY from first row; JMAP/Graph rows carry uidvalidity=1.
-        let uv: i64 = rows.first().map(|r| r.uidvalidity as i64).unwrap_or(1);
-        (uv, rows)
+        provider.fetch_headers(&folder, None, body_limit).await?
     };
-
-    let prev = store.folder_uidvalidity(&folder).await?;
-    if let Some(prev) = prev
-        && prev != uidvalidity
-        && uidvalidity != 0
-    {
-        tracing::warn!(prev, new = uidvalidity, %folder, "UIDVALIDITY changed; wiping");
-        store.wipe_folder_messages(&folder).await?;
+    let uidvalidity = snapshot.transport.uidvalidity();
+    let total = snapshot.rows.len();
+    let applied = inbx_sync::apply_snapshot(&store, &folder, generation, snapshot).await?;
+    if !applied.applied {
+        tracing::info!(folder, "snapshot superseded before it could be applied");
+        drop(provider);
+        return Ok(());
     }
-    let pre_max = store
-        .folder_max_uid(&folder, uidvalidity)
-        .await?
-        .unwrap_or(0);
-    store
-        .upsert_folder(&inbx_store::FolderRow {
-            name: folder.clone(),
-            delim: None,
-            special_use: None,
-            attrs: None,
-            uidvalidity: Some(uidvalidity),
-            uidnext: None,
-            delta_link: None,
-        })
-        .await?;
-    for h in &rows {
-        store
-            .upsert_message(&inbx_store::MessageRow {
-                folder: folder.clone(),
-                uid: h.uid as i64,
-                uidvalidity: h.uidvalidity as i64,
-                message_id: h.message_id.clone(),
-                subject: h.subject.clone(),
-                from_addr: h.from_addr.clone(),
-                to_addrs: h.to_addrs.clone(),
-                date_unix: h.date_unix,
-                flags: h.flags.clone(),
-                maildir_path: None,
-                headers_only: 1,
-                fetched_at_unix: h.fetched_at_unix,
-                in_reply_to: None,
-                refs: None,
-                thread_id: None,
-                provider_id: h.provider_id.clone(),
-            })
-            .await?;
-    }
-    println!("{folder}: {} messages indexed", rows.len());
-
-    let new_count = rows.iter().filter(|h| (h.uid as i64) > pre_max).count();
+    let new_count = applied.new_count();
+    println!("{folder}: {total} messages indexed");
     if notify && new_count > 0 {
         let summary = format!("{} new in {}", new_count, acct.name);
-        let body = rows
+        let body = applied
+            .new_rows
             .iter()
-            .filter(|h| (h.uid as i64) > pre_max)
             .take(5)
             .map(|h| {
                 format!(
@@ -3893,10 +3878,10 @@ async fn cmd_fetch(
             let pairs = provider.fetch_bodies(&folder, &pending).await?;
             for (uid, raw) in pairs {
                 let path = store.write_maildir(&folder, &raw, "\\Seen")?;
+                index_message(&store, &folder, uid, uidvalidity, &raw).await?;
                 store
                     .set_maildir_path(&folder, uid, uidvalidity, &path.to_string_lossy())
                     .await?;
-                index_message(&store, &folder, uid, uidvalidity, &raw).await?;
                 // Harvest Autocrypt: header into contacts (best-effort).
                 if let Some(cs) = &contacts
                     && let Ok(rendered) = inbx_render::render_message_with_pgp(
@@ -4277,6 +4262,75 @@ fn format_unix_relative(ts: i64) -> String {
 mod cli_tests {
     use super::*;
     use clap::CommandFactory;
+
+    #[test]
+    fn graph_delta_link_waits_for_successful_processing() {
+        assert!(completed_graph_delta_link("next", Err(anyhow::anyhow!("index failed"))).is_err());
+        assert_eq!(
+            completed_graph_delta_link("next", Ok(1)).unwrap(),
+            (1, "next")
+        );
+    }
+
+    #[test]
+    fn graph_delta_partition_uses_last_occurrence_per_id() {
+        let live = inbx_net::graph::GraphMessage {
+            id: "live".into(),
+            removed: None,
+            subject: None,
+            from: None,
+            to: Vec::new(),
+            received: None,
+            message_id: None,
+            is_read: false,
+        };
+        let removed = inbx_net::graph::GraphMessage {
+            id: "removed".into(),
+            removed: Some(inbx_net::graph::GraphRemoved {
+                reason: Some("deleted".into()),
+            }),
+            subject: None,
+            from: None,
+            to: Vec::new(),
+            received: None,
+            message_id: None,
+            is_read: false,
+        };
+
+        let (live_rows, removed_ids) = partition_graph_delta(vec![live.clone(), removed.clone()]);
+        assert_eq!(
+            live_rows
+                .iter()
+                .map(|message| &message.id)
+                .collect::<Vec<_>>(),
+            ["live"]
+        );
+        assert_eq!(removed_ids, ["removed"]);
+
+        let mut tombstone_for_live = removed.clone();
+        tombstone_for_live.id = "same".into();
+        let mut live_after_tombstone = live.clone();
+        live_after_tombstone.id = "same".into();
+        let (live_rows, removed_ids) =
+            partition_graph_delta(vec![tombstone_for_live, live_after_tombstone]);
+        assert_eq!(
+            live_rows
+                .iter()
+                .map(|message| &message.id)
+                .collect::<Vec<_>>(),
+            ["same"]
+        );
+        assert!(removed_ids.is_empty());
+
+        let mut live_before_tombstone = live;
+        live_before_tombstone.id = "same".into();
+        let mut tombstone_after_live = removed;
+        tombstone_after_live.id = "same".into();
+        let (live_rows, removed_ids) =
+            partition_graph_delta(vec![live_before_tombstone, tombstone_after_live]);
+        assert!(live_rows.is_empty());
+        assert_eq!(removed_ids, ["same"]);
+    }
 
     #[test]
     fn version_flag_returns_pkg_version() {

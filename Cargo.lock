@@ -2770,6 +2770,7 @@ dependencies = [
  "inbx-store",
  "mail-parser",
  "notify-rust",
+ "sqlx",
  "tokio",
  "tracing",
 ]

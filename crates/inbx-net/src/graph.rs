@@ -24,9 +24,63 @@ pub enum Error {
     Api { status: u16, body: String },
     #[error("graph: missing data: {0}")]
     Missing(&'static str),
+    #[error("graph: pagination {0}")]
+    Pagination(&'static str),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+const MAX_GRAPH_PAGES: usize = 10_000;
+
+struct PageTracker {
+    seen: std::collections::HashSet<String>,
+    pages: usize,
+    max_pages: usize,
+}
+
+impl PageTracker {
+    fn new(max_pages: usize) -> Self {
+        Self {
+            seen: std::collections::HashSet::new(),
+            pages: 0,
+            max_pages,
+        }
+    }
+
+    fn visit(&mut self, url: &str) -> Result<()> {
+        if self.pages == self.max_pages {
+            return Err(Error::Pagination("exceeds page limit"));
+        }
+        if !self.seen.insert(url.to_string()) {
+            return Err(Error::Pagination("repeats nextLink"));
+        }
+        self.pages += 1;
+        Ok(())
+    }
+}
+
+async fn ensure_api_success(res: reqwest::Response) -> Result<reqwest::Response> {
+    if res.status().is_success() {
+        Ok(res)
+    } else {
+        let status = res.status().as_u16();
+        let body = res.text().await.unwrap_or_default();
+        Err(Error::Api { status, body })
+    }
+}
+
+/// A terminal Graph delta link, present on every successful delta response.
+pub struct DeltaLink(String);
+
+impl DeltaLink {
+    pub fn as_deref(&self) -> Option<&str> {
+        Some(&self.0)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
 
 /// Authenticated Graph client for one account. Fresh access token per session.
 pub struct GraphClient {
@@ -87,7 +141,9 @@ impl GraphClient {
     pub async fn list_folders(&self) -> Result<Vec<GraphFolder>> {
         let mut out = Vec::new();
         let mut url = String::from("https://graph.microsoft.com/v1.0/me/mailFolders?$top=200");
+        let mut pages = PageTracker::new(MAX_GRAPH_PAGES);
         loop {
+            pages.visit(&url)?;
             let res = self.get(&url).await?;
             let page: Page<GraphFolder> = res.json().await?;
             out.extend(page.value);
@@ -99,16 +155,39 @@ impl GraphClient {
         Ok(out)
     }
 
-    /// List messages in a folder, newest first. Headers only — body fetched lazy.
+    /// List at most `limit` messages in a folder, newest first. Headers only — body fetched lazy.
+    /// Every Graph page is capped at Graph's documented maximum of 1000.
     pub async fn list_messages(&self, folder_id: &str, limit: u32) -> Result<Vec<GraphMessage>> {
-        let url = format!(
-            "https://graph.microsoft.com/v1.0/me/mailFolders/{folder_id}/messages\
-             ?$top={limit}&$orderby=receivedDateTime desc\
-             &$select=id,subject,from,toRecipients,receivedDateTime,internetMessageId,isRead,flag"
-        );
-        let res = self.get(&url).await?;
-        let page: Page<GraphMessage> = res.json().await?;
-        Ok(page.value)
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let page_size = graph_page_size(limit);
+        let mut url = message_list_url(folder_id, page_size);
+        let mut messages = Vec::new();
+        let mut pages = PageTracker::new(MAX_GRAPH_PAGES);
+        loop {
+            pages.visit(&url)?;
+            let page: Page<GraphMessage> = self.get(&url).await?.json().await?;
+            match accumulate_message_page(&mut messages, page, Some(limit as usize)) {
+                Some(next) => url = next,
+                None => return Ok(messages),
+            }
+        }
+    }
+
+    /// List a complete folder snapshot by following every Graph continuation.
+    async fn list_all_messages(&self, folder_id: &str) -> Result<Vec<GraphMessage>> {
+        let mut url = message_list_url(folder_id, 1000);
+        let mut messages = Vec::new();
+        let mut pages = PageTracker::new(MAX_GRAPH_PAGES);
+        loop {
+            pages.visit(&url)?;
+            let page: Page<GraphMessage> = self.get(&url).await?.json().await?;
+            match accumulate_message_page(&mut messages, page, None) {
+                Some(next) => url = next,
+                None => return Ok(messages),
+            }
+        }
     }
 
     /// Walk Graph's delta endpoint for a folder. Pass `None` for the first
@@ -118,7 +197,7 @@ impl GraphClient {
         &self,
         folder_id: &str,
         delta_link: Option<&str>,
-    ) -> Result<(Vec<GraphMessage>, Option<String>)> {
+    ) -> Result<(Vec<GraphMessage>, DeltaLink)> {
         let mut url = match delta_link {
             Some(link) => link.to_string(),
             None => format!(
@@ -127,21 +206,20 @@ impl GraphClient {
             ),
         };
         let mut messages = Vec::new();
-        let mut next_delta: Option<String> = None;
+        let mut pages = PageTracker::new(MAX_GRAPH_PAGES);
         loop {
+            pages.visit(&url)?;
             let res = self.get(&url).await?;
             let page: DeltaPage<GraphMessage> = res.json().await?;
+            let continuation = delta_page_continuation(&page)?;
             messages.extend(page.value);
-            if let Some(d) = page.delta_link {
-                next_delta = Some(d);
-                break;
-            }
-            match page.next_link {
-                Some(n) => url = n,
-                None => break,
+            match continuation {
+                DeltaPageContinuation::Next(next) => url = next,
+                DeltaPageContinuation::Complete(delta_link) => {
+                    return Ok((messages, DeltaLink(delta_link)));
+                }
             }
         }
-        Ok((messages, next_delta))
     }
 
     /// Download the raw RFC 822 body for one message.
@@ -167,13 +245,21 @@ impl GraphClient {
             .body(raw.to_vec())
             .send()
             .await?;
-        if !res.status().is_success() {
-            let status = res.status().as_u16();
-            let body = res.text().await.unwrap_or_default();
-            return Err(Error::Api { status, body });
-        }
+        ensure_api_success(res).await?;
         Ok(())
     }
+}
+
+fn graph_page_size(limit: u32) -> u32 {
+    limit.clamp(1, 1000)
+}
+
+fn message_list_url(folder_id: &str, page_size: u32) -> String {
+    format!(
+        "https://graph.microsoft.com/v1.0/me/mailFolders/{folder_id}/messages\
+         ?$top={page_size}&$orderby=receivedDateTime desc\
+         &$select=id,subject,from,toRecipients,receivedDateTime,internetMessageId,isRead,flag"
+    )
 }
 
 #[derive(Debug, Deserialize)]
@@ -183,6 +269,22 @@ struct Page<T> {
     next_link: Option<String>,
 }
 
+/// Append one message page and return its continuation when more data is needed.
+fn accumulate_message_page<T>(
+    messages: &mut Vec<T>,
+    page: Page<T>,
+    total_cap: Option<usize>,
+) -> Option<String> {
+    messages.extend(page.value);
+    if let Some(cap) = total_cap
+        && messages.len() >= cap
+    {
+        messages.truncate(cap);
+        return None;
+    }
+    page.next_link
+}
+
 #[derive(Debug, Deserialize)]
 struct DeltaPage<T> {
     value: Vec<T>,
@@ -190,6 +292,19 @@ struct DeltaPage<T> {
     next_link: Option<String>,
     #[serde(rename = "@odata.deltaLink", default)]
     delta_link: Option<String>,
+}
+
+enum DeltaPageContinuation {
+    Next(String),
+    Complete(String),
+}
+
+fn delta_page_continuation<T>(page: &DeltaPage<T>) -> Result<DeltaPageContinuation> {
+    match (&page.next_link, &page.delta_link) {
+        (_, Some(delta_link)) => Ok(DeltaPageContinuation::Complete(delta_link.clone())),
+        (Some(next_link), None) => Ok(DeltaPageContinuation::Next(next_link.clone())),
+        (None, None) => Err(Error::Pagination("terminal page is missing deltaLink")),
+    }
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -208,6 +323,8 @@ pub struct GraphFolder {
 #[derive(Debug, Deserialize, Clone)]
 pub struct GraphMessage {
     pub id: String,
+    #[serde(rename = "@removed", default)]
+    pub removed: Option<GraphRemoved>,
     pub subject: Option<String>,
     pub from: Option<GraphRecipient>,
     #[serde(rename = "toRecipients", default)]
@@ -218,6 +335,17 @@ pub struct GraphMessage {
     pub message_id: Option<String>,
     #[serde(rename = "isRead", default)]
     pub is_read: bool,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct GraphRemoved {
+    pub reason: Option<String>,
+}
+
+impl GraphMessage {
+    pub fn is_removed(&self) -> bool {
+        self.removed.is_some()
+    }
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -280,11 +408,7 @@ impl GraphClient {
             .json(&body)
             .send()
             .await?;
-        if !res.status().is_success() {
-            let status = res.status().as_u16();
-            let body = res.text().await.unwrap_or_default();
-            return Err(Error::Api { status, body });
-        }
+        ensure_api_success(res).await?;
         Ok(())
     }
 
@@ -297,11 +421,7 @@ impl GraphClient {
             .json(&body)
             .send()
             .await?;
-        if !res.status().is_success() {
-            let status = res.status().as_u16();
-            let body = res.text().await.unwrap_or_default();
-            return Err(Error::Api { status, body });
-        }
+        ensure_api_success(res).await?;
         Ok(())
     }
 
@@ -415,8 +535,8 @@ impl crate::provider::MailProvider for GraphClient {
         &mut self,
         folder: &str,
         _since_uid: Option<i64>,
-        limit: u32,
-    ) -> crate::provider::Result<Vec<crate::imap::HeaderRow>> {
+        _limit: u32,
+    ) -> crate::provider::Result<crate::provider::HeaderSnapshot> {
         // NOTE: since_uid is ignored for v1. Graph delta sync via
         // delta_messages/deltaLink (not since_uid) is deferred to M11+1.
         use std::time::{SystemTime, UNIX_EPOCH};
@@ -426,7 +546,7 @@ impl crate::provider::MailProvider for GraphClient {
             .await
             .map_err(crate::provider::Error::Graph)?;
         let msgs = self
-            .list_messages(&folder_id, limit)
+            .list_all_messages(&folder_id)
             .await
             .map_err(crate::provider::Error::Graph)?;
 
@@ -458,7 +578,7 @@ impl crate::provider::MailProvider for GraphClient {
                     String::new()
                 };
                 crate::imap::HeaderRow {
-                    uid: uid as u32,
+                    uid,
                     uidvalidity: 0, // Graph has no UIDVALIDITY equivalent
                     message_id: msg.message_id,
                     subject: msg.subject,
@@ -472,7 +592,11 @@ impl crate::provider::MailProvider for GraphClient {
             })
             .collect();
 
-        Ok(rows)
+        Ok(crate::provider::HeaderSnapshot {
+            rows,
+            complete: true,
+            transport: crate::provider::SnapshotTransport::Opaque,
+        })
     }
 
     async fn fetch_body(&mut self, folder: &str, uid: i64) -> crate::provider::Result<Vec<u8>> {
@@ -674,6 +798,124 @@ impl crate::provider::MailProvider for GraphClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn delta_page_continuation_requires_terminal_delta_link() {
+        let terminal = DeltaPage::<GraphMessage> {
+            value: Vec::new(),
+            next_link: None,
+            delta_link: None,
+        };
+        assert!(matches!(
+            delta_page_continuation(&terminal),
+            Err(Error::Pagination("terminal page is missing deltaLink"))
+        ));
+        let terminal = DeltaPage::<GraphMessage> {
+            value: Vec::new(),
+            next_link: None,
+            delta_link: Some("delta".into()),
+        };
+        assert!(matches!(
+            delta_page_continuation(&terminal),
+            Ok(DeltaPageContinuation::Complete(link)) if link == "delta"
+        ));
+        let next = DeltaPage::<GraphMessage> {
+            value: Vec::new(),
+            next_link: Some("next".into()),
+            delta_link: None,
+        };
+        assert!(matches!(
+            delta_page_continuation(&next),
+            Ok(DeltaPageContinuation::Next(link)) if link == "next"
+        ));
+    }
+
+    #[test]
+    fn graph_delta_tombstone_deserializes() {
+        let message: GraphMessage =
+            serde_json::from_str(r#"{"id":"graph-id","@removed":{"reason":"deleted"}}"#).unwrap();
+        assert!(message.is_removed());
+        assert_eq!(
+            message
+                .removed
+                .and_then(|removed| removed.reason)
+                .as_deref(),
+            Some("deleted")
+        );
+    }
+
+    #[test]
+    fn page_tracker_rejects_repeated_url_and_ceiling() {
+        let mut tracker = PageTracker::new(2);
+        tracker.visit("first").unwrap();
+        assert!(matches!(
+            tracker.visit("first"),
+            Err(Error::Pagination("repeats nextLink"))
+        ));
+
+        let mut tracker = PageTracker::new(1);
+        tracker.visit("first").unwrap();
+        assert!(matches!(
+            tracker.visit("second"),
+            Err(Error::Pagination("exceeds page limit"))
+        ));
+    }
+
+    #[test]
+    fn pagination_limits_page_size_and_total() {
+        assert_eq!(graph_page_size(0), 1);
+        assert_eq!(graph_page_size(500), 500);
+        assert_eq!(graph_page_size(1001), 1000);
+        let url = message_list_url("folder", graph_page_size(5000));
+        assert!(url.contains("$top=1000"));
+    }
+
+    #[test]
+    fn pagination_accumulator_continues_and_honors_mode() {
+        let mut limited = vec![1];
+        let next = accumulate_message_page(
+            &mut limited,
+            Page {
+                value: vec![2],
+                next_link: Some("page-2".into()),
+            },
+            Some(3),
+        );
+        assert_eq!(next.as_deref(), Some("page-2"));
+        assert_eq!(limited, vec![1, 2]);
+
+        let next = accumulate_message_page(
+            &mut limited,
+            Page {
+                value: vec![3, 4],
+                next_link: Some("page-3".into()),
+            },
+            Some(3),
+        );
+        assert_eq!(next, None);
+        assert_eq!(limited, vec![1, 2, 3]);
+
+        let mut full = Vec::new();
+        let next = accumulate_message_page(
+            &mut full,
+            Page {
+                value: vec![1, 2],
+                next_link: Some("page-2".into()),
+            },
+            None,
+        );
+        assert_eq!(next.as_deref(), Some("page-2"));
+        let next = accumulate_message_page(
+            &mut full,
+            Page {
+                value: vec![3],
+                next_link: None,
+            },
+            None,
+        );
+        assert_eq!(next, None);
+        assert_eq!(full, vec![1, 2, 3]);
+    }
 
     #[test]
     fn graph_id_to_uid_deterministic() {

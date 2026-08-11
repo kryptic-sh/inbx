@@ -8,6 +8,7 @@ pub mod provider;
 pub mod proxy;
 pub mod sieve;
 pub mod smtp;
+pub(crate) mod tls;
 pub mod unsubscribe;
 
 pub use graph::graph_id_to_uid;
@@ -17,6 +18,7 @@ pub use imap::{
     fetch_headers_uids, fetch_inbox_headers, find_drafts_folder, find_sent_folder, list_folders,
     rename_folder, search_since, store_flags, subscribe_folder, uid_copy, uid_move,
 };
+pub use jmap::jmap_id_to_uid;
 pub use mdn::{Disposition as MdnDisposition, MdnContext, build_mdn};
 pub use oauth::{Error as OAuthError, TokenSet, login as oauth_login, refresh as oauth_refresh};
 pub use provider::{Error as ProviderError, ImapProvider, MailProvider, connect_provider};
