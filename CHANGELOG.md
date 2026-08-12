@@ -75,6 +75,15 @@ patch bumps.
   `cargo deny`, insta/proptest/fuzz suites, crates.io publishing) described
   behaviour the code does not have.
 
+### Security
+
+- Bumped `ammonia` to 4.1.4 (RUSTSEC-2026-0213) — the HTML sanitizer used by
+  `inbx-render` no longer passes through XSS via SVG `animate` / `set` animation
+  tags.
+- Bumped `crossbeam-epoch` to 0.9.20 (RUSTSEC-2026-0204) — transitive via
+  `ignore` → `hjkl-picker`; fixes the invalid pointer dereference in the
+  `fmt::Pointer` impl for `Atomic` / `Shared`.
+
 ## [0.7.0] - 2026-05-06
 
 ### Added
