@@ -23,4 +23,4 @@ tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 tracing-appender.workspace = true
-directories = "5"
+directories = "6"
