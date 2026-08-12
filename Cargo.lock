@@ -2564,7 +2564,6 @@ dependencies = [
  "gethostname 0.5.0",
  "hjkl-bonsai",
  "hjkl-clipboard",
- "hjkl-editor",
  "hjkl-engine",
  "hjkl-form",
  "hjkl-picker",
@@ -2597,7 +2596,6 @@ name = "inbx-composer"
 version = "0.7.0"
 dependencies = [
  "async-trait",
- "hjkl-buffer",
  "hjkl-clipboard",
  "hjkl-editor",
  "hjkl-form",
@@ -2622,7 +2620,6 @@ dependencies = [
  "serde",
  "thiserror 2.0.18",
  "toml 0.8.23",
- "tracing",
  "url",
 ]
 
@@ -2661,7 +2658,6 @@ dependencies = [
  "reqwest",
  "serde",
  "thiserror 2.0.18",
- "tokio",
  "toml 0.8.23",
  "tracing",
 ]
