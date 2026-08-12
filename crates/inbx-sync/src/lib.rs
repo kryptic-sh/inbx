@@ -671,12 +671,16 @@ mod tests {
     use inbx_store::{MessageRow, Store};
     use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 
-    use super::{apply_snapshot, canonical_folder_name, emit_folder_updated};
+    #[cfg(unix)]
+    use super::emit_folder_updated;
+    use super::{apply_snapshot, canonical_folder_name};
     #[cfg(unix)]
     use std::sync::atomic::{AtomicUsize, Ordering};
+    #[cfg(unix)]
     use std::time::Duration;
     #[cfg(unix)]
     static SOCKET_COUNTER: AtomicUsize = AtomicUsize::new(0);
+    #[cfg(unix)]
     use tokio::sync::mpsc::unbounded_channel;
 
     #[cfg(unix)]
