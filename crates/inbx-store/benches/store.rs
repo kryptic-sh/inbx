@@ -45,6 +45,7 @@ fn get_seeded_store(rt: &Runtime) -> Store {
                         uidvalidity: Some(1),
                         uidnext: None,
                         delta_link: None,
+                        last_sync_unix: None,
                     })
                     .await
                     .unwrap();
@@ -113,6 +114,7 @@ fn bench_store_open(c: &mut Criterion) {
                     uidvalidity: Some(1),
                     uidnext: None,
                     delta_link: None,
+                    last_sync_unix: None,
                 })
                 .await
                 .unwrap();
@@ -140,6 +142,7 @@ fn bench_store_open(c: &mut Criterion) {
                 uidvalidity: Some(1),
                 uidnext: None,
                 delta_link: None,
+                last_sync_unix: None,
             })
             .await
             .unwrap();
@@ -229,6 +232,7 @@ async fn seed_threader_pool(n: u32) -> Store {
             uidvalidity: Some(1),
             uidnext: None,
             delta_link: None,
+            last_sync_unix: None,
         })
         .await
         .unwrap();

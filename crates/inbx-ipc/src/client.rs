@@ -1,5 +1,7 @@
 //! Unix-socket client for the inbx-sync IPC channel.
 
+use std::path::Path;
+
 use tokio::io::AsyncBufReadExt as _;
 use tokio::net::UnixStream;
 use tokio::sync::mpsc;
@@ -18,10 +20,15 @@ pub struct Client {
 impl Client {
     /// Attempt to connect to the sync daemon with a 500 ms timeout.
     pub async fn connect() -> Result<Self, IpcError> {
-        let path = crate::socket_path();
+        Self::connect_to(crate::socket_path()).await
+    }
+
+    /// Attempt to connect to a daemon listening at `path`.
+    pub async fn connect_to(path: impl AsRef<Path>) -> Result<Self, IpcError> {
+        let path = path.as_ref();
         let stream = tokio::time::timeout(
             std::time::Duration::from_millis(500),
-            UnixStream::connect(&path),
+            UnixStream::connect(path),
         )
         .await
         .map_err(|_| {

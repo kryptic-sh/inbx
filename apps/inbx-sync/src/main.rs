@@ -84,6 +84,7 @@ async fn main() -> Result<()> {
     inbx_sync::run(inbx_sync::Config {
         accounts,
         ipc: ipc_server,
+        local_events: None,
         notifications: cli.notify,
         idle_folder: cli.idle_folder,
         folders: cli.folders,

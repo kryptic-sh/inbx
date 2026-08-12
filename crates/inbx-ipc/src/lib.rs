@@ -33,6 +33,11 @@ pub struct Server;
 impl Server {
     /// Always returns an error on non-unix targets.
     pub async fn bind() -> Result<Self, crate::IpcError> {
+        Self::bind_at(crate::socket_path()).await
+    }
+
+    /// Always returns an error on non-unix targets.
+    pub async fn bind_at(_: impl AsRef<std::path::Path>) -> Result<Self, crate::IpcError> {
         Err(IpcError::NotSupported)
     }
 
@@ -59,6 +64,11 @@ pub struct Client;
 impl Client {
     /// Always returns an error on non-unix targets.
     pub async fn connect() -> Result<Self, crate::IpcError> {
+        Self::connect_to(crate::socket_path()).await
+    }
+
+    /// Always returns an error on non-unix targets.
+    pub async fn connect_to(_: impl AsRef<std::path::Path>) -> Result<Self, crate::IpcError> {
         Err(IpcError::NotSupported)
     }
 

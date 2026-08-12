@@ -172,3 +172,61 @@ protocol paths, store/FTS/threading persistence, rendering, TUI task handling,
 and the existing store benchmarks. No benchmark was run; the findings were
 structural costs in per-folder, per-body, and per-chunk loops rather than claims
 about measured speedups.
+
+## Issue #35 — TUI per-folder last-sync timestamp — 2026-08-12
+
+### Decisions
+
+- Each folder gets a nullable `last_sync_unix`. `NULL` means never successfully
+  synced. The store owns the value: successful applied snapshots write it in the
+  same SQLite transaction as the message upserts; stale, replayed, unreserved,
+  or rolled-back snapshots never touch it.
+- `Store::mark_folder_synced` records the timestamp only for an existing folder
+  and only after all direct CLI JMAP/Graph fetch processing (including delta
+  checkpoint persistence) succeeds.
+- Metadata upserts (`upsert_folder`, `reconcile_folders`) preserve the
+  store-owned timestamp; discovery never moves it backward or forward.
+- The TUI reads the selected folder's persisted timestamp for the status line
+  and redraws once per second while idle to advance the relative age, without a
+  busy loop.
+- Folder reload preserves selection by folder name; message reload preserves it
+  by stable `(folder, uid, uidvalidity)` identity rather than list index.
+- In-process sync uses a local `FolderUpdated` event sink in `inbx_sync::Config`
+  on every platform; the daemon path additionally broadcasts over IPC. On a
+  daemon disconnect the TUI clears its IPC state and starts at most one fallback
+  (guarded by the existing sync handle).
+
+### Lifecycle/discovery behavior
+
+- `Store::reconcile_folders` upserts a complete authoritative provider listing
+  and deletes absent folders with their messages and FTS rows, all in one
+  transaction. It is called only after successful full discovery; a partial or
+  failed listing never prunes. There is no FK from `messages` to `folders`, so
+  messages are deleted explicitly before their folder metadata, and the
+  message-delete trigger clears FTS.
+- Configured discovery targets are resolved to the provider's canonical folder
+  spelling case-insensitively (`INBOX` → `Inbox`) so discovery cannot create a
+  duplicate sync path.
+- The IPC server sends an immediate `Hello` per client after subscription,
+  closing the startup race between the TUI's initial load and its event
+  subscription. Tests use unique temp sockets and the Hello barrier instead of
+  sleeps.
+
+### Verification
+
+The full workspace gate passed (`cargo fmt --all --check`,
+`cargo clippy --all-targets --all-features -- -D warnings`,
+`cargo build --workspace --all-features`,
+`cargo nextest run --workspace --all-features --no-fail-fast`). Mechanism tests
+were demonstrated red before restore for: applied-vs-replayed timestamp
+advancement, rollback preservation, upsert preservation and stale timestamp
+rejection, `mark_folder_synced` behavior, authoritative folder/FTS
+reconciliation, canonical `INBOX` spelling, IPC Hello readiness, sink fan-out,
+closed-sink tolerance, and disconnect fallback duplication guard.
+
+### Deferred
+
+- Non-Unix `emit_folder_updated` and IPC stubs were compilation-checked with
+  `cargo check --target x86_64-pc-windows-gnu` but not executed at runtime.
+- The idle redraw timer only runs while the selected folder has a persisted
+  timestamp; a folder that has never synced shows `never synced` statically.

@@ -103,6 +103,9 @@ pub struct Config {
     /// non-unix platforms. When `Some`, `FolderUpdated` events are broadcast
     /// to connected TUI clients after each cycle.
     pub ipc: Option<Arc<inbx_ipc::Server>>,
+    /// In-process receiver for `FolderUpdated` events. TUI fallback configures
+    /// this instead of IPC so sync completions still refresh its store view.
+    pub local_events: Option<tokio::sync::mpsc::UnboundedSender<inbx_ipc::Event>>,
     /// Whether to fire desktop notifications on new mail. Set to `false` when
     /// spawned in-process from the TUI (the status line already shows new mail).
     pub notifications: bool,
@@ -118,6 +121,48 @@ pub struct Config {
     pub body_limit: u32,
     /// Seconds between sync cycles. Push signals also trigger a cycle early.
     pub poll_interval_secs: u64,
+}
+
+#[cfg(unix)]
+fn emit_folder_updated(
+    ipc: Option<&Arc<inbx_ipc::Server>>,
+    local_events: Option<&tokio::sync::mpsc::UnboundedSender<inbx_ipc::Event>>,
+    account: String,
+    folder: String,
+    new_count: u32,
+) {
+    let event = inbx_ipc::Event::FolderUpdated {
+        account,
+        folder,
+        new_count,
+    };
+    if let Some(ipc) = ipc {
+        ipc.send(event.clone());
+    }
+    if let Some(local_events) = local_events
+        && local_events.send(event).is_err()
+    {
+        tracing::debug!("local sync event receiver closed");
+    }
+}
+
+#[cfg(not(unix))]
+fn emit_folder_updated(
+    local_events: Option<&tokio::sync::mpsc::UnboundedSender<inbx_ipc::Event>>,
+    account: String,
+    folder: String,
+    new_count: u32,
+) {
+    let event = inbx_ipc::Event::FolderUpdated {
+        account,
+        folder,
+        new_count,
+    };
+    if let Some(local_events) = local_events
+        && local_events.send(event).is_err()
+    {
+        tracing::debug!("local sync event receiver closed");
+    }
 }
 
 /// Run the multi-account sync loop until Ctrl-C or all tasks exit.
@@ -163,6 +208,7 @@ pub async fn run(cfg: Config) -> Result<()> {
         let fetch_bodies = cfg.fetch_bodies;
         let body_limit = cfg.body_limit;
         let notify = cfg.notifications;
+        let local_events = cfg.local_events.clone();
         #[cfg(unix)]
         let ipc = cfg.ipc.clone();
         tasks.spawn(async move {
@@ -185,15 +231,20 @@ pub async fn run(cfg: Config) -> Result<()> {
                         }
                         Ok(new_count) => {
                             #[cfg(unix)]
-                            if let Some(ref srv) = ipc {
-                                srv.send(inbx_ipc::Event::FolderUpdated {
-                                    account: acct.name.clone(),
-                                    folder: idle_folder.to_string(),
-                                    new_count,
-                                });
-                            }
+                            emit_folder_updated(
+                                ipc.as_ref(),
+                                local_events.as_ref(),
+                                acct.name.clone(),
+                                idle_folder.to_string(),
+                                new_count,
+                            );
                             #[cfg(not(unix))]
-                            let _ = new_count;
+                            emit_folder_updated(
+                                local_events.as_ref(),
+                                acct.name.clone(),
+                                idle_folder.to_string(),
+                                new_count,
+                            );
                         }
                     }
                     // Read back discovered folders from the store, skipping
@@ -234,15 +285,20 @@ pub async fn run(cfg: Config) -> Result<()> {
                         }
                         Ok(new_count) => {
                             #[cfg(unix)]
-                            if let Some(ref srv) = ipc {
-                                srv.send(inbx_ipc::Event::FolderUpdated {
-                                    account: acct.name.clone(),
-                                    folder: folder.clone(),
-                                    new_count,
-                                });
-                            }
+                            emit_folder_updated(
+                                ipc.as_ref(),
+                                local_events.as_ref(),
+                                acct.name.clone(),
+                                folder.clone(),
+                                new_count,
+                            );
                             #[cfg(not(unix))]
-                            let _ = new_count;
+                            emit_folder_updated(
+                                local_events.as_ref(),
+                                acct.name.clone(),
+                                folder.clone(),
+                                new_count,
+                            );
                         }
                     }
                 }
@@ -400,6 +456,18 @@ pub async fn wait_for_change(account: &Account, folder: &str) {
     }
 }
 
+/// Return the provider's canonical spelling for a configured folder name.
+///
+/// IMAP's `INBOX` is case-insensitive while providers often report `Inbox`.
+/// Matching case-insensitively prevents discovery from creating a second sync.
+fn canonical_folder_name<'a>(folders: &'a [inbx_net::FolderInfo], configured: &'a str) -> &'a str {
+    folders
+        .iter()
+        .find(|candidate| candidate.name.eq_ignore_ascii_case(configured))
+        .map(|candidate| candidate.name.as_str())
+        .unwrap_or(configured)
+}
+
 /// Run one full sync cycle for an account: drain outbox, fetch headers,
 /// upsert into the store, optionally download bodies. Returns the count of
 /// newly arrived messages (UIDs higher than the previous max).
@@ -428,23 +496,27 @@ pub async fn sync_once(
 
     let mut provider = inbx_net::connect_provider(account, Some(&store)).await?;
     let folders = provider.list_folders().await?;
-    for f in &folders {
-        store
-            .upsert_folder(&inbx_store::FolderRow {
-                name: f.name.clone(),
-                delim: f.delim.clone(),
-                special_use: f.special_use.clone(),
-                attrs: if f.attrs.is_empty() {
-                    None
-                } else {
-                    Some(f.attrs.join(","))
-                },
-                uidvalidity: None,
-                uidnext: None,
-                delta_link: None,
-            })
-            .await?;
-    }
+    let folder = canonical_folder_name(&folders, folder);
+    let folder_rows = folders
+        .iter()
+        .map(|f| inbx_store::FolderRow {
+            name: f.name.clone(),
+            delim: f.delim.clone(),
+            special_use: f.special_use.clone(),
+            attrs: if f.attrs.is_empty() {
+                None
+            } else {
+                Some(f.attrs.join(","))
+            },
+            uidvalidity: None,
+            uidnext: None,
+            delta_link: None,
+            last_sync_unix: None,
+        })
+        .collect::<Vec<_>>();
+    // `list_folders` is the provider's complete authoritative listing. Do not
+    // reconcile after failed discovery or a partial message snapshot.
+    store.reconcile_folders(&folder_rows).await?;
     // Always request a complete snapshot: pruning is only sound after a
     // successful full fetch, never after a provider delta or failed stream.
     let generation = store.reserve_snapshot_generation(folder).await?;
@@ -599,7 +671,64 @@ mod tests {
     use inbx_store::{MessageRow, Store};
     use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 
-    use super::apply_snapshot;
+    use super::{apply_snapshot, canonical_folder_name, emit_folder_updated};
+    #[cfg(unix)]
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+    #[cfg(unix)]
+    static SOCKET_COUNTER: AtomicUsize = AtomicUsize::new(0);
+    use tokio::sync::mpsc::unbounded_channel;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn folder_updated_reaches_ipc_and_local_sinks() {
+        let path = std::env::temp_dir().join(format!(
+            "inbx-sync-test-{}-{}.sock",
+            std::process::id(),
+            SOCKET_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        let ipc = inbx_ipc::Server::bind_at(&path).await.unwrap();
+        let mut client = inbx_ipc::Client::connect_to(&path).await.unwrap();
+        let mut ipc_events = client.receiver();
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(1), ipc_events.recv())
+                .await
+                .unwrap(),
+            Some(inbx_ipc::Event::Hello { .. })
+        ));
+        let (local_events, mut local_rx) = unbounded_channel();
+
+        emit_folder_updated(
+            Some(&ipc),
+            Some(&local_events),
+            "work".into(),
+            "INBOX".into(),
+            3,
+        );
+
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(1), local_rx.recv())
+                .await
+                .unwrap(),
+            Some(inbx_ipc::Event::FolderUpdated { account, folder, new_count })
+                if account == "work" && folder == "INBOX" && new_count == 3
+        ));
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(1), ipc_events.recv())
+                .await
+                .unwrap(),
+            Some(inbx_ipc::Event::FolderUpdated { account, folder, new_count })
+                if account == "work" && folder == "INBOX" && new_count == 3
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn closed_local_event_sink_does_not_fail_sync() {
+        let (local_events, local_rx) = unbounded_channel();
+        drop(local_rx);
+        emit_folder_updated(None, Some(&local_events), "work".into(), "INBOX".into(), 0);
+    }
 
     fn header(uid: i64, provider_id: Option<&str>) -> HeaderRow {
         HeaderRow {
@@ -743,6 +872,7 @@ mod tests {
                 uidvalidity: Some(1),
                 uidnext: None,
                 delta_link: None,
+                last_sync_unix: None,
             })
             .await
             .unwrap();
@@ -788,5 +918,19 @@ mod tests {
                 .any(|message| message.uid == 8_783_962_037_831_871_269
                     && message.maildir_path.as_deref() == Some("cur/body"))
         );
+    }
+
+    #[test]
+    fn canonical_folder_name_uses_discovered_inbox_spelling() {
+        let folders = vec![inbx_net::FolderInfo {
+            name: "Inbox".to_owned(),
+            delim: Some("/".to_owned()),
+            special_use: Some("\\Inbox".to_owned()),
+            attrs: Vec::new(),
+            selectable: true,
+        }];
+
+        assert_eq!(canonical_folder_name(&folders, "INBOX"), "Inbox");
+        assert_eq!(canonical_folder_name(&folders, "Archive"), "Archive");
     }
 }

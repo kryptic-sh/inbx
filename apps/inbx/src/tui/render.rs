@@ -8,7 +8,9 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 
 use super::ACTIVE_THEME;
-use super::app::{ActivePicker, App, FolderCrudPrompt, Mode, MovePickerMode, Pane};
+use super::app::{
+    ActivePicker, App, FolderCrudPrompt, Mode, MovePickerMode, Pane, selected_folder_last_sync,
+};
 use super::binds::{Action, Category, current_context};
 
 pub(super) fn draw(f: &mut ratatui::Frame, app: &App) {
@@ -447,7 +449,7 @@ fn draw_status(f: &mut ratatui::Frame, app: &App, area: Rect) {
         account: app.account.name.as_str(),
         folder: app.current_folder().map(|f| f.name.as_str()),
         unread: app.unread_in_current_folder(),
-        last_sync_unix: app.last_sync_unix,
+        last_sync_unix: selected_folder_last_sync(&app.folders, app.folder_state.selected()),
         now_unix: now,
         message,
         busy: app.busy,
@@ -1306,6 +1308,42 @@ mod tests {
         assert!(format_status_line(&c).contains("-- SEARCH --"));
         c.mode = Mode::Visual;
         assert!(format_status_line(&c).contains("-- VISUAL --"));
+    }
+
+    #[test]
+    fn status_wiring_uses_selected_folder_timestamp() {
+        let folders = [
+            inbx_store::FolderRow {
+                name: "INBOX".into(),
+                delim: None,
+                special_use: None,
+                attrs: None,
+                uidvalidity: None,
+                uidnext: None,
+                delta_link: None,
+                last_sync_unix: Some(990),
+            },
+            inbx_store::FolderRow {
+                name: "Archive".into(),
+                delim: None,
+                special_use: None,
+                attrs: None,
+                uidvalidity: None,
+                uidnext: None,
+                delta_link: None,
+                last_sync_unix: Some(880),
+            },
+        ];
+        let mut c = ctx();
+        let selected = selected_folder_last_sync(&folders, Some(0));
+        assert_eq!(selected, Some(990));
+        c.last_sync_unix = selected;
+        assert!(format_status_line(&c).contains("synced 10s ago"));
+
+        let selected = selected_folder_last_sync(&folders, Some(1));
+        assert_eq!(selected, Some(880));
+        c.last_sync_unix = selected;
+        assert!(format_status_line(&c).contains("synced 2m ago"));
     }
 
     #[test]

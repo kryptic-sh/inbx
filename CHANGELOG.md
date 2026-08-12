@@ -18,6 +18,17 @@ patch bumps.
   as `Name  (N)` in the unread accent colour. Closes #32.
 - TUI: relative timestamp on each message row (`12s`, `3m`, `2h`, `4d`), right
   aligned, with the sender truncated to make room. Closes #27.
+- TUI: status line shows the selected folder's last successful sync as
+  `synced … ago` (or `never synced`), from a per-folder timestamp the store
+  writes only when a complete snapshot applies. The age redraws while idle.
+  Closes #35.
+- Sync: after a complete provider folder discovery, stored folders absent from
+  the listing are removed together with their messages and FTS rows in one
+  transaction. Partial or failed discovery never prunes.
+- IPC: the server sends an immediate `Hello` after each client subscribes,
+  closing the startup race between the TUI's initial load and its event
+  subscription. In-process sync fallback now starts on every platform and also
+  after a daemon disconnect, guarded so only one fallback runs.
 
 ### Changed
 
@@ -31,6 +42,9 @@ patch bumps.
 
 ### Fixed
 
+- Sync: a configured `INBOX` and a discovered `Inbox` no longer sync twice —
+  discovery targets are matched case-insensitively to the provider's canonical
+  folder name.
 - Sync: IMAP, JMAP, and Graph accounts now use their configured provider for
   folder snapshots. Complete snapshots are validated and applied atomically with
   database-issued generations, preventing partial, stale, unreserved, or

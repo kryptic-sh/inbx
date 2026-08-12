@@ -24,6 +24,8 @@ pub enum Error {
     InvalidSnapshot(&'static str),
     #[error("snapshot generation {generation} was not reserved for folder {folder}")]
     UnreservedSnapshotGeneration { folder: String, generation: i64 },
+    #[error("folder not found: {0}")]
+    FolderNotFound(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -38,6 +40,7 @@ pub struct FolderRow {
     pub uidnext: Option<i64>,
     #[sqlx(default)]
     pub delta_link: Option<String>,
+    pub last_sync_unix: Option<i64>,
 }
 
 #[derive(Debug, Clone, FromRow)]
@@ -396,6 +399,11 @@ impl Store {
             })
             .cloned()
             .collect();
+        sqlx::query("UPDATE folders SET last_sync_unix = ?2 WHERE name = ?1")
+            .bind(&input.folder)
+            .bind(unix_now())
+            .execute(&mut *tx)
+            .await?;
         tx.commit().await?;
         Ok(SnapshotOutput {
             applied: true,
@@ -403,10 +411,65 @@ impl Store {
         })
     }
 
+    /// Reconcile folders with a complete, authoritative provider listing.
+    ///
+    /// Upserts every listed folder and removes any stored folder absent from the
+    /// listing in one transaction. Messages are deleted before their folder
+    /// metadata; the schema's message-delete trigger clears the matching FTS
+    /// entries. There is no foreign key from messages to folders — callers must
+    /// treat this as authoritative and never pass a partial listing.
+    pub async fn reconcile_folders(&self, folders: &[FolderRow]) -> Result<()> {
+        use std::collections::HashSet;
+
+        let names: HashSet<&str> = folders.iter().map(|folder| folder.name.as_str()).collect();
+        let mut tx = self.pool.begin().await?;
+        for folder in folders {
+            sqlx::query(
+                "INSERT INTO folders (name, delim, special_use, attrs, uidvalidity, uidnext, last_sync_unix)
+                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                 ON CONFLICT(name) DO UPDATE SET
+                    delim = excluded.delim,
+                    special_use = excluded.special_use,
+                    attrs = excluded.attrs,
+                    uidvalidity = COALESCE(excluded.uidvalidity, folders.uidvalidity),
+                    uidnext = COALESCE(excluded.uidnext, folders.uidnext)",
+            )
+            .bind(&folder.name)
+            .bind(&folder.delim)
+            .bind(&folder.special_use)
+            .bind(&folder.attrs)
+            .bind(folder.uidvalidity)
+            .bind(folder.uidnext)
+            .bind(folder.last_sync_unix)
+            .execute(&mut *tx)
+            .await?;
+        }
+
+        let existing: Vec<(String,)> = sqlx::query_as("SELECT name FROM folders")
+            .fetch_all(&mut *tx)
+            .await?;
+        for (name,) in existing {
+            if !names.contains(name.as_str()) {
+                // The schema's message-delete trigger removes FTS rows; delete
+                // messages before their now-orphaned folder metadata.
+                sqlx::query("DELETE FROM messages WHERE folder = ?1")
+                    .bind(&name)
+                    .execute(&mut *tx)
+                    .await?;
+                sqlx::query("DELETE FROM folders WHERE name = ?1")
+                    .bind(name)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
     pub async fn upsert_folder(&self, f: &FolderRow) -> Result<()> {
         sqlx::query(
-            "INSERT INTO folders (name, delim, special_use, attrs, uidvalidity, uidnext)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            "INSERT INTO folders (name, delim, special_use, attrs, uidvalidity, uidnext, last_sync_unix)
+              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
              ON CONFLICT(name) DO UPDATE SET
                 delim = excluded.delim,
                 special_use = excluded.special_use,
@@ -420,15 +483,30 @@ impl Store {
         .bind(&f.attrs)
         .bind(f.uidvalidity)
         .bind(f.uidnext)
+        .bind(f.last_sync_unix)
         .execute(&self.pool)
         .await?;
         Ok(())
     }
 
+    /// Record that an existing folder completed a successful sync.
+    pub async fn mark_folder_synced(&self, folder: &str) -> Result<i64> {
+        let timestamp = unix_now();
+        let result = sqlx::query("UPDATE folders SET last_sync_unix = ?2 WHERE name = ?1")
+            .bind(folder)
+            .bind(timestamp)
+            .execute(&self.pool)
+            .await?;
+        if result.rows_affected() == 0 {
+            return Err(Error::FolderNotFound(folder.to_owned()));
+        }
+        Ok(timestamp)
+    }
+
     pub async fn list_folders(&self) -> Result<Vec<FolderRow>> {
         let rows: Vec<FolderRow> = sqlx::query_as(
-            "SELECT name, delim, special_use, attrs, uidvalidity, uidnext
-             FROM folders ORDER BY name",
+            "SELECT name, delim, special_use, attrs, uidvalidity, uidnext, last_sync_unix
+              FROM folders ORDER BY name",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -1122,6 +1200,47 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn reconcile_folders_removes_missing_folder_messages_and_fts_rows() {
+        let store = make_in_memory_store().await;
+        let folder = |name: &str| FolderRow {
+            name: name.to_owned(),
+            delim: Some("/".to_owned()),
+            special_use: None,
+            attrs: None,
+            uidvalidity: None,
+            uidnext: None,
+            delta_link: None,
+            last_sync_unix: None,
+        };
+        store
+            .reconcile_folders(&[folder("Inbox"), folder("Archive")])
+            .await
+            .unwrap();
+        let mut archived = make_row("Archive", 1, None);
+        archived.subject = Some("obsolete needle".to_owned());
+        store.upsert_message(&archived).await.unwrap();
+        store
+            .index_for_search("Archive", 1, 0, "obsolete needle", "", "", "")
+            .await
+            .unwrap();
+
+        store.reconcile_folders(&[folder("Inbox")]).await.unwrap();
+
+        assert_eq!(
+            store
+                .list_folders()
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|folder| folder.name)
+                .collect::<Vec<_>>(),
+            vec!["Inbox"]
+        );
+        assert!(store.list_messages("Archive", 10).await.unwrap().is_empty());
+        assert!(store.search("obsolete", 10).await.unwrap().is_empty());
+    }
+
     /// Migration 0006 runs cleanly on a fresh store (implicit in make_in_memory_store).
     /// Verify provider_id round-trips through upsert_message.
     #[tokio::test]
@@ -1243,6 +1362,7 @@ mod tests {
                 uidvalidity: None,
                 uidnext: None,
                 delta_link: None,
+                last_sync_unix: None,
             })
             .await
             .unwrap();
@@ -1279,6 +1399,151 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(generations, (0, 0));
+    }
+
+    #[tokio::test]
+    async fn mark_folder_synced_records_current_time_and_requires_existing_folder() {
+        let store = make_in_memory_store().await;
+        assert!(matches!(
+            store.mark_folder_synced("Missing").await,
+            Err(Error::FolderNotFound(folder)) if folder == "Missing"
+        ));
+        store
+            .upsert_folder(&FolderRow {
+                name: "Inbox".into(),
+                delim: None,
+                special_use: None,
+                attrs: None,
+                uidvalidity: None,
+                uidnext: None,
+                delta_link: None,
+                last_sync_unix: None,
+            })
+            .await
+            .unwrap();
+
+        let before = unix_now();
+        let timestamp = store.mark_folder_synced("Inbox").await.unwrap();
+        let after = unix_now();
+        assert!((before..=after).contains(&timestamp));
+        assert_eq!(
+            store.list_folders().await.unwrap()[0].last_sync_unix,
+            Some(timestamp)
+        );
+    }
+
+    #[tokio::test]
+    async fn applied_snapshot_sets_folder_last_sync_and_replays_do_not_advance_it() {
+        let store = make_in_memory_store().await;
+        let generation = store.reserve_snapshot_generation("Inbox").await.unwrap();
+        assert_eq!(store.list_folders().await.unwrap()[0].last_sync_unix, None);
+
+        let before = unix_now();
+        assert!(
+            store
+                .apply_snapshot(SnapshotInput {
+                    folder: "Inbox".into(),
+                    generation,
+                    complete: true,
+                    transport: SnapshotTransport::Imap { uidvalidity: 1 },
+                    rows: Vec::new(),
+                })
+                .await
+                .unwrap()
+                .applied
+        );
+        let after = unix_now();
+        let last_sync_unix = store.list_folders().await.unwrap()[0]
+            .last_sync_unix
+            .expect("applied snapshot updates last sync");
+        assert!((before..=after).contains(&last_sync_unix));
+
+        sqlx::query("UPDATE folders SET last_sync_unix = ?2 WHERE name = ?1")
+            .bind("Inbox")
+            .bind(123)
+            .execute(store.pool())
+            .await
+            .unwrap();
+        let last_sync_unix = 123;
+
+        assert!(
+            !store
+                .apply_snapshot(SnapshotInput {
+                    folder: "Inbox".into(),
+                    generation,
+                    complete: true,
+                    transport: SnapshotTransport::Imap { uidvalidity: 1 },
+                    rows: Vec::new(),
+                })
+                .await
+                .unwrap()
+                .applied
+        );
+        assert_eq!(
+            store.list_folders().await.unwrap()[0].last_sync_unix,
+            Some(last_sync_unix)
+        );
+    }
+
+    #[tokio::test]
+    async fn folder_upsert_without_last_sync_preserves_existing_timestamp() {
+        let store = make_in_memory_store().await;
+        store
+            .upsert_folder(&FolderRow {
+                name: "Inbox".into(),
+                delim: None,
+                special_use: None,
+                attrs: None,
+                uidvalidity: None,
+                uidnext: None,
+                delta_link: None,
+                last_sync_unix: Some(123),
+            })
+            .await
+            .unwrap();
+        store
+            .upsert_folder(&FolderRow {
+                name: "Inbox".into(),
+                delim: Some("/".into()),
+                special_use: None,
+                attrs: None,
+                uidvalidity: None,
+                uidnext: None,
+                delta_link: None,
+                last_sync_unix: None,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            store.list_folders().await.unwrap()[0].last_sync_unix,
+            Some(123)
+        );
+    }
+
+    #[tokio::test]
+    async fn folder_upsert_stale_timestamp_does_not_replace_store_owned_timestamp() {
+        let store = make_in_memory_store().await;
+        for last_sync_unix in [Some(200), Some(100)] {
+            store
+                .upsert_folder(&FolderRow {
+                    name: "Inbox".into(),
+                    delim: None,
+                    special_use: None,
+                    attrs: None,
+                    uidvalidity: None,
+                    uidnext: None,
+                    delta_link: None,
+                    last_sync_unix,
+                })
+                .await
+                .unwrap();
+        }
+
+        assert_eq!(
+            store.list_folders().await.unwrap()[0].last_sync_unix,
+            Some(200)
+        );
     }
 
     #[tokio::test]
@@ -1357,7 +1622,18 @@ mod tests {
             }],
         };
         assert!(store.apply_snapshot(input(newer, 2)).await.unwrap().applied);
+        sqlx::query("UPDATE folders SET last_sync_unix = ?2 WHERE name = ?1")
+            .bind("Inbox")
+            .bind(456)
+            .execute(store.pool())
+            .await
+            .unwrap();
+        let last_sync_unix = Some(456);
         assert!(!store.apply_snapshot(input(older, 1)).await.unwrap().applied);
+        assert_eq!(
+            store.list_folders().await.unwrap()[0].last_sync_unix,
+            last_sync_unix
+        );
         assert_eq!(store.list_messages("Inbox", 10).await.unwrap()[0].uid, 2);
     }
 
@@ -1373,6 +1649,7 @@ mod tests {
                 uidvalidity: Some(1),
                 uidnext: Some(7),
                 delta_link: None,
+                last_sync_unix: None,
             })
             .await
             .unwrap();
@@ -1409,6 +1686,7 @@ mod tests {
             })
             .await;
         assert!(result.is_err());
+        assert_eq!(store.list_folders().await.unwrap()[0].last_sync_unix, None);
         assert_eq!(store.folder_uidvalidity("Inbox").await.unwrap(), Some(1));
         let rows = store.list_messages("Inbox", 10).await.unwrap();
         assert_eq!(rows.len(), 1);

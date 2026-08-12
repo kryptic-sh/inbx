@@ -1807,6 +1807,7 @@ async fn cmd_import(
             uidvalidity: Some(0),
             uidnext: None,
             delta_link: None,
+            last_sync_unix: None,
         })
         .await?;
 
@@ -2140,6 +2141,7 @@ async fn cmd_jmap(action: JmapCmd) -> Result<()> {
                     uidvalidity: Some(0),
                     uidnext: None,
                     delta_link: None,
+                    last_sync_unix: None,
                 })
                 .await?;
             let emails = client.fetch_inbox_headers(limit).await?;
@@ -2181,6 +2183,7 @@ async fn cmd_jmap(action: JmapCmd) -> Result<()> {
                     })
                     .await?;
             }
+            store.mark_folder_synced("Inbox").await?;
             println!("Inbox: {} JMAP emails indexed", emails.len());
         }
         JmapCmd::Send { account, session } => {
@@ -2289,6 +2292,7 @@ async fn persist_graph_delta_link(
 ) -> Result<usize> {
     let (indexed, link) = completed_graph_delta_link(link, processing)?;
     store.set_delta_link("Inbox", Some(link)).await?;
+    store.mark_folder_synced("Inbox").await?;
     Ok(indexed)
 }
 
@@ -2329,6 +2333,7 @@ async fn cmd_graph(action: GraphCmd) -> Result<()> {
                     uidvalidity: Some(0),
                     uidnext: None,
                     delta_link: None,
+                    last_sync_unix: None,
                 })
                 .await?;
             // Use the persisted deltaLink when present so we only pull
@@ -3052,6 +3057,7 @@ async fn cmd_sync(
     inbx_sync::run(inbx_sync::Config {
         accounts,
         ipc: ipc_server,
+        local_events: None,
         notifications: notify,
         idle_folder,
         folders,
@@ -3805,6 +3811,7 @@ async fn cmd_fetch(
                 uidvalidity: None,
                 uidnext: None,
                 delta_link: None,
+                last_sync_unix: None,
             })
             .await?;
     }

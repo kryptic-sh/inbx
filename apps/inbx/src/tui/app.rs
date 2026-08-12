@@ -128,10 +128,6 @@ pub(super) struct App {
     /// that `n` / `N` from the main list jumps through results without
     /// retyping the query, and reopening `/` restores the prior session.
     pub(super) last_search: Option<LastSearch>,
-    /// Unix timestamp of the most recent successful manual sync. `None`
-    /// when no sync has run yet this session. Surfaced in the status line
-    /// as a relative age (`12s`, `3m`, `1h`).
-    pub(super) last_sync_unix: Option<i64>,
     /// Active hjkl-picker overlay. `None` when no picker is open.
     pub(super) active_picker: Option<ActivePicker>,
     /// Folder CRUD action-choice overlay (`<Space>F`). `None` when not open.
@@ -187,8 +183,8 @@ pub(super) struct App {
     /// Used by a future status-line indicator (e.g. "synced 3m ago").
     pub(super) last_ipc_heartbeat_unix: Option<i64>,
     /// JoinHandle for the in-process sync task spawned when no daemon is
-    /// detected. `None` when the daemon is running (IPC path) or on Windows.
-    /// Aborted on App drop so the sync loop doesn't outlive the TUI process.
+    /// detected. `None` when the daemon is running (IPC path). Aborted on App
+    /// drop so the sync loop doesn't outlive the TUI process.
     sync_handle: Option<tokio::task::JoinHandle<()>>,
     /// Async grammar loader for tree-sitter highlighting.
     #[cfg(feature = "tree-sitter")]
@@ -309,6 +305,24 @@ pub(super) fn unread_count(rows: &[MessageRow]) -> usize {
         .count()
 }
 
+/// Return the persisted last-sync timestamp for the selected folder.
+pub(super) fn selected_folder_last_sync(
+    folders: &[FolderRow],
+    selected: Option<usize>,
+) -> Option<i64> {
+    selected.and_then(|index| folders.get(index)?.last_sync_unix)
+}
+
+/// Resolve a folder-list selection by preserving its name when possible.
+pub(super) fn resolve_folder_selection(
+    folders: &[FolderRow],
+    selected_name: Option<&str>,
+) -> Option<usize> {
+    selected_name
+        .and_then(|name| folders.iter().position(|folder| folder.name == name))
+        .or_else(|| (!folders.is_empty()).then_some(0))
+}
+
 /// Pure cursor-step helper for n/N navigation. Returns the next index after
 /// stepping `delta` (+1 for `n`, -1 for `N`) with wraparound. Returns `None`
 /// when there are no results.
@@ -402,7 +416,60 @@ fn validate_imap_copy_uid(transport: &Transport, uid: i64) -> Result<u32> {
     u32::try_from(uid).map_err(Into::into)
 }
 
+#[derive(Clone, PartialEq, Eq)]
+struct MessageIdentity {
+    folder: String,
+    uid: i64,
+    uidvalidity: i64,
+}
+
+impl From<&MessageRow> for MessageIdentity {
+    fn from(message: &MessageRow) -> Self {
+        Self {
+            folder: message.folder.clone(),
+            uid: message.uid,
+            uidvalidity: message.uidvalidity,
+        }
+    }
+}
+
+fn resolve_message_selection(
+    selected_folder: Option<&str>,
+    selected_message: Option<&MessageIdentity>,
+    folder: Option<&str>,
+    messages: &[MessageRow],
+) -> Option<usize> {
+    if messages.is_empty() {
+        return None;
+    }
+
+    if selected_folder == folder
+        && let Some(selected_message) = selected_message
+    {
+        return messages
+            .iter()
+            .position(|message| {
+                message.folder == selected_message.folder
+                    && message.uid == selected_message.uid
+                    && message.uidvalidity == selected_message.uidvalidity
+            })
+            .or(Some(0));
+    }
+
+    Some(0)
+}
+
+fn disconnect_requires_local_sync(sync_ipc: &mut Option<()>, has_local_sync: bool) -> bool {
+    *sync_ipc = None;
+    !has_local_sync
+}
+
 impl App {
+    /// Whether the idle event loop should redraw to advance selected-folder age.
+    pub(super) fn needs_sync_age_tick(&self) -> bool {
+        selected_folder_last_sync(&self.folders, self.folder_state.selected()).is_some()
+    }
+
     pub(super) async fn new(account: Account, store: Store) -> Result<Self> {
         let folders = list_selectable_folders(&store).await?;
         let mut folder_state = ListState::default();
@@ -412,10 +479,9 @@ impl App {
         let theme = inbx_config::theme::load_theme().unwrap_or_default();
         let _ = ACTIVE_THEME.set(theme);
         let (task_tx, task_rx) = super::tasks::channel();
-        // Attempt to connect to a running inbx-sync daemon over IPC.
-        // On unix: try with 500 ms timeout; suppress in-process watch if found.
-        // On non-unix (Windows): always skip.
-        #[cfg(unix)]
+        // Attempt to connect to a running inbx-sync daemon over IPC. On targets
+        // without Unix sockets the IPC stub returns NotSupported, then the local
+        // sync fallback below starts normally.
         let (sync_ipc, ipc_rx) = match inbx_ipc::Client::connect().await {
             Ok(mut client) => {
                 tracing::debug!("ipc: connected to inbx-sync daemon");
@@ -427,11 +493,6 @@ impl App {
                 (None, None)
             }
         };
-        #[cfg(not(unix))]
-        let (sync_ipc, ipc_rx): (
-            Option<()>,
-            Option<tokio::sync::mpsc::Receiver<inbx_ipc::Event>>,
-        ) = (None, None);
 
         #[cfg(feature = "tree-sitter")]
         let (grammar_loader, grammar_registry) = {
@@ -469,7 +530,6 @@ impl App {
             contacts: None,
             ical: None,
             last_search: None,
-            last_sync_unix: None,
             active_picker: None,
             folder_crud: None,
             folder_crud_prompt: None,
@@ -516,36 +576,12 @@ impl App {
                         break;
                     }
                 }
-                tracing::warn!("ipc: daemon connection closed");
+                if tx.send(super::tasks::TaskResult::SyncDisconnected).is_ok() {
+                    tracing::warn!("ipc: daemon connection closed");
+                }
             });
         } else {
-            // No daemon detected — spawn sync in-process so the TUI still
-            // receives fresh mail without requiring a separate daemon process.
-            // Notifications are suppressed: the TUI status line already shows
-            // new mail counts. IPC is None: in-process mode has no listeners.
-            // Single-account only: the TUI only knows the active account at
-            // construction time; multi-account in-process is out of scope.
-            #[cfg(unix)]
-            {
-                let acct = app.account.clone();
-                let handle = tokio::spawn(async move {
-                    let cfg = inbx_sync::Config {
-                        accounts: vec![acct],
-                        ipc: None,
-                        notifications: false,
-                        idle_folder: "INBOX".to_string(),
-                        folders: vec![],
-                        fetch_bodies: false,
-                        body_limit: 200,
-                        poll_interval_secs: 300,
-                    };
-                    if let Err(e) = inbx_sync::run(cfg).await {
-                        tracing::warn!(%e, "in-process sync exited with error");
-                    }
-                });
-                app.sync_handle = Some(handle);
-                tracing::debug!("in-process sync spawned");
-            }
+            app.start_local_sync();
         }
 
         app.reload_messages().await?;
@@ -1858,27 +1894,34 @@ impl App {
         }
     }
 
+    pub(super) async fn reload_folders(&mut self) -> Result<()> {
+        let selected = self.current_folder().map(|folder| folder.name.clone());
+        self.folders = list_selectable_folders(&self.store).await?;
+        let index = resolve_folder_selection(&self.folders, selected.as_deref());
+        self.folder_state.select(index);
+        Ok(())
+    }
+
     pub(super) async fn reload_messages(&mut self) -> Result<()> {
         let folder = self.current_folder().map(|f| f.name.clone());
-        let prior = self.msg_state.selected();
-        self.messages = match folder {
+        let selected_folder = folder.clone();
+        let selected_message = self.current_message().map(MessageIdentity::from);
+        self.messages = match folder.as_deref() {
             Some(name) => self
                 .store
-                .list_messages(&name, 200)
+                .list_messages(name, 200)
                 .await?
                 .into_iter()
                 .filter(|m| !m.flags.to_ascii_lowercase().contains("deleted"))
                 .collect(),
             None => Vec::new(),
         };
-        if self.messages.is_empty() {
-            self.msg_state.select(None);
-        } else {
-            // Preserve the previous index when possible so toggling a flag
-            // doesn't fling the cursor back to the top.
-            let next = prior.map(|i| i.min(self.messages.len() - 1)).unwrap_or(0);
-            self.msg_state.select(Some(next));
-        }
+        self.msg_state.select(resolve_message_selection(
+            selected_folder.as_deref(),
+            selected_message.as_ref(),
+            folder.as_deref(),
+            &self.messages,
+        ));
         self.refresh_body();
         self.respawn_watch();
         self.refresh_folder_unread().await;
@@ -2069,6 +2112,55 @@ impl App {
         };
     }
 
+    /// Switch from the daemon to the in-process sync fallback after EOF.
+    pub(super) fn handle_sync_disconnected(&mut self) {
+        if disconnect_requires_local_sync(&mut self.sync_ipc, self.sync_handle.is_some()) {
+            self.start_local_sync();
+        }
+    }
+
+    /// Start the in-process sync fallback unless one is already running.
+    pub(super) fn start_local_sync(&mut self) -> bool {
+        if self.sync_handle.is_some() {
+            return false;
+        }
+
+        // Notifications are suppressed: the TUI status line already shows new
+        // mail counts. Single-account only: the TUI only knows the active account
+        // at construction time; multi-account in-process is out of scope.
+        let (local_events, mut local_rx) = tokio::sync::mpsc::unbounded_channel();
+        let tx = self.task_tx.0.clone();
+        tokio::spawn(async move {
+            while let Some(event) = local_rx.recv().await {
+                if tx
+                    .send(super::tasks::TaskResult::SyncIpcEvent(event))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+        let account = self.account.clone();
+        self.sync_handle = Some(tokio::spawn(async move {
+            let cfg = inbx_sync::Config {
+                accounts: vec![account],
+                ipc: None,
+                local_events: Some(local_events),
+                notifications: false,
+                idle_folder: "INBOX".to_string(),
+                folders: vec![],
+                fetch_bodies: false,
+                body_limit: 200,
+                poll_interval_secs: 300,
+            };
+            if let Err(e) = inbx_sync::run(cfg).await {
+                tracing::warn!(%e, "in-process sync exited with error");
+            }
+        }));
+        tracing::debug!("in-process sync spawned");
+        true
+    }
+
     /// Spawn (or re-spawn) the background watch loop bound to the currently-
     /// selected folder.  No-op if already watching that folder.  Aborts the
     /// previous task before spawning a new one — the old IDLE / EventSource /
@@ -2110,7 +2202,7 @@ async fn do_manual_sync(
     folder_name: String,
 ) -> super::tasks::TaskResult {
     use super::tasks::TaskResult;
-    let result: anyhow::Result<(i64, usize, usize)> = async {
+    let result: anyhow::Result<(usize, usize)> = async {
         let mut provider = inbx_net::connect_provider(&account, Some(&store)).await?;
         let generation = store.reserve_snapshot_generation(&folder_name).await?;
         let snapshot = provider.fetch_headers(&folder_name, None, 500).await?;
@@ -2119,24 +2211,18 @@ async fn do_manual_sync(
         if !applied.applied {
             anyhow::bail!("snapshot superseded before it could be applied");
         }
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
         drop(provider);
-        Ok((now, applied.new_count(), total))
+        Ok((applied.new_count(), total))
     }
     .await;
     match result {
-        Ok((now, new_count, total)) => TaskResult::SyncDone {
-            last_sync_unix: Some(now),
+        Ok((new_count, total)) => TaskResult::SyncDone {
             error: None,
             new_messages: new_count,
             folder_name,
             total_messages: total,
         },
         Err(e) => TaskResult::SyncDone {
-            last_sync_unix: None,
             error: Some(e.to_string()),
             new_messages: 0,
             folder_name,
@@ -2803,6 +2889,50 @@ mod tests {
     use super::*;
 
     #[test]
+    fn ipc_disconnect_clears_daemon_state_and_avoids_duplicate_fallback() {
+        let mut sync_ipc = Some(());
+        assert!(disconnect_requires_local_sync(&mut sync_ipc, false));
+        assert!(sync_ipc.is_none());
+        assert!(!disconnect_requires_local_sync(&mut sync_ipc, true));
+    }
+
+    #[test]
+    fn selected_folder_last_sync_tracks_folder_selection() {
+        let folders = vec![
+            FolderRow {
+                name: "INBOX".into(),
+                delim: None,
+                special_use: None,
+                attrs: None,
+                uidvalidity: None,
+                uidnext: None,
+                delta_link: None,
+                last_sync_unix: Some(990),
+            },
+            FolderRow {
+                name: "Archive".into(),
+                delim: None,
+                special_use: None,
+                attrs: None,
+                uidvalidity: None,
+                uidnext: None,
+                delta_link: None,
+                last_sync_unix: Some(880),
+            },
+        ];
+
+        assert_eq!(selected_folder_last_sync(&folders, Some(0)), Some(990));
+        assert_eq!(selected_folder_last_sync(&folders, Some(1)), Some(880));
+        assert_eq!(resolve_folder_selection(&folders, Some("Archive")), Some(1));
+        assert_eq!(resolve_folder_selection(&folders, Some("Removed")), Some(0));
+    }
+
+    #[test]
+    fn resolve_folder_selection_returns_none_for_no_selectable_folders() {
+        assert_eq!(resolve_folder_selection(&[], Some("INBOX")), None);
+    }
+
+    #[test]
     fn copy_validation_requires_imap_and_valid_uid() {
         assert!(validate_imap_copy_uid(&Transport::Graph, 7).is_err());
         assert!(
@@ -2870,6 +3000,44 @@ mod tests {
             thread_id: None,
             provider_id: None,
         }
+    }
+
+    #[test]
+    fn message_selection_uses_stable_identity() {
+        let selected = fake_msg("INBOX", 20);
+        let rows = vec![
+            fake_msg("INBOX", 30),
+            selected.clone(),
+            fake_msg("INBOX", 10),
+        ];
+        assert_eq!(
+            resolve_message_selection(
+                Some("INBOX"),
+                Some(&MessageIdentity::from(&selected)),
+                Some("INBOX"),
+                &rows,
+            ),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn message_selection_falls_back_when_identity_or_folder_changes() {
+        let selected = fake_msg("INBOX", 20);
+        let rows = vec![fake_msg("INBOX", 30), fake_msg("INBOX", 10)];
+        let identity = MessageIdentity::from(&selected);
+        assert_eq!(
+            resolve_message_selection(Some("INBOX"), Some(&identity), Some("INBOX"), &rows),
+            Some(0)
+        );
+        assert_eq!(
+            resolve_message_selection(Some("INBOX"), Some(&identity), Some("Archive"), &rows),
+            Some(0)
+        );
+        assert_eq!(
+            resolve_message_selection(Some("INBOX"), Some(&identity), Some("INBOX"), &[]),
+            None
+        );
     }
 
     #[test]

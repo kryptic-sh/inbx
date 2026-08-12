@@ -15,10 +15,8 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 /// Result of a background op, posted from the spawned task back to App.
 pub(super) enum TaskResult {
-    /// `manual_sync` finished. Carries the new last_sync_unix and an
-    /// optional error string for the status line.
+    /// `manual_sync` finished. Carries an optional error string for the status line.
     SyncDone {
-        last_sync_unix: Option<i64>,
         error: Option<String>,
         new_messages: usize,
         folder_name: String,
@@ -49,6 +47,8 @@ pub(super) enum TaskResult {
     WatchSignal,
     /// An event arrived from the inbx-sync daemon over the IPC socket.
     SyncIpcEvent(inbx_ipc::Event),
+    /// The IPC daemon connection closed; switch to the in-process fallback.
+    SyncDisconnected,
     /// A folder CRUD operation (create / rename / delete) completed.
     /// Carries the success message or an error string.
     FolderOp(Result<String, String>),
@@ -104,7 +104,6 @@ mod tests {
     async fn channel_round_trip() {
         let (tx, mut rx) = channel();
         tx.0.send(TaskResult::SyncDone {
-            last_sync_unix: Some(1234567890),
             error: None,
             new_messages: 3,
             folder_name: "INBOX".into(),
@@ -114,13 +113,11 @@ mod tests {
         let result = rx.0.recv().await.unwrap();
         match result {
             TaskResult::SyncDone {
-                last_sync_unix,
                 error,
                 new_messages,
                 folder_name,
                 total_messages,
             } => {
-                assert_eq!(last_sync_unix, Some(1234567890));
                 assert!(error.is_none());
                 assert_eq!(new_messages, 3);
                 assert_eq!(folder_name, "INBOX");

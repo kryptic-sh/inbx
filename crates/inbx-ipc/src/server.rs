@@ -1,5 +1,6 @@
 //! Unix-socket broadcast server for the inbx-sync IPC channel.
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tokio::io::AsyncWriteExt as _;
@@ -14,6 +15,7 @@ use crate::{Event, IpcError};
 /// Drop `Server` to close the listener; connected clients see EOF and exit
 /// their pump loop gracefully.
 pub struct Server {
+    socket_path: PathBuf,
     /// Kept alive to hold the bound socket open.
     _listener_task: tokio::task::JoinHandle<()>,
     tx: broadcast::Sender<Event>,
@@ -27,7 +29,12 @@ impl Server {
     /// - Connect fails and the socket file exists → stale file from a prior
     ///   crash; unlink it before binding so `UnixListener::bind` succeeds.
     pub async fn bind() -> Result<Arc<Self>, IpcError> {
-        let path = crate::socket_path();
+        Self::bind_at(crate::socket_path()).await
+    }
+
+    /// Bind the IPC socket at `path` and start the accept loop.
+    pub async fn bind_at(path: impl AsRef<Path>) -> Result<Arc<Self>, IpcError> {
+        let path = path.as_ref().to_owned();
 
         // Stale-socket detection: try to connect with a 250 ms timeout.
         // If the connect succeeds, a live daemon is already running — bail out.
@@ -73,6 +80,19 @@ impl Server {
                         let mut rx = tx_clone.subscribe();
                         tokio::spawn(async move {
                             let (_, mut writer) = tokio::io::split(stream);
+                            let mut hello = match serde_json::to_string(&Event::Hello {
+                                version: env!("CARGO_PKG_VERSION").to_owned(),
+                            }) {
+                                Ok(line) => line,
+                                Err(e) => {
+                                    tracing::warn!(%e, "ipc: serialize hello error");
+                                    return;
+                                }
+                            };
+                            hello.push('\n');
+                            if writer.write_all(hello.as_bytes()).await.is_err() {
+                                return;
+                            }
                             loop {
                                 match rx.recv().await {
                                     Ok(event) => {
@@ -106,6 +126,7 @@ impl Server {
         });
 
         Ok(Arc::new(Self {
+            socket_path: path,
             _listener_task: listener_task,
             tx,
         }))
@@ -124,6 +145,51 @@ impl Drop for Server {
         // Abort the accept loop; connected client tasks exit on their next recv.
         self._listener_task.abort();
         // Best-effort cleanup of the socket file.
-        let _ = std::fs::remove_file(crate::socket_path());
+        let _ = std::fs::remove_file(&self.socket_path);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    use super::*;
+
+    static SOCKET_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    fn test_socket_path() -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "inbx-ipc-test-{}-{}.sock",
+            std::process::id(),
+            SOCKET_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ))
+    }
+
+    #[tokio::test]
+    async fn custom_path_sends_hello_before_broadcasts_and_cleans_up() {
+        let path = test_socket_path();
+        let server = Server::bind_at(&path).await.unwrap();
+        let mut client = crate::Client::connect_to(&path).await.unwrap();
+        let mut events = client.receiver();
+
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(1), events.recv())
+                .await
+                .unwrap(),
+            Some(Event::Hello { version }) if version == env!("CARGO_PKG_VERSION")
+        ));
+
+        server.send(Event::Heartbeat { ts_unix: 42 });
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(1), events.recv())
+                .await
+                .unwrap(),
+            Some(Event::Heartbeat { ts_unix: 42 })
+        ));
+
+        drop(client);
+        drop(server);
+        assert!(!path.exists());
     }
 }

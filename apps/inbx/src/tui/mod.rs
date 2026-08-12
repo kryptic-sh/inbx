@@ -67,9 +67,8 @@ async fn event_loop(term: &mut Term, app: &mut App) -> Result<()> {
     loop {
         term.draw(|f| render::draw(f, app))?;
 
-        // Select between: key events, background task results, and the 120 ms
-        // spinner tick (only active while busy). This ensures redraws happen
-        // even while a long op is in flight.
+        // Select between: key events, background task results, a 120 ms spinner
+        // tick while busy, and a low-frequency selected-folder age tick.
         enum Selected {
             Key(crossterm::event::KeyEvent),
             TaskResult(tasks::TaskResult),
@@ -90,6 +89,9 @@ async fn event_loop(term: &mut Term, app: &mut App) -> Result<()> {
                 Selected::TaskResult(result)
             }
             _ = tokio::time::sleep(Duration::from_millis(120)), if app.busy => {
+                Selected::Tick
+            }
+            _ = tokio::time::sleep(Duration::from_secs(1)), if !app.busy && app.needs_sync_age_tick() => {
                 Selected::Tick
             }
         };
@@ -172,15 +174,14 @@ async fn handle_task_result(app: &mut App, result: tasks::TaskResult) -> Result<
     use tasks::TaskResult;
     match result {
         TaskResult::SyncDone {
-            last_sync_unix,
             error,
             new_messages,
             folder_name,
             total_messages,
         } => {
             app.complete_pending();
-            if let Some(ts) = last_sync_unix {
-                app.last_sync_unix = Some(ts);
+            if error.is_none() {
+                app.reload_folders().await?;
             }
             app.reload_messages().await?;
             app.status = match error {
@@ -283,27 +284,26 @@ async fn handle_task_result(app: &mut App, result: tasks::TaskResult) -> Result<
             // Kick off a manual sync on the current folder, same as `F`.
             app.manual_sync();
         }
+        TaskResult::SyncDisconnected => {
+            app.handle_sync_disconnected();
+        }
         TaskResult::SyncIpcEvent(event) => {
             use inbx_ipc::Event as IpcEvent;
             match event {
                 IpcEvent::FolderUpdated {
                     account,
-                    folder,
+                    folder: _,
                     new_count: _,
                 } => {
                     // Reload only when the event matches the currently-displayed
                     // account + folder so irrelevant account events are ignored.
                     let current_account = app.account.name.clone();
-                    let current_folder = app
-                        .current_folder()
-                        .map(|f| f.name.clone())
-                        .unwrap_or_default();
-                    if account == current_account && folder == current_folder {
+                    // A folder reload can change selection when the selected
+                    // folder disappeared or became unselectable, so always
+                    // reload messages for matching accounts.
+                    if account == current_account {
+                        app.reload_folders().await?;
                         app.reload_messages().await?;
-                    } else if account == current_account {
-                        // Different folder for the same account — refresh badges
-                        // so the unread count next to that folder updates.
-                        app.refresh_folder_unread().await;
                     }
                 }
                 IpcEvent::Heartbeat { ts_unix } => {
@@ -311,7 +311,11 @@ async fn handle_task_result(app: &mut App, result: tasks::TaskResult) -> Result<
                     app.last_ipc_heartbeat_unix = Some(ts_unix);
                 }
                 IpcEvent::Hello { version } => {
-                    tracing::debug!(%version, "ipc: daemon hello");
+                    // A readiness event received after subscription closes the
+                    // initial load/subscription race.
+                    tracing::debug!(%version, "ipc: daemon ready");
+                    app.reload_folders().await?;
+                    app.reload_messages().await?;
                 }
             }
         }
