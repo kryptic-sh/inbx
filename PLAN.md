@@ -52,7 +52,7 @@ to inbx scope: multi-pane app embedding hjkl + needing config + helper procs.
 
 ```
 inbx/
-├── Cargo.toml                 # workspace, resolver = "2", workspace.package
+├── Cargo.toml                 # workspace, resolver = "3", workspace.package
 ├── rust-toolchain.toml        # channel "1.95.0" (match buffr)
 ├── rustfmt.toml               # edition 2021, max_width 100
 ├── deny.toml                  # license/advisory gate (match hjkl)
