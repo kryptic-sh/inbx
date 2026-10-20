@@ -82,6 +82,18 @@ patch bumps.
 
 ### Security
 
+- Bumped `ammonia` to 4.2.4 (RUSTSEC-2021-0157, RUSTSEC-2021-0158,
+  RUSTSEC-2026-0373) — the HTML sanitizer used by `inbx-render` now escapes
+  `url("")` in CSS style attributes, matches the CSS `url` function
+  case-insensitively, and strips the SVG `animateMotion`, `animateTransform` and
+  `animateColor` tags it let through.
+- Bumped `rustls` to 0.23.46 (RUSTSEC-2026-0285, RUSTSEC-2026-0346,
+  RUSTSEC-2026-0348, RUSTSEC-2026-0349) — the TLS stack under IMAP/SMTP
+  (`inbx-net`, `lettre`) and the HTTPS clients no longer accepts TLS 1.3
+  handshake messages across encryption levels, prints TLS secrets in `Debug`
+  output, allocates up to 1 GiB decompressing a certificate before
+  authentication, or lets a ServerHello downgrade later connections to classical
+  key exchange.
 - Bumped `ammonia` to 4.1.4 (RUSTSEC-2026-0213) — the HTML sanitizer used by
   `inbx-render` no longer passes through XSS via SVG `animate` / `set` animation
   tags.

@@ -11,6 +11,13 @@ ignore = [
   "RUSTSEC-2023-0071",
   # `paste` is unmaintained but has no known vulnerabilities. Transitive.
   "RUSTSEC-2024-0436",
+  # `zvariant`, `zbus_names` and `zvariant_derive` are unmaintained as
+  # standalone crates: zbus 6 merged them in. No known vulnerabilities.
+  # Transitive via notify-rust, whose latest release still needs zbus 5;
+  # drop these once it moves to zbus 6.
+  "RUSTSEC-2026-0370",
+  "RUSTSEC-2026-0371",
+  "RUSTSEC-2026-0372",
 ]
 
 [licenses]
