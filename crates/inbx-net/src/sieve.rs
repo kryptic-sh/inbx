@@ -386,7 +386,7 @@ mod tests {
 
     #[test]
     fn response_limits_are_nonzero_and_literal_bound_is_parseable() {
-        assert!(MAX_RESPONSE_LINE_BYTES > 0);
+        const { assert!(MAX_RESPONSE_LINE_BYTES > 0) };
         assert_eq!(
             parse_literal_len(&format!("{{{MAX_LITERAL_BYTES}+}}")),
             Some(MAX_LITERAL_BYTES)

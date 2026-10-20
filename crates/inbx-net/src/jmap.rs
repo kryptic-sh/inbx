@@ -1893,7 +1893,8 @@ mod tests {
         tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
             let mut request = [0_u8; 1024];
-            stream.read(&mut request).await.unwrap();
+            let read = stream.read(&mut request).await.unwrap();
+            assert!(read > 0, "client sent no request");
             stream
                 .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 7\r\n\r\nmissing")
                 .await
