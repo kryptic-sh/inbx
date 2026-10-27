@@ -2688,7 +2688,6 @@ dependencies = [
  "hjkl-bonsai",
  "hjkl-clipboard",
  "hjkl-editor-tui",
- "hjkl-engine",
  "hjkl-engine-tui",
  "hjkl-form",
  "hjkl-picker",
