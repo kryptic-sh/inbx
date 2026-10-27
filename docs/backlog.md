@@ -20,3 +20,13 @@
   `notify-rust` (used by `inbx` and `inbx-sync` for desktop notifications),
   whose latest release, 4.18.2, still requires `zbus ^5`. Once a `notify-rust`
   release moves to zbus 6, update it and drop the three ignores.
+
+## Coverage gaps
+
+- **No test types into the composer through the TUI.** `handle_composer_key`
+  (`apps/inbx/src/tui/keys.rs`) passes body keys to `hjkl_vim_tui::handle_key`,
+  but nothing builds an `App` in tests (`App::new` needs an account and a
+  store), so replacing that call with a no-op left every test green (checked
+  2026-10-27). `body_editor_runs_vim_keys` in `inbx-composer` covers the editor
+  itself: building it without the vim discipline makes
+  `hjkl_vim::dispatch_input` panic.

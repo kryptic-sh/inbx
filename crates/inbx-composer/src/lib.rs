@@ -12,8 +12,8 @@ pub mod identity;
 pub mod templates;
 
 use hjkl_clipboard::{Clipboard, MimeType as ClipMime, Selection};
-use hjkl_editor::buffer::Buffer as EditorBuffer;
-use hjkl_editor::runtime::{DefaultHost, Editor, KeybindingMode, Options};
+use hjkl_editor::buffer::View;
+use hjkl_editor::runtime::{DefaultHost, Editor, Options};
 use hjkl_form::{Field as FormField, FieldMeta, Form, TextFieldEditor};
 use mail_builder::MessageBuilder;
 use mail_parser::{HeaderValue, MessageParser};
@@ -741,16 +741,14 @@ fn editor_text(ed: &Editor) -> String {
     s.trim_end_matches('\n').to_string()
 }
 
-/// Construct an `Editor` configured with the vim keybinding mode and the
-/// pre-0.1.0 `shiftwidth = 2` default the composer relies on.
+/// Construct an `Editor` with vim keys and the pre-0.1.0 `shiftwidth = 2`
+/// default the composer relies on.
 fn new_vim_editor() -> Editor {
     let opts = Options {
         shiftwidth: 2,
         ..Options::default()
     };
-    let mut ed = Editor::new(EditorBuffer::new(), DefaultHost::new(), opts);
-    ed.keybinding_mode = KeybindingMode::Vim;
-    ed
+    hjkl_vim::vim_editor(View::new(), DefaultHost::new(), opts)
 }
 
 /// Autocrypt 1.1 §4 mutual-mode heuristic: if the original sender has a stored
@@ -877,6 +875,23 @@ mod tests {
             email: "alice@example.com".into(),
             signature: Some("--\nAlice".into()),
         }
+    }
+
+    #[test]
+    fn body_editor_runs_vim_keys() {
+        use hjkl_editor::runtime::{Input, Key};
+        let mut c = Composer::new_blank(id());
+        for key in [Key::Char('i'), Key::Char('h'), Key::Char('i')] {
+            hjkl_vim::dispatch_input(
+                &mut c.body,
+                Input {
+                    key,
+                    ..Input::default()
+                },
+            );
+        }
+        assert_eq!(c.body.coarse_mode(), hjkl_engine::CoarseMode::Insert);
+        assert!(c.body.content().starts_with("hi"));
     }
 
     #[test]

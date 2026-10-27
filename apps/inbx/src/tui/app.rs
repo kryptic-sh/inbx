@@ -2036,7 +2036,7 @@ impl App {
         let tx = self.task_tx.0.clone();
 
         tokio::task::spawn_blocking(move || {
-            let handle = async_loader.load_async(lang.to_owned(), spec.clone(), meta.clone());
+            let handle = async_loader.load_async(lang, spec.clone(), meta.clone());
             // recv_blocking returns the PathBuf to the compiled .so.
             // Then Grammar::load through the inner loader finds it in user tier.
             let result = handle

@@ -32,6 +32,14 @@ patch bumps.
 
 ### Changed
 
+- Updated the `hjkl-*` crates to 0.43.4 together (`hjkl-engine`, `hjkl-editor`,
+  `hjkl-form` and `hjkl-picker` from 0.3, `hjkl-bonsai` from 0.5,
+  `hjkl-clipboard` from 0.5, `hjkl-config` and `hjkl-splash` from 0.2) and
+  `ratatui` to 0.30, which brings hjkl's vim-compatibility fixes to the composer
+  body and the form fields. `hjkl-ratatui` is replaced by its successor
+  `hjkl-editor-tui`; keys reach the composer through `hjkl-vim-tui` and the
+  pickers through `hjkl-picker-tui`, and `hjkl-engine-tui`'s
+  `crossterm_to_input` replaces the TUI's own copy of that conversion.
 - Logging: default `EnvFilter` is now
   `info,html5ever=error,markup5ever=error,ammonia=warn,html2text=warn`.
   `html5ever` / `markup5ever` logged a WARN per element on every ammonia

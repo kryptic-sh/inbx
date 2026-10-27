@@ -1,5 +1,5 @@
+use hjkl_editor_tui::spinner;
 use hjkl_form::{Field as FormField, FormMode};
-use hjkl_ratatui::spinner;
 use inbx_composer::{Composer, Field as ComposerField};
 use inbx_config::theme::{Rgb, Theme};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};

@@ -1,6 +1,6 @@
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use hjkl_engine::{Input as EngineInput, Key as EngineKey};
+use hjkl_engine_tui::crossterm_to_input;
 use hjkl_form::FormMode;
 use hjkl_picker::PickerEvent;
 use inbx_composer::FocusedEditor;
@@ -153,48 +153,14 @@ pub(super) async fn handle_composer_key(app: &mut App, key: KeyEvent) -> Result<
     if let Some(c) = app.composer.as_mut() {
         match c.focused_editor() {
             FocusedEditor::Body(ed) => {
-                ed.handle_key(key);
+                hjkl_vim_tui::handle_key(ed, key);
             }
             FocusedEditor::Header(f) => {
-                f.handle_input(crossterm_key_to_engine_input(key));
+                f.handle_input(crossterm_to_input(key));
             }
         }
     }
     Ok(false)
-}
-
-/// Convert a crossterm `KeyEvent` to an `hjkl_engine::Input`.
-/// Mirrors the `From<KeyEvent> for Input` impl in hjkl-engine (crossterm feature).
-///
-/// # TODO
-/// `hjkl_ratatui::crossterm_bridge::crossterm_key_event_to_input` returns
-/// `hjkl_engine::PlannedInput` (the SPEC variant), while `hjkl_form` and
-/// `hjkl_editor` currently consume `hjkl_engine::Input` (the legacy runtime
-/// variant). No `From<PlannedInput> for Input` conversion exists in
-/// `hjkl-engine 0.3.3`. Replace this bespoke helper with the bridge function
-/// once `Input` and `PlannedInput` unify upstream.
-fn crossterm_key_to_engine_input(key: KeyEvent) -> EngineInput {
-    let k = match key.code {
-        KeyCode::Char(c) => EngineKey::Char(c),
-        KeyCode::Backspace => EngineKey::Backspace,
-        KeyCode::Delete => EngineKey::Delete,
-        KeyCode::Enter => EngineKey::Enter,
-        KeyCode::Left => EngineKey::Left,
-        KeyCode::Right => EngineKey::Right,
-        KeyCode::Up => EngineKey::Up,
-        KeyCode::Down => EngineKey::Down,
-        KeyCode::Home => EngineKey::Home,
-        KeyCode::End => EngineKey::End,
-        KeyCode::Tab => EngineKey::Tab,
-        KeyCode::Esc => EngineKey::Esc,
-        _ => EngineKey::Null,
-    };
-    EngineInput {
-        key: k,
-        ctrl: key.modifiers.contains(KeyModifiers::CONTROL),
-        alt: key.modifiers.contains(KeyModifiers::ALT),
-        shift: key.modifiers.contains(KeyModifiers::SHIFT),
-    }
 }
 
 pub(super) async fn handle_outbox_key(app: &mut App, key: KeyEvent) -> Result<()> {
@@ -544,7 +510,7 @@ pub(super) async fn handle_wizard_key(app: &mut App, key: KeyEvent) -> Result<()
     };
 
     let prev_focus = wizard.form.focused();
-    wizard.form.handle_input(crossterm_key_to_engine_input(key));
+    wizard.form.handle_input(crossterm_to_input(key));
     let new_focus = wizard.form.focused();
 
     // Email-blur autoconfig hook.
@@ -577,12 +543,12 @@ pub(super) async fn handle_active_picker_key(app: &mut App, key: KeyEvent) -> Re
     };
 
     let event = match &mut picker_state {
-        ActivePicker::Folder(p, _) => p.handle_key(key),
-        ActivePicker::Account(p, _) => p.handle_key(key),
-        ActivePicker::Message(p, _) => p.handle_key(key),
-        ActivePicker::Attachment(p, _, _) => p.handle_key(key),
-        ActivePicker::Sieve(p, _) => p.handle_key(key),
-        ActivePicker::Template(p, _) => p.handle_key(key),
+        ActivePicker::Folder(p, _) => hjkl_picker_tui::handle_key(p, key),
+        ActivePicker::Account(p, _) => hjkl_picker_tui::handle_key(p, key),
+        ActivePicker::Message(p, _) => hjkl_picker_tui::handle_key(p, key),
+        ActivePicker::Attachment(p, _, _) => hjkl_picker_tui::handle_key(p, key),
+        ActivePicker::Sieve(p, _) => hjkl_picker_tui::handle_key(p, key),
+        ActivePicker::Template(p, _) => hjkl_picker_tui::handle_key(p, key),
     };
 
     match event {
@@ -817,7 +783,7 @@ pub(super) async fn handle_sieve_wizard_key(app: &mut App, key: KeyEvent) -> Res
     let Some(wizard) = app.active_sieve_wizard.as_mut() else {
         return Ok(());
     };
-    wizard.form.handle_input(crossterm_key_to_engine_input(key));
+    wizard.form.handle_input(crossterm_to_input(key));
 
     // Update status with focused field name.
     let label = wizard.focused_label().to_string();
