@@ -14,6 +14,13 @@
   cannot be published to crates.io. Once a `pgp` release includes it, bump
   `pgp`, fix its API changes and drop the ignore.
 
+- **`rand` stays on 0.8 until `pgp` moves.** `inbx-pgp` hands a
+  `rand::thread_rng()` to `pgp`'s key builder (`inbx_managed.rs`), which wants a
+  `rand_core` 0.6 `CryptoRng`. Dependabot's rand 0.9 bump (inbx#44) fails clippy
+  and tests on exactly that (checked 2026-10-27), and both the resolved `pgp`
+  0.19.0 and the latest 0.21.0 still depend on `rand` 0.8. Bump `rand` together
+  with the `pgp` release that leaves 0.8, likely the one carrying rpgp/rpgp#573.
+
 - **`deny.toml` ignores RUSTSEC-2026-0370, -0371 and -0372 for now.** They flag
   `zvariant`, `zbus_names` and `zvariant_derive` as unmaintained, because zbus 6
   merged them in; none is a vulnerability. inbx gets them only through
