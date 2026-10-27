@@ -18,6 +18,13 @@ ignore = [
   "RUSTSEC-2026-0370",
   "RUSTSEC-2026-0371",
   "RUSTSEC-2026-0372",
+  # `crypto-bigint` 0.5 has secret-dependent branches in operations meant
+  # to be constant-time; only 0.7.6+ is fixed. `pgp`/rpgp pulls 0.5 through
+  # `elliptic-curve` 0.13 (k256/p256/p384/p521) and `cx448`, and its latest
+  # release (0.21.0) is still on them. rpgp/rpgp#573 moves it to 0.7 but
+  # waits on RustCrypto pre-releases (x448, rsa). Same local-timing threat
+  # model as RUSTSEC-2023-0071. Drop this once a `pgp` release ships #573.
+  "RUSTSEC-2026-0387",
 ]
 
 [licenses]
