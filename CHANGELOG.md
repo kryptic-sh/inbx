@@ -82,6 +82,12 @@ patch bumps.
 
 ### Security
 
+- Bumped `rustls-webpki` 0.103.15 → 0.103.16 for RUSTSEC-2026-0382 and
+  `webpki-roots` 1.0.7 → 1.0.11 for RUSTSEC-2026-0381, which stop trusting
+  certificate paths through distrusted emSign intermediates and drop the emSign
+  ECC Root CA - G3 (the root store under `reqwest`'s TLS), and `tokio` 1.52.1 →
+  1.54.1 for RUSTSEC-2026-0386 (`AsyncFd::new` and related constructors could
+  violate I/O safety).
 - Bumped `ammonia` to 4.2.4 (RUSTSEC-2021-0157, RUSTSEC-2021-0158,
   RUSTSEC-2026-0373) — the HTML sanitizer used by `inbx-render` now escapes
   `url("")` in CSS style attributes, matches the CSS `url` function
