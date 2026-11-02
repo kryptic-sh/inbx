@@ -120,7 +120,7 @@ hjkl-picker = "0.43"
 hjkl-picker-tui = "0.43"
 hjkl-editor-tui = "0.43"
 
-mail-builder = "0.4"
+mail-builder = "2.0"
 
 [profile.release]
 lto = "thin"
