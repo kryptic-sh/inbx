@@ -109,7 +109,7 @@ which = "8"
 # hjkl deps use caret-minor pins; consumers track minor bumps from crates.io.
 hjkl-splash = "0.43"
 hjkl-bonsai = "0.43"
-hjkl-editor = "0.43"
+hjkl-editor = "0.44"
 hjkl-engine = "0.43"
 hjkl-vim = "0.43"
 hjkl-vim-tui = "0.43"
