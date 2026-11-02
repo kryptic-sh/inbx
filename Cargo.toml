@@ -118,7 +118,7 @@ hjkl-clipboard = "0.43"
 hjkl-form = "0.43"
 hjkl-picker = "0.43"
 hjkl-picker-tui = "0.43"
-hjkl-editor-tui = "0.43"
+hjkl-editor-tui = "0.44"
 
 mail-builder = "0.4"
 
