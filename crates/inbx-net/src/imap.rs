@@ -2,7 +2,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_imap::Authenticator;
 use async_imap::Session;
-use async_imap::imap_proto::types::NameAttribute;
+use async_imap::imap_proto::NameAttribute;
 use futures_util::{TryStream, TryStreamExt};
 use inbx_config::{Account, AuthMethod, TlsMode};
 
@@ -650,7 +650,7 @@ fn imap_flag_token(flag: async_imap::types::Flag<'_>) -> String {
     }
 }
 
-fn format_addrs(addrs: &[async_imap::imap_proto::types::Address<'_>]) -> String {
+fn format_addrs(addrs: &[async_imap::imap_proto::Address<'_>]) -> String {
     addrs
         .iter()
         .map(|a| {

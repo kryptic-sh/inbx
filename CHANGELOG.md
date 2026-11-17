@@ -78,6 +78,10 @@ patch bumps.
 - Network hardening: propagate IMAP stream item errors, bound JMAP EventSource
   records and ManageSieve responses, and require valid bounded ManageSieve
   post-literal delimiters.
+- IMAP: updated `async-imap` from 0.10 to 0.12 (with `imap-proto` 0.17), so
+  login no longer fails on a server greeting or `LOGIN` reply that contains
+  non-ASCII text such as an en dash, or when an unrelated tagged `NO` response
+  arrives during `LOGIN`.
 - Sync: index downloaded bodies before recording their Maildir paths so failed
   indexing cannot leave rows marked as completely fetched.
 - Docs: `README.md`, `CONTRIBUTING.md`, `SECURITY.md`, `PLAN.md`, and
