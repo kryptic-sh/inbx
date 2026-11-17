@@ -94,6 +94,13 @@ patch bumps.
 
 ### Security
 
+- Bumped `ammonia` to 4.2.5 (RUSTSEC-2026-0533) — the HTML sanitizer used by
+  `inbx-render` no longer lets mutation XSS through by combining embedded SVG
+  and MathML.
+- Bumped `mail-builder` from 0.4 to 2.0, which drops ASCII control characters
+  from an address when it writes it, so a CR LF in an address can no longer
+  inject header fields into an outgoing message, and keeps bare CR or LF in
+  display names, subjects and parameter values out of the output.
 - Bumped `rustls-webpki` 0.103.15 → 0.103.16 for RUSTSEC-2026-0382 and
   `webpki-roots` 1.0.7 → 1.0.11 for RUSTSEC-2026-0381, which stop trusting
   certificate paths through distrusted emSign intermediates and drop the emSign
