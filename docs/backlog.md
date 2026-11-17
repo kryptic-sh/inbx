@@ -18,8 +18,57 @@
   `rand::thread_rng()` to `pgp`'s key builder (`inbx_managed.rs`), which wants a
   `rand_core` 0.6 `CryptoRng`. Dependabot's rand 0.9 bump (inbx#44) fails clippy
   and tests on exactly that (checked 2026-10-27), and both the resolved `pgp`
-  0.19.0 and the latest 0.21.0 still depend on `rand` 0.8. Bump `rand` together
-  with the `pgp` release that leaves 0.8, likely the one carrying rpgp/rpgp#573.
+  0.19.0 and the latest 0.21.1 (checked 2026-11-17) still depend on `rand` 0.8.
+  Bump `rand` together with the `pgp` release that leaves 0.8, likely the one
+  carrying rpgp/rpgp#573.
+
+- **The `hjkl-*` crates stay on 0.43 until inbx decides how to read keys.** From
+  0.46.0 hjkl's TUI crates take ttyr's `KeyEvent` instead of crossterm's:
+  `hjkl_engine_tui::crossterm_to_input` became `ttyr_to_input(&KeyEvent)`, and
+  `hjkl_vim_tui::handle_key` and `hjkl_picker_tui::handle_key` take a ttyr
+  `&KeyEvent`. inbx reads every terminal event through crossterm's `EventStream`
+  (`apps/inbx/src/tui/mod.rs`, `splash.rs`), so with only the 0.46 bump
+  `apps/inbx/src/tui/keys.rs` fails to build: the header-field and wizard
+  `crossterm_to_input` calls, the composer body's `hjkl_vim_tui::handle_key` and
+  the six `hjkl_picker_tui::handle_key` arms in `handle_active_picker_key`
+  (checked 2026-11-17). hjkl re-exports only `ttyr::event::KeyEvent` (from
+  `hjkl-engine-tui`), not `KeyCode` or `KeyModifiers`, and ttyr's `KeyEvent` is
+  `#[non_exhaustive]` and built with `KeyEvent::new(KeyCode, KeyModifiers)`, so
+  the re-export alone cannot turn a crossterm key into a ttyr one. Two ways
+  forward, the owner's call:
+  - **Add `ttyr` 0.3 as a direct dependency of `apps/inbx`.** Either convert at
+    the boundary (a crossterm-to-ttyr `KeyEvent` function in `keys.rs` feeding
+    the three hjkl entry points), or move the TUI's input and drawing to ttyr as
+    hjkl and tmxr (commit 00294bf) did, dropping `crossterm` and enabling
+    ratatui's backend some other way. The second replaces `EventStream`, raw
+    mode and mouse capture in `mod.rs` and `splash.rs`, and `binds.rs`'s key
+    types.
+  - **No new dependency: skip hjkl's `-tui` key adapters.** Each is a thin
+    wrapper over a toolkit-agnostic API that inbx already reaches: convert
+    crossterm keys to `hjkl_engine::Input` in inbx (0.43's `crossterm_to_input`,
+    about twenty lines), call `hjkl_vim::dispatch_input` plus
+    `Editor::emit_cursor_shape_if_changed` for the body, and route picker keys
+    to `Picker::cancel`, `accept`, `select_next`, `select_prev`,
+    `handle_source_key` and `handle_query_input` as
+    `hjkl_picker_tui::handle_key` does. `apps/inbx` then lists `hjkl-vim` and
+    `hjkl-engine` (already workspace dependencies) and may drop `hjkl-vim-tui`,
+    `hjkl-picker-tui` and `hjkl-engine-tui`. The cost is a copy of hjkl's picker
+    key routing that can drift from upstream. Dependabot's per-crate 0.44 PRs
+    (inbx#82, #83, #84, #86) cannot go green on their own either: the hjkl
+    crates move in lockstep, so each leaves two hjkl versions in the graph. Move
+    every `hjkl-*` entry in one change
+    (`cargo upgrade --incompatible -p hjkl-<crate>@0.46` for each), then close
+    those PRs.
+
+- **`deny.toml` ignores RUSTSEC-2026-0459 and RUSTSEC-2026-0441 for now.** -0459
+  is the SQLite page-cache bug (CVE-2026-119375) in the SQLite that
+  `libsqlite3-sys` bundles; only `libsqlite3-sys` 0.39 fixes it, and both the
+  resolved `sqlx` 0.8.6 and the latest `sqlx` 0.9.0 require `libsqlite3-sys`
+  below 0.38 (checked 2026-11-17). It needs a crafted database plus `-wal` pair,
+  and inbx opens only its own files under its data directory. Once an `sqlx`
+  release allows 0.39, update it (0.9 is a breaking upgrade) and drop the
+  ignore. -0441 marks `pin-utils` unmaintained, no vulnerability; it comes only
+  through `async-imap`, whose latest release, 0.12.0, still depends on it.
 
 - **`deny.toml` ignores RUSTSEC-2026-0370, -0371 and -0372 for now.** They flag
   `zvariant`, `zbus_names` and `zvariant_derive` as unmaintained, because zbus 6
