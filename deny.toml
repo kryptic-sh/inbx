@@ -9,8 +9,6 @@ ignore = [
   # Threat model: attacker must observe local decryption timing; not
   # exploitable over a network for an end-user email client.
   "RUSTSEC-2023-0071",
-  # `paste` is unmaintained but has no known vulnerabilities. Transitive.
-  "RUSTSEC-2024-0436",
   # `zvariant`, `zbus_names` and `zvariant_derive` are unmaintained as
   # standalone crates: zbus 6 merged them in. No known vulnerabilities.
   # Transitive via notify-rust, whose latest release still needs zbus 5;
@@ -25,6 +23,16 @@ ignore = [
   # waits on RustCrypto pre-releases (x448, rsa). Same local-timing threat
   # model as RUSTSEC-2023-0071. Drop this once a `pgp` release ships #573.
   "RUSTSEC-2026-0387",
+  # SQLite before 3.54.0 can return uninitialised page-cache memory when a
+  # database is opened with a crafted `-wal` file of another page size.
+  # sqlx bundles SQLite through `libsqlite3-sys`, fixed only in 0.39, and
+  # even sqlx 0.9 caps it below 0.38. inbx opens only the databases it
+  # creates in its own data directory, so an attacker needs local write
+  # access there first. Drop this once an sqlx release allows 0.39.
+  "RUSTSEC-2026-0459",
+  # `pin-utils` is unmaintained, with no known vulnerability. Transitive
+  # via `async-imap`, whose latest release (0.12) still depends on it.
+  "RUSTSEC-2026-0441",
 ]
 
 [licenses]
