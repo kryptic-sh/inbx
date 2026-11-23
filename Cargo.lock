@@ -2263,9 +2263,9 @@ dependencies = [
 
 [[package]]
 name = "hjkl-splash"
-version = "0.43.4"
+version = "0.46.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4fe77d8bf57b4d8972b7addf22daf9c4d64b384bd4d2f81230a72f7daf167539"
+checksum = "a201495154bfcf47a007b4437de209614ab4bc57c9e4e13c9f5fa2a90166db4c"
 
 [[package]]
 name = "hjkl-theme"
