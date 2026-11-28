@@ -1,5 +1,15 @@
 # Backlog
 
+## CI
+
+- **Add a cargo-audit job to CI.** (2026-11-28.) The owner wants every
+  kryptic-sh repo we own to run both cargo-deny and cargo-audit in CI. This one
+  runs cargo-deny (`.github/workflows/ci.yml`) but has no cargo-audit job. lyr's
+  `.github/workflows/ci.yml` is the model: an `audit` job on `ubuntu-latest`
+  that installs `cargo-audit` with `taiki-e/install-action@v2` and runs plain
+  `cargo audit`, which fails only on vulnerabilities (unmaintained and yanked
+  crates are warnings).
+
 ## Dependencies
 
 - **`deny.toml` ignores RUSTSEC-2026-0387 for now.** `crypto-bigint` 0.5 could
